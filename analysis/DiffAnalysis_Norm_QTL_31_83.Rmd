@@ -14,6 +14,8 @@ output:
     code_folding: hide
     keep_md: true #enable to save all plots in a folder when knitting to html 
 fontsize: 11pt
+params:
+  metabolite: "ATP"   # default; overridden by scripts/run_all_metabolites.R
 editor_options: 
   markdown: 
     wrap: 72
@@ -73,30 +75,37 @@ knitr::opts_chunk$set(echo = TRUE)
 Sys.setenv(LANG="en")
 
 # ==========================================================================
-# COMPARISON REGISTRY  (TEMPLATE - adapt on each project branch)
-# `main` is a neutral template. Each project branch (yeast_QTL, Ecoli_PCM,
-# yeast_aSYN) replaces this block and `complex_portal_file` with its own.
-# Each entry: tsv (Spectronaut report), ref (baseline), treat (test condition).
-# Inputs are read from data/raw/<comparison_id>/<tsv>; outputs go to
-# output/<comparison_id>/.
+# Ecoli_PCM - metabolite comparisons (reference is ALWAYS ctrl)
+# Each metabolite has its own Spectronaut .tsv (that metabolite vs its own ctrl),
+# so each binary comparison still has separate raw data.
+# To run ONE comparison: set `metabolite` below (or render with params$metabolite).
+# To run ALL metabolites in one pass WITHOUT re-knitting by hand, run:
+#     source(here::here("scripts", "run_all_metabolites.R"))
+# which renders this report once per metabolite. A later cross-metabolite chunk
+# can then load the per-metabolite outputs from output/PCM_ctrl_vs_<metabolite>/.
 # ==========================================================================
-comparisons <- list(
-  EXAMPLE_treat_vs_ctrl = list(tsv = "TODO_example.tsv", ref = "ctrl", treat = "treatment")
+metabolite_files <- list(
+  # TODO: one entry per metabolite -> its Spectronaut .tsv (metabolite vs ctrl).
+  ATP = "TODO_ctrl_vs_ATP.tsv",
+  PEP = "TODO_ctrl_vs_PEP.tsv"
+  # , ADP = "TODO_ctrl_vs_ADP.tsv", GTP = "...", NAD = "...", ...  (add all 8)
 )
+ref_condition_name <- "ctrl"   # reference condition for every comparison
 
-## ---- choose the comparison to run ----
-comparison_id <- "EXAMPLE_treat_vs_ctrl"
+# `metabolite` may be supplied by a parameterized render (params$metabolite);
+# otherwise the default below is used (interactive / single knit).
+metabolite <- if (exists("params") && !is.null(params$metabolite)) params$metabolite else "ATP"
 
-## ---- everything below is derived from the choice (no need to edit) ----
-stopifnot(comparison_id %in% names(comparisons))
-.cmp                 <- comparisons[[comparison_id]]
+## ---- everything below is derived (no need to edit) ----
+stopifnot(metabolite %in% names(metabolite_files))
+comparison_id        <- paste0("PCM_ctrl_vs_", metabolite)
 experiment_name      <- comparison_id
-data_location        <- .cmp$tsv
-condition1           <- .cmp$ref      # reference / baseline
-condition2           <- .cmp$treat    # treatment / test
-calibration_location <- "TODO_calibration_table.xlsx"
-complex_portal_file  <- "TODO_Complex_portal_<taxid>.tsv"   # e.g. 559292 (yeast), 83333 (E. coli)
-file_name_pattern    <- c("TODO_filename_prefix_")
+data_location        <- metabolite_files[[metabolite]]
+condition1           <- ref_condition_name   # ctrl (reference)
+condition2           <- metabolite            # treatment / test
+calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all comparisons
+complex_portal_file  <- "Complex_portal_83333.tsv"              # E. coli K-12 (taxid 83333)
+file_name_pattern    <- c("TODO_PCM_filename_prefix_")
 
 # colours: reference vs treatment
 color_scheme_treatment <- setNames(c("#caf0f0", "#f6acca"), c(condition1, condition2))
