@@ -26,10 +26,20 @@ _Last updated: 2026-06-19._
 - ✅ **External scripts received** (2026-06-19): the 5 still-needed "elution-aware"
   modules are in `R/elution_aware/` with a README. The other ~15 scripts the old
   `.Rmd` referenced are no longer needed and were left out.
-- ⏳ **Clean main-pipeline split** (`analysis/DiffAnalysis_Norm_QTL_31_83.Rmd`)
-  and **tidied experiments file** (`analysis/experiments.Rmd`): **in progress**.
-  The unmodified original is preserved as
-  `analysis/ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd`.
+- ✅ **Clean main-pipeline split done**:
+  - `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd` — the cleaned QTL `strain31` vs
+    `strain83` pipeline (data import → QC → traces → align/impute/normalize →
+    filter → assembly/complex differential → save). Fixes are sourced from
+    `R/ccprofiler_fixes.R`; packages use `library()` only; paths use `here()`
+    (inputs from `data/raw/`, outputs to `output/`); the `protein_traces_list`
+    gap is flagged inline (section 6). Won't knit end-to-end until you fill that
+    gap and add the data — everything else is structurally clean.
+  - `analysis/experiments.Rmd` — everything exploratory/other-project/one-off,
+    grouped (A trypsin-ratio norm; B elution-aware; C PrInCE/Gaussian/one-off),
+    `eval=FALSE` by default (reference, not run), with notes on which external
+    scripts were retained. Obvious `, ,` syntax bug fixed.
+  - The unmodified original is preserved as
+    `analysis/ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd`.
 
 ### Git status note (2026-06-19)
 - Pushing now works; all work is on branch **`claude/clever-ride-3ab2zt`**.
