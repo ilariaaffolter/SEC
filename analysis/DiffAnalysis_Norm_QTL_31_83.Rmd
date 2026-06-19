@@ -72,33 +72,46 @@ knitr::opts_chunk$set(echo = TRUE)
 ## language settings
 Sys.setenv(LANG="en")
 
-experiment_name <- "QTL_31_83"
+# ==========================================================================
+# COMPARISON REGISTRY  (yeast_QTL)
+# One entry per pairwise comparison. Set `comparison_id` to the one you want to
+# run; the input file, conditions, colours and output folder are all derived
+# from it. RM and BY are parental strains; 31 and 83 are mutant strains.
+#   tsv   : Spectronaut report (.tsv) for this comparison
+#   ref   : reference / baseline condition (fold-change denominator)
+#   treat : treatment / test condition (numerator)
+# TODO (per comparison): replace the placeholder .tsv filenames; confirm each
+#   ref/treat direction and that these names match the sample names in that .tsv.
+# ==========================================================================
+comparisons <- list(
+  QTL_31_BY = list(tsv = "TODO_QTL_31_BY.tsv", ref = "BY", treat = "strain31"),
+  QTL_31_RM = list(tsv = "TODO_QTL_31_RM.tsv", ref = "RM", treat = "strain31"),
+  QTL_83_BY = list(tsv = "TODO_QTL_83_BY.tsv", ref = "BY", treat = "strain83"),
+  QTL_83_RM = list(tsv = "TODO_QTL_83_RM.tsv", ref = "RM", treat = "strain83"),
+  QTL_RM_BY = list(tsv = "TODO_QTL_RM_BY.tsv", ref = "BY", treat = "RM")
+)
 
-data_location <- "20260414_QTL_83_31_IAA_Report_Angela Report (Normal).tsv"
+## ---- choose the comparison to run ----
+comparison_id <- "QTL_31_BY"
 
+## ---- everything below is derived from the choice (no need to edit) ----
+stopifnot(comparison_id %in% names(comparisons))
+.cmp                 <- comparisons[[comparison_id]]
+experiment_name      <- comparison_id
+data_location        <- .cmp$tsv
+condition1           <- .cmp$ref      # reference / baseline
+condition2           <- .cmp$treat    # treatment / test
+calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all comparisons
+complex_portal_file  <- "Complex_portal_559292.tsv"             # S. cerevisiae (taxid 559292)
 
-calibration_location <- "IA003_01_SEC_calibration_table.xlsx"
+# Sample-name prefix used to parse fraction info. If different comparisons come
+# from runs with different prefixes, add a `pattern` field per registry entry
+# and set this from `.cmp$pattern`.
+file_name_pattern <- c("260408_AS1_ailaria_QTL_")
 
-# Complex Portal reference table (organism-specific). PER-BRANCH SETTING:
-#   yeast_QTL / yeast_aSYN -> "Complex_portal_559292.tsv"  (S. cerevisiae)
-#   Ecoli_PCM              -> "Complex_portal_83333.tsv"   (E. coli K-12)
-complex_portal_file <- "Complex_portal_559292.tsv"
-
-
-file_name_pattern <-c("260408_AS1_ailaria_QTL_") 
-
-
-condition1 <- "strain31"
-
-condition2 <- "strain83"
-
-# condition3 <- ""
-# 
-# condition4 <- ""
-
-color_scheme_treatment <- c("strain31" ="#caf0f0", "strain83" ="#f6acca") #, "EDTA_5mM"= "#f077a7", "EDTA_10mM" = "#FF5580" )
-
-condition_levels <- c(condition1, condition2) #, condition3, condition4)
+# colours: reference vs treatment
+color_scheme_treatment <- setNames(c("#caf0f0", "#f6acca"), c(condition1, condition2))
+condition_levels       <- c(condition1, condition2)
 
 ```
 
@@ -154,32 +167,24 @@ proteins_to_keep <- c()
 
 ```{r}
 
-# Define folder names
-output_files_location <- here::here("output", "output_files")
-RData_for_further_plotting_and_analysis_location <- here::here("output", "RData_for_further_plotting_and_analysis")
-DistinctAssembly_hits_location <- here::here("output", "DistinctAssembly_hits")
-DistinctAssembly_hits_nolog2FC_location <- here::here("output", "DistinctAssembly_hits_nolog2FC")
+# All outputs for this comparison go under output/<comparison_id>/
+out_dir <- here::here("output", comparison_id)
 
-# Create Folders if they don't exist
-if(!file.exists(output_files_location)) {
-  dir.create(output_files_location)
-  cat("Created Folder: ", output_files_location)
-}
+output_files_location <- file.path(out_dir, "output_files")
+RData_for_further_plotting_and_analysis_location <- file.path(out_dir, "RData_for_further_plotting_and_analysis")
+DistinctAssembly_hits_location <- file.path(out_dir, "DistinctAssembly_hits")
+DistinctAssembly_hits_nolog2FC_location <- file.path(out_dir, "DistinctAssembly_hits_nolog2FC")
 
-if(!file.exists(RData_for_further_plotting_and_analysis_location)) {
-  dir.create(RData_for_further_plotting_and_analysis_location)
-  cat("Created Folder: ", RData_for_further_plotting_and_analysis_location)
+# Create the comparison's output folders (incl. figures/tables/rdata) if missing
+for (d in c(out_dir,
+            file.path(out_dir, c("figures", "tables", "rdata")),
+            output_files_location,
+            RData_for_further_plotting_and_analysis_location,
+            DistinctAssembly_hits_location,
+            DistinctAssembly_hits_nolog2FC_location)) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
 }
-
-if(!file.exists(DistinctAssembly_hits_location)) {
-  dir.create(DistinctAssembly_hits_location)
-  cat("Created Folder: ", DistinctAssembly_hits_location)
-}
-
-if(!file.exists(DistinctAssembly_hits_nolog2FC_location)) {
-  dir.create(DistinctAssembly_hits_nolog2FC_location)
-  cat("Created Folder: ", DistinctAssembly_hits_nolog2FC_location)
-}
+cat("Outputs for this run go to: ", out_dir)
 
 ```
 
@@ -297,11 +302,11 @@ source(here::here("R", "ccprofiler_fixes.R"))
 ```{r, eval=TRUE}
 
 
-if(file.exists(here("output", "rdata", "data_input.RData"))){
-  load(here("output", "rdata", "data_input.RData"))
+if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
+  load(file.path(out_dir, "rdata", "data_input.RData"))
 } else {
-  data <- read_protti(here("data", "raw", data_location))
-  save(data, file = here("output", "rdata", "data_input.RData"))
+  data <- read_protti(here("data", "raw", comparison_id, data_location))
+  save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
 }
 
 head(data, n = 10)
@@ -1892,7 +1897,7 @@ for (id in top_shifted) print(plot_ccf_protein(id))
 # Save the cross-correlation table
 write.table(
   ccf_results,
-  file      = here::here("output", "tables", "crosscorrelation_results.txt"),
+  file      = file.path(out_dir, "tables", "crosscorrelation_results.txt"),
   sep       = "\t", quote = FALSE, row.names = FALSE
 )
 
