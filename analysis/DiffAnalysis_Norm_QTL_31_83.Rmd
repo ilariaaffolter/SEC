@@ -73,26 +73,19 @@ knitr::opts_chunk$set(echo = TRUE)
 Sys.setenv(LANG="en")
 
 # ==========================================================================
-# COMPARISON REGISTRY  (yeast_QTL)
-# One entry per pairwise comparison. Set `comparison_id` to the one you want to
-# run; the input file, conditions, colours and output folder are all derived
-# from it. RM and BY are parental strains; 31 and 83 are mutant strains.
-#   tsv   : Spectronaut report (.tsv) for this comparison
-#   ref   : reference / baseline condition (fold-change denominator)
-#   treat : treatment / test condition (numerator)
-# TODO (per comparison): replace the placeholder .tsv filenames; confirm each
-#   ref/treat direction and that these names match the sample names in that .tsv.
+# COMPARISON REGISTRY  (TEMPLATE - adapt on each project branch)
+# `main` is a neutral template. Each project branch (yeast_QTL, Ecoli_PCM,
+# yeast_aSYN) replaces this block and `complex_portal_file` with its own.
+# Each entry: tsv (Spectronaut report), ref (baseline), treat (test condition).
+# Inputs are read from data/raw/<comparison_id>/<tsv>; outputs go to
+# output/<comparison_id>/.
 # ==========================================================================
 comparisons <- list(
-  QTL_31_BY = list(tsv = "TODO_QTL_31_BY.tsv", ref = "BY", treat = "strain31"),
-  QTL_31_RM = list(tsv = "TODO_QTL_31_RM.tsv", ref = "RM", treat = "strain31"),
-  QTL_83_BY = list(tsv = "TODO_QTL_83_BY.tsv", ref = "BY", treat = "strain83"),
-  QTL_83_RM = list(tsv = "TODO_QTL_83_RM.tsv", ref = "RM", treat = "strain83"),
-  QTL_RM_BY = list(tsv = "TODO_QTL_RM_BY.tsv", ref = "BY", treat = "RM")
+  EXAMPLE_treat_vs_ctrl = list(tsv = "TODO_example.tsv", ref = "ctrl", treat = "treatment")
 )
 
 ## ---- choose the comparison to run ----
-comparison_id <- "QTL_31_BY"
+comparison_id <- "EXAMPLE_treat_vs_ctrl"
 
 ## ---- everything below is derived from the choice (no need to edit) ----
 stopifnot(comparison_id %in% names(comparisons))
@@ -101,13 +94,9 @@ experiment_name      <- comparison_id
 data_location        <- .cmp$tsv
 condition1           <- .cmp$ref      # reference / baseline
 condition2           <- .cmp$treat    # treatment / test
-calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all comparisons
-complex_portal_file  <- "Complex_portal_559292.tsv"             # S. cerevisiae (taxid 559292)
-
-# Sample-name prefix used to parse fraction info. If different comparisons come
-# from runs with different prefixes, add a `pattern` field per registry entry
-# and set this from `.cmp$pattern`.
-file_name_pattern <- c("260408_AS1_ailaria_QTL_")
+calibration_location <- "TODO_calibration_table.xlsx"
+complex_portal_file  <- "TODO_Complex_portal_<taxid>.tsv"   # e.g. 559292 (yeast), 83333 (E. coli)
+file_name_pattern    <- c("TODO_filename_prefix_")
 
 # colours: reference vs treatment
 color_scheme_treatment <- setNames(c("#caf0f0", "#f6acca"), c(condition1, condition2))
