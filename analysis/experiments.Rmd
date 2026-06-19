@@ -1,0 +1,1792 @@
+---
+title: "QTL 31 vs 83 - experiments & exploratory analyses"
+author: "Ilaria"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r experiments-setup, include=TRUE}
+# NOTE: chunks here are NOT evaluated by default. This file is a curated, tidied
+# *reference* of exploratory / alternative / other-project analyses kept from the
+# original .Rmd. Many chunks were written for a different dataset (conditions
+# ctrl / aSYN / PEP / GFP / intox) and/or depend on external scripts that were
+# NOT retained. Set eval=TRUE on a chunk (or globally) only after adapting it.
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+# About this file
+
+This file collects everything that is **not** part of the cleaned QTL
+`strain31` vs `strain83` pipeline (which lives in
+`DiffAnalysis_Norm_QTL_31_83.Rmd`). Nothing has been deleted - it has been moved
+here, grouped, and annotated, per the handover plan.
+
+**External scripts.** Only 5 helper scripts were retained, in
+`R/elution_aware/` (see its README). Source them with, e.g.,
+`source(here::here("R", "elution_aware", "CFMS_Elution_Pipeline_P3_Height_PROTEIN_LEVEL_FIXED.R"))`.
+Any other `source("./ELUTION_AWARE/...R")` / `source("CFMS_*.R")` call below
+refers to a script that was **not retained** (no longer needed) - those chunks
+are kept for reference only.
+
+**Datasets / paths.** Several chunks use conditions and absolute Windows paths
+from other projects; treat them as templates, not runnable as-is.
+
+---
+
+# A. Alternative normalization (trypsin-ratio)
+
+Moved from the main pipeline's normalization section. This is an alternative to
+the normalization used there; the main pipeline does not use it.
+
+### - Calculate the ratios between trypsin peptides for each fraction
+```{r}
+trypsin_data <- as.data.frame(integrateTraceIntensities(subset(pepTraces_raw, trace_subset_ids="CON_P00761", trace_subset_type="protein_id"))$traces[,1:32])
+
+trypsin_peptide_averages <- rowSums(trypsin_data)/32
+
+trypsin_ratios <- trypsin_data
+
+for(i in 1:nrow(trypsin_ratios)){
+  trypsin_ratios[i,] <- trypsin_data[i,]/trypsin_peptide_averages[i]
+}
+
+trypsin_ratios[trypsin_ratios==0] <- NA
+
+median_trypsin_ratio <- double(length=ncol(trypsin_ratios))
+for(j in 1:ncol(trypsin_ratios)){
+  median_trypsin_ratio[j] <- median(trypsin_ratios[sort(trypsin_peptide_averages, index.return=T, decreasing=T)$ix[1:5], j], na.rm=T)
+}
+pepTraces_trypsinNormalized <- pepTracesImp
+for(experiment_id in names(pepTraces_trypsinNormalized)){
+  for(i in 1:32){
+    i_str <- as.character(i)
+    pepTraces_trypsinNormalized[[experiment_id]]$traces[,(i_str):=pepTraces_trypsinNormalized[[experiment_id]]$traces[,i:i]/median_trypsin_ratio[i]]
+  }
+}
+```
+
+
+
+
+---
+
+# B. Elution-aware / protein-level exploratory analyses
+
+Originally section 6 of the `.Rmd`. These explore protein- and peptide-level
+quantification, proteoform detection, and pipeline comparisons. Retained helper
+scripts are in `R/elution_aware/`; chunks that `source()` other `CFMS_*`/
+`ELUTION_AWARE/*` files refer to scripts that were not kept.
+
+
+# 6. Protein quantification
+
+# 6.-1. ELUTION AWARE ANALYSIS (maxLFQ and peptide level)
+```{r}
+# Source all modules
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_Protein.R")
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_Peptide.R")
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_Comparison.R")
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_QC.R")
+
+# Pipeline 3: Protein-level
+results_p3 <- run_protein_elution_pipeline(
+  traces_list = pepTracesList_filtered,
+  design_matrix = NULL,
+  ref_condition = "ctrl",
+  treat_condition = "aSYN",
+  output_dir = "./ELUTION_AWARE/pipeline3_results",
+  gaussian_params = list(
+    max_gaussians = 3, #default5
+    min_R_squared = 0.3, # default 0.5
+    min_consecutive = 5,
+    min_iterations = 5, # increasable to 5 for more precise results (slower though)
+    max_iterations = 10, # default 50 (very slow!)
+    filter_gaussians_center = TRUE,
+    filter_gaussians_height = 0.15,
+    filter_gaussians_variance_min = 0.5,
+    filter_gaussians_variance_max = 50,
+    filter_gaussians_min_dist = 1
+  )
+)
+
+# Pipeline 4: Peptide-level (both approaches)
+results_p4 <- run_peptide_elution_pipeline(
+  traces_list = pepTracesList_filtered,
+  design_matrix = NULL,
+  ref_condition = "ctrl",
+  treat_condition = "aSYN",
+  output_dir = "./ELUTION_AWARE/pipeline4_results",
+  gaussian_params = list(
+    max_gaussians = 3,
+    min_R_squared = 0.3,
+    min_consecutive = 5,
+    min_iterations = 5,
+    max_iterations = 10,
+    filter_gaussians_center = TRUE,
+    filter_gaussians_height = 0.15,
+    filter_gaussians_variance_min = 0.5,
+    filter_gaussians_variance_max = 50,
+    filter_gaussians_min_dist = 1
+  )
+)
+
+
+# Results in: pipeline4_results/adaptive_aggregation/
+#             pipeline4_results/proteoform_aware/
+
+# run QC
+qc_p3 <- run_comprehensive_qc(results_p3, pipeline_type = "protein",
+                               output_dir = "./ELUTION_AWARE/pipeline3_qc")
+qc_p4 <- run_comprehensive_qc(results_p4, pipeline_type = "peptide",
+                               output_dir = "./ELUTION_AWARE/pipeline4_qc")
+
+# run Comparison
+comparison <- compare_elution_pipelines(
+  pipeline3_results = results_p3,
+  pipeline4_results = results_p4,
+  pval_threshold = 0.1,
+  output_dir = "./ELUTION_AWARE/pipeline_comparison"
+)
+
+##########################################
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_P3_Height_UPGRADED_CUSTOMIDS_ONLY_NAimpute.R") # 4 main steps so it is closer to the gaussian piepline of Aljaz
+
+results_height <- run_p3_height_pipeline(
+  traces_list = pepTracesList_filtered,
+  ref_condition = "ctrl",
+  treat_condition = "aSYN",
+  
+  # Proteoform clustering (SAME as P3)
+  distance_threshold = 1.0,
+  min_peptides = 3,
+  min_peptides_maxlfq = 2,
+  
+  # Peak detection (NEW!)
+  peak_params = list(
+    min_height_fraction = 0.10,
+    min_prominence = 0.15,
+    min_distance = 3
+  ),
+   quant_window = 5,                       # Quantification cap: integration window is adaptive now, but never wider than ±5 fractions.
+                                          # Think of this as a safety cap against integrating too broadly.
+
+  # --- Peak overlap / ownership handling (NEW) ---
+  peak_ownership = "soft",                # "hard" or "soft"
+                                          # hard: midpoint boundaries between peak centers (fast; deterministic; no mixing within boundaries)
+                                          # soft: proxy shapes → per-fraction ownership; fractions kept only if ownership ≥ min_peak_fraction
+  min_peak_fraction = 0.5,                # Only used when peak_ownership="soft".
+                                          # 0.5 = keep fractions where this peak contributes at least half (like your Gaussian logic).
+                                          # Raise (0.6–0.8) for stricter de-mixing; lower (0.3–0.4) if peaks overlap heavily.
+
+  # --- Peptide support QC in the peak region (NEW) ---
+  min_npep = 5,                           # Minimum number of peptides that show signal (>0) in the final included peak fractions.
+                                          # Increase to be stricter; decrease if you have low-coverage proteins.
+  min_weighted_corr = 0.2,                # Minimum intensity-weighted peptide correlation within the peak region.
+                                          # Helps drop “peaks” driven by inconsistent peptides/noise.
+                                          # Typical: 0.2 mild, 0.4 moderate, 0.6 strict.
+
+  # --- Peak matching across conditions (shift-aware) ---
+  position_tolerance = 3,                 # When quantifying a reference peak in a sample, search ±3 fractions around the reference center
+                                          # to find the local max (shift handling).
+                                          # Larger = tolerates shifts but risks matching the wrong nearby peak.
+                                          # Smaller = safer matching but can miss shifted peaks.
+
+  detect_new_peaks = TRUE,                # If TRUE, also find peaks present in treatment that are NOT near any ctrl reference peak.
+                                          # NEW peaks are detected per treatment replicate, then clustered across treatment replicates only
+                                          # (stable IDs), then quantified in all samples.
+
+  min_width_estimate = 2,                 # Width QC: minimum estimated halfwidth (FWHM-ish) for a detected peak.
+                                          # 1 = basically no filtering (flag only)
+                                          # 2 = mild filtering (drops razor-thin spikes)
+                                          # 3 = stricter QC (recommended if you see lots of spurious single-fraction peaks)
+
+  
+  n_trace_plots = 20,  # Number of significant proteoforms to plot
+  custom_ids = c("P06611_A", "P06611_B","P06611_C", "P37028_A", "P06609_A", "P0A6F5_A", "P0A7E5_A", "P0A8G0_A"), #BtuD, BtuF, BtuC (Entabolon shift) and GroEL (sticky contaminant), and CTP synthase and UvrABC (positives controls for ATP dataset)
+
+  return_peak_support_tables = TRUE,       # NEW: writes/returns peak support summaries (e.g., 2/3 replicates detected).
+ 
+  
+  output_dir = "p3_height_results_NAimpute"
+)
+
+
+################PROTEIN LEVEL NO CLUSTERING##############
+source("./ELUTION_AWARE/CFMS_Elution_Pipeline_P3_Height_PROTEIN_LEVEL_FIXED.R")
+
+# MaxLFQ (default) - more accurate, normalizes across samples
+results_median <- run_protein_level_pipeline(
+  traces_list = pepTracesList_filtered_label, # or _light or _heavy, (use filtered with SibCorr&CO)
+  ref_condition = "GFP",
+  treat_condition = "intox",
+  aggregation_method = "median", # or "maxlfq", "median", "sum", "top3", "top5", "top10"
+  pvalue_adjustment = "qvalue",
+  n_permutations = 0,        # 100-1000 (explöoratory: 100, ~10 min running; publication: 1000, ~1h running. with n=3 does not work!)
+  adaptive_window = TRUE,      # ← Enable adaptive (FALSE, fixed "quant_window=5", means +/- 5 fractions around peak center)
+  width_multiplier = 1.5,      # ← 1.5 × FWHM (Full Width at Half Maximum)
+  custom_ids = c("Q04781", "Q05468", "Q12532", "P25694", "P53044", "P33755", "Q04311", "P37840", "P42212"), # ribosome quality control complex and associated proteins and aSYn and GFP at the end.
+  output_dir = "./ELUTION_AWARE/protein_results_median_10h"
+)
+# Source the plotting script
+source("./ELUTION_AWARE/plot_protein_traces.R")
+# 1. Custom proteins
+plot_protein_traces(results_median, protein_ids = c("P42212","P37840",
+#                                                         "P10591", "P15108", "P15992", "P25294", "P29311", "P38903", "P04840", "P07251", "P23287", "P25296", "P31109", "P05030", "P35180", "P07170", "Q04432", "P16474", "P36108", "P01123", "P07560", "Q99260", "Q12697"), # claude AI aSYN interactors
+"P31109", "P33328", "P32867", "P39926", "P40357", "P20606", "P15303", "P40482", "	
+P01123", "Q04491", "P38968", "P40335", "P38759", "P34110", "P49334", "P07251", "P00830","P22141", "P30656", "P23724", "P30657", "P23639", "P38624", "P23638", "P21242", "P40303", "P40302", "P43588", "P38886", "Q06103", "P38764", "P33297", "P40327", "P40016", "Q04062", "P32565", "P33298", "P33299", "Q12250", "Q01939", "Q08723","P06787", "P53968", "P29311", "P34730", "P01123", "P43588"),  # complex disturbance by aSYN claudeAI                 
+ output_dir = "./ELUTION_AWARE/protein_results_median_10h/costum_plots/claudeAI_complexes_disturbed")
+
+# 2. Significant proteins
+plot_significant_proteins(results, max_plots = 30)
+
+# 3. High fold-change (|log2FC| > 2)
+plot_high_fc_proteins(results, fc_threshold = 2, max_plots = 30)
+
+# 4. All interesting proteins (significant + high FC)
+plot_interesting_proteins(
+  results,
+  pval_threshold = 0.05,
+  fc_threshold_sig = 1,
+  fc_threshold_high = 2,
+  max_plots = 50
+)
+
+# 5. Top 20 by p-value
+plot_top_proteins(results_top10median, criterion = "pvalue", n = 20, output_dir = "./ELUTION_AWARE/protein_results_top10median_10h/plots_top_by_p-val")
+
+
+
+##########proteoform traces plotting###############
+source("./ELUTION_AWARE/plot_proteoform_peptide_traces.R")
+
+# Plot the best-clustered proteoforms
+# quality_metrics <- plot_best_proteoform_peptides(
+#   traces_list = pepTracesList_filtered,
+#   pipeline_results = results_height,
+#   n_top = 10,                                    # Top 10 best-clustered
+#   custom_proteoforms = c("P06611_A", "P0A6F5_A", "P0A6T5_A", "	P0A8X2_A"), # Optional: also plot these
+#   output_dir = "peptide_trace_plots",
+#   file_format = "both"                           # PDF and PNG
+# )
+
+# Option A: Best clustering quality (sibling peptide correlation)
+plot_by_correlation(pepTracesList_filtered, results_height, n_top = 10)
+
+# Option B: Most significant p-value
+plot_by_pvalue(pepTracesList_filtered, results_height, n_top = 10)
+
+# Option C: Largest fold change
+plot_by_foldchange(pepTracesList_filtered, results_height, n_top = 10)
+
+# Option D: Custom selection
+plot_custom(pepTracesList_filtered, results, 
+            custom_ids = c("P75966", "P33634", "P0AFK4", "P0A9X9", "P09323"),
+             output_dir = "./ELUTION_AWARE/peptide_trace_plots_median")
+
+
+# 4. Explore the quality metrics
+head(quality_metrics)
+high_quality <- quality_metrics %>% filter(mean_sib_corr > 0.8)
+
+#DIAGNOSTIC for protein aggregation method
+source("./ELUTION_AWARE/diagnose_aggregation.R")
+diagnose_aggregation_sparsity(
+  traces_list = pepTracesList_filtered_label,
+  protein_map = results_median$protein_map,
+  proteins    = results_median$proteins,
+  custom_ids  = c("Q04781", "Q05468", "Q12532", "P25694", "P53044",
+                   "P33755", "Q04311", "P37840", "P42212")
+)
+
+
+
+```
+
+
+
+```{r}
+
+#' ## Quantify on protein level
+# MODIFIED CODE with maxLFQ:
+# Your existing code up to Phase 4...
+# pepTracesList_filtered is ready
+
+# Load the hybrid module
+source("CFMS_Hybrid_Pipeline_Module.R")
+source("CFMS_Pipeline_Integration.R")
+
+# Run the complete integrated analysis
+results <- run_integrated_analysis(
+  pepTracesList_filtered = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_conditions = c("aSYN"),
+  output_dir = "hybrid_analysis"
+)
+
+# Access results
+maxlfq_data <- results$hybrid$maxlfq
+proteoform_info <- results$hybrid$piqed
+differential <- results$hybrid$differential_combined
+predicted_complexes <- results$complexes$complexes$assignments
+
+# Get significant hits (with proteoform info)
+significant <- get_significant_hits(differential, padj_threshold = 0.05)
+
+
+# Source the module (after running hybrid pipeline)
+source("CFMS_Comparison_Module.R")
+
+# Run the comparison
+comparison <- compare_maxlfq_vs_proteoform(
+  combined_results = results$hybrid$differential_combined,
+  piqed_results = results$hybrid$piqed,
+  concordance_threshold = 0.5,
+  output_dir = "comparison_output",
+  save_plots = TRUE
+)
+
+
+# Access results
+comparison$summary_stats        # Summary statistics
+comparison$hidden_hits          # Proteins significant ONLY in proteoform analysis
+comparison$discordant_proteins  # All discordant proteins
+comparison$recommendations      # Which method to use for each protein
+
+# Create final "best" results table
+final_results <- create_recommended_results(
+  results$hybrid$differential_combined,
+  comparison
+)
+      
+```
+# 6a. visualize best candidates and PIQED first analysis v2
+
+```{r}
+source("CFMS_PIQED_First_Pipeline.R")
+
+# Visualize top candidates from your current analysis
+top_viz <- visualize_top_candidates(
+  combined_results = results$hybrid$differential_combined,
+  n_top = 50,
+  raw_pval_threshold = 0.05,
+  output_dir = "top_candidates_viz"
+)
+
+# See summary
+top_viz$summary
+
+# See top candidates table
+head(top_viz$top_candidates, 20)
+
+########## Run the NEW pipeline with PIQED first, MaxLFQ on consistent peptides only###############
+results_v2 <- run_piqed_first_pipeline(
+  traces_list = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_conditions = c("aSYN"),
+  distance_threshold = 1.0,
+  min_peptides_clustering = 3,
+  use_ibmt = TRUE,
+  output_dir = "piqed_first_results"
+)
+
+# Compare results
+results_v2$differential_combined
+
+# Old results
+old_n_sig <- sum(results$hybrid$differential_combined$pBHadj_aSYN < 0.05, na.rm = TRUE)
+old_min_p <- min(results$hybrid$differential_combined$pBHadj_aSYN, na.rm = TRUE)
+
+# New results
+new_n_sig <- sum(results_v2$differential_combined$pBHadj_aSYN < 0.05, na.rm = TRUE)
+new_min_p <- min(results_v2$differential_combined$pBHadj_aSYN, na.rm = TRUE)
+
+message(paste("OLD: Significant proteins:", old_n_sig, "| Min adj.p:", old_min_p))
+message(paste("NEW: Significant proteins:", new_n_sig, "| Min adj.p:", new_min_p))
+
+# 1. Visualize PIQED-first results (same function, new data)
+top_viz_v2 <- visualize_top_candidates(
+  combined_results = results_v2$differential_combined,
+  n_top = 50,
+  raw_pval_threshold = 0.05,
+  output_dir = "top_candidates_piqed_first"
+)
+
+# 2. Compare OLD vs PIQED-first pipelines (NEW FUNCTION!)
+comparison <- compare_old_vs_piqed_first(
+  old_results = results$hybrid$differential_combined,
+  new_results = results_v2$differential_combined,
+  output_dir = "pipeline_comparison"
+)
+
+# 3. View the comparison summary
+comparison$old_summary
+comparison$new_summary
+
+# 4. See which proteins improved the most
+head(comparison$matched_proteins[order(new_pval)], 20)
+
+###### Check improvement specifically for flagged proteins
+# Check this output:
+comparison$old_summary
+comparison$new_summary
+
+flagged_comparison <- comparison$matched_proteins[is_flagged == TRUE]
+cat("Flagged proteins - P-value improved:", sum(flagged_comparison$pval_improved, na.rm=TRUE), 
+    "out of", nrow(flagged_comparison), "\n")
+
+
+####################hybrid pipeline
+# Source the new module
+source("CFMS_Hybrid_Best_Pipeline.R")
+
+# Run the hybrid best-of-both-worlds pipeline
+results_hybrid <- run_hybrid_best_pipeline(
+  traces_list = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_conditions = c("aSYN"),
+  distance_threshold = 1.0,
+  min_peptides_clustering = 3,
+  use_ibmt = TRUE,
+  output_dir = "hybrid_best_results"
+)
+
+# Visualize results
+top_viz_hybrid <- visualize_top_candidates(
+  combined_results = results_hybrid$differential_combined,
+  n_top = 50,
+  output_dir = "top_candidates_hybrid"
+)
+
+```
+
+# 6b. fix BH p-value adjustment
+```{r}
+# ============================================================
+# QUICK FIX: Recalculate BH correction on MAIN analysis only
+# ============================================================
+
+# Get main analysis results only (one per protein)
+main_only <- results_hybrid$differential_combined[analysis_type == "Hybrid_main"]
+
+# Recalculate BH correction on main analysis only
+main_only[, pBHadj_aSYN := p.adjust(pval_aSYN, method = "BH")]
+
+# Check the improvement
+cat("=== CORRECTED STATISTICS ===\n")
+cat("Total proteins (main analysis):", nrow(main_only), "\n")
+cat("Adj.p < 0.05:", sum(main_only$pBHadj_aSYN < 0.05, na.rm = TRUE), "\n")
+cat("Adj.p < 0.10:", sum(main_only$pBHadj_aSYN < 0.10, na.rm = TRUE), "\n")
+cat("Raw p < 0.05:", sum(main_only$pval_aSYN < 0.05, na.rm = TRUE), "\n")
+cat("Min adj.p:", min(main_only$pBHadj_aSYN, na.rm = TRUE), "\n")
+
+# Check for p=1 problem
+cat("\n=== DIAGNOSTIC ===\n")
+cat("Proteins with p-value = 1.0:", sum(main_only$pval_aSYN == 1, na.rm = TRUE), "\n")
+cat("Proteins with p-value = NA:", sum(is.na(main_only$pval_aSYN)), "\n")
+
+# Visualize corrected distribution
+hist(main_only$pBHadj_aSYN, breaks = 50, 
+     main = "CORRECTED: Adjusted P-value Distribution",
+     xlab = "Adjusted P-value (BH on main analysis only)")
+abline(v = 0.05, col = "red", lty = 2)
+
+# How many proteins have p-value = 1?
+pval_1_proteins <- main_only[pval_aSYN == 1]
+cat("Proteins with p=1:", nrow(pval_1_proteins), "\n")
+
+# What do they look like?
+head(pval_1_proteins[, .(protein_id, pval_aSYN, log2FC_aSYN, n_peptides_total, is_flagged)])
+
+# Check if they have 0 variance
+# This often happens when all replicates have the same value
+
+
+# Check RAW p-value distribution (this is more informative)
+hist(main_only$pval_aSYN, breaks = 50, 
+     main = "RAW P-value Distribution", 
+     xlab = "Raw P-value")
+abline(v = 0.05, col = "red", lty = 2)
+
+# Count adjusted p-values = 1
+cat("Adjusted p = 1.0:", sum(main_only$pBHadj_aSYN >= 0.99, na.rm = TRUE), "\n")
+cat("Adjusted p < 1.0:", sum(main_only$pBHadj_aSYN < 0.99, na.rm = TRUE), "\n")
+
+```
+
+# 6c. peptide level analysis ALL peptides
+```{r}
+# Source the module
+source("CFMS_Peptide_Level_Analysis.R")
+
+# Run peptide-level analysis (like PIQED)
+results_peptide <- run_peptide_level_analysis(
+  traces_list = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_conditions = c("aSYN"),
+  min_valid_samples = 4,
+  use_ibmt = TRUE,
+  output_dir = "peptide_level_results"
+)
+
+# Compare all FOUR pipelines
+comparison_all <- compare_all_four_pipelines(
+  old_results = results$hybrid$differential_combined,
+  piqed_first_results = results_v2$differential_combined,
+  hybrid_results = results_hybrid$differential_combined,
+  peptide_results = results_peptide,
+  output_dir = "four_pipeline_comparison"
+)
+```
+
+
+# 6d. RAW p-value distribution comparisons
+```{r}
+# ============================================================
+# RAW P-VALUE DISTRIBUTION COMPARISON: ALL THREE PIPELINES
+# ============================================================
+
+library(ggplot2)
+library(data.table)
+
+# --- Extract MAIN analysis results from each pipeline ---
+
+# OLD pipeline (MaxLFQ-first)
+old_main <- results$hybrid$differential_combined[analysis_type == "MaxLFQ_main"]
+old_pvals <- data.table(
+  pval = old_main$pval_aSYN,
+  pipeline = "1. OLD (MaxLFQ-first)"
+)
+
+# PIQED-first pipeline
+# Check what analysis_type is called in your results_v2
+piqed_main <- results_v2$differential_combined[grepl("MaxLFQ|main", analysis_type, ignore.case = TRUE)]
+# If that doesn't work, try:
+# piqed_main <- results_v2$differential_combined[grepl("_A$", proteoform_id)]
+piqed_pvals <- data.table(
+  pval = piqed_main$pval_aSYN,
+  pipeline = "2. PIQED-first"
+)
+
+# HYBRID pipeline
+hybrid_main <- results_hybrid$differential_combined[analysis_type == "Hybrid_main"]
+hybrid_pvals <- data.table(
+  pval = hybrid_main$pval_aSYN,
+  pipeline = "3. HYBRID"
+)
+
+# Combine all
+all_pvals <- rbind(old_pvals, piqed_pvals, hybrid_pvals)
+
+# --- Print Summary Statistics ---
+cat("\n============================================================\n")
+cat("         RAW P-VALUE COMPARISON: ALL THREE PIPELINES        \n")
+cat("============================================================\n\n")
+
+summary_stats <- all_pvals[, .(
+  n_proteins = .N,
+  n_raw_p01 = sum(pval < 0.01, na.rm = TRUE),
+  n_raw_p05 = sum(pval < 0.05, na.rm = TRUE),
+  min_pval = min(pval, na.rm = TRUE),
+  median_pval = median(pval, na.rm = TRUE),
+  mean_pval = mean(pval, na.rm = TRUE)
+), by = pipeline]
+
+print(summary_stats)
+
+# --- Plot 1: Overlaid Histograms ---
+p1 <- ggplot(all_pvals, aes(x = pval, fill = pipeline)) +
+  geom_histogram(bins = 50, alpha = 0.5, position = "identity") +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_fill_manual(values = c("1. OLD (MaxLFQ-first)" = "steelblue", 
+                                "2. PIQED-first" = "coral",
+                                "3. HYBRID" = "forestgreen")) +
+  labs(
+    title = "Raw P-value Distribution Comparison",
+    subtitle = "Overlaid histograms | Red line = p = 0.05",
+    x = "Raw P-value",
+    y = "Count",
+    fill = "Pipeline"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p1)
+
+# --- Plot 2: Faceted Histograms (easier to see) ---
+p2 <- ggplot(all_pvals, aes(x = pval, fill = pipeline)) +
+  geom_histogram(bins = 50, alpha = 0.7, color = "white") +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_fill_manual(values = c("1. OLD (MaxLFQ-first)" = "steelblue", 
+                                "2. PIQED-first" = "coral",
+                                "3. HYBRID" = "forestgreen")) +
+  facet_wrap(~pipeline, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Raw P-value Distribution by Pipeline",
+    subtitle = "Red line = p = 0.05 | Enrichment near 0 indicates true effects",
+    x = "Raw P-value",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p2)
+
+# --- Plot 3: Zoom into low p-values (where the action is) ---
+p3 <- ggplot(all_pvals[pval < 0.2], aes(x = pval, fill = pipeline)) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity") +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  geom_vline(xintercept = 0.01, linetype = "dotted", color = "darkred", linewidth = 1) +
+  scale_fill_manual(values = c("1. OLD (MaxLFQ-first)" = "steelblue", 
+                                "2. PIQED-first" = "coral",
+                                "3. HYBRID" = "forestgreen")) +
+  labs(
+    title = "Raw P-value Distribution (Zoomed: p < 0.2)",
+    subtitle = "Red dashed = 0.05 | Dotted = 0.01",
+    x = "Raw P-value",
+    y = "Count",
+    fill = "Pipeline"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p3)
+
+# --- Plot 4: Bar chart comparing significant counts ---
+sig_counts <- all_pvals[, .(
+  `p < 0.001` = sum(pval < 0.001, na.rm = TRUE),
+  `p < 0.01` = sum(pval < 0.01, na.rm = TRUE),
+  `p < 0.05` = sum(pval < 0.05, na.rm = TRUE),
+  `p < 0.1` = sum(pval < 0.1, na.rm = TRUE)
+), by = pipeline]
+
+sig_counts_long <- melt(sig_counts, id.vars = "pipeline", 
+                         variable.name = "threshold", value.name = "count")
+
+p4 <- ggplot(sig_counts_long, aes(x = threshold, y = count, fill = pipeline)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = count), position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("1. OLD (MaxLFQ-first)" = "steelblue", 
+                                "2. PIQED-first" = "coral",
+                                "3. HYBRID" = "forestgreen")) +
+  labs(
+    title = "Number of Proteins by Raw P-value Threshold",
+    x = "P-value Threshold",
+    y = "Number of Proteins",
+    fill = "Pipeline"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  coord_cartesian(ylim = c(0, max(sig_counts_long$count) * 1.15))
+
+print(p4)
+
+# --- Save plots ---
+ggsave("pval_comparison_overlay.pdf", p1, width = 10, height = 6)
+ggsave("pval_comparison_facet.pdf", p2, width = 10, height = 10)
+ggsave("pval_comparison_zoomed.pdf", p3, width = 10, height = 6)
+ggsave("pval_comparison_bars.pdf", p4, width = 10, height = 6)
+
+cat("\nPlots saved!\n")
+```
+
+# 6e. check peptide level behaviour - opposite directions ect.
+```{r}
+# Check what columns exist in protein_summary
+names(results_peptide$protein_summary)
+
+# Get peptide-level results directly and calculate directions
+peptide_results <- results_peptide$peptide_results
+
+# Calculate direction consistency per protein
+direction_summary <- peptide_results[, .(
+  n_peptides = .N,
+  n_positive_fc = sum(log2FC_aSYN > 0, na.rm = TRUE),
+  n_negative_fc = sum(log2FC_aSYN < 0, na.rm = TRUE),
+  n_sig_p05 = sum(pval_aSYN < 0.05, na.rm = TRUE),
+  mean_fc = mean(log2FC_aSYN, na.rm = TRUE),
+  fc_sd = sd(log2FC_aSYN, na.rm = TRUE),
+  fc_range = max(log2FC_aSYN, na.rm = TRUE) - min(log2FC_aSYN, na.rm = TRUE),
+  min_pval = min(pval_aSYN, na.rm = TRUE)
+), by = protein_id]
+
+# Calculate percentages and flags
+direction_summary[, pct_positive := 100 * n_positive_fc / n_peptides]
+direction_summary[, pct_negative := 100 * n_negative_fc / n_peptides]
+
+# Flag proteins with mixed directions (both up and down peptides, at least 3 peptides)
+direction_summary[, is_mixed := n_positive_fc > 0 & n_negative_fc > 0 & n_peptides >= 3]
+
+# Flag highly inconsistent (large FC range)
+direction_summary[, is_highly_inconsistent := fc_range > 1.5 & n_peptides >= 3]
+
+# Summary
+cat("\n=== PEPTIDE DIRECTION CONSISTENCY ===\n")
+cat("Total proteins:", nrow(direction_summary), "\n")
+cat("Proteins with MIXED peptide directions:", sum(direction_summary$is_mixed), "\n")
+cat("Proteins with CONSISTENT directions:", sum(!direction_summary$is_mixed), "\n")
+cat("Proteins highly inconsistent (FC range > 1.5):", sum(direction_summary$is_highly_inconsistent, na.rm = TRUE), "\n")
+
+# Among mixed-direction proteins, how many have significant peptides?
+mixed_proteins <- direction_summary[is_mixed == TRUE]
+cat("\nAmong MIXED proteins:\n")
+cat("  With at least 1 sig peptide (p<0.05):", sum(mixed_proteins$n_sig_p05 > 0), "\n")
+cat("  With at least 2 sig peptides:", sum(mixed_proteins$n_sig_p05 >= 2), "\n")
+
+# Look at top mixed-direction proteins with significant peptides
+cat("\n=== TOP MIXED-DIRECTION PROTEINS WITH SIGNIFICANT PEPTIDES ===\n")
+mixed_with_sig <- direction_summary[is_mixed == TRUE & n_sig_p05 > 0]
+setorder(mixed_with_sig, -n_sig_p05, min_pval)
+print(head(mixed_with_sig[, .(protein_id, n_peptides, n_positive_fc, n_negative_fc, 
+                               n_sig_p05, mean_fc, fc_range, min_pval)], 20))
+
+# Visualize
+library(ggplot2)
+
+# Plot: Distribution of direction consistency
+p1 <- ggplot(direction_summary, aes(x = pct_positive)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = c(25, 75), linetype = "dashed", color = "red") +
+  labs(
+    title = "Peptide Direction Consistency per Protein",
+    subtitle = "0% = all peptides DOWN | 100% = all peptides UP | 50% = mixed",
+    x = "% Peptides with Positive FC",
+    y = "Number of Proteins"
+  ) +
+  theme_minimal()
+
+print(p1)
+
+# Plot: FC range vs significance
+p2 <- ggplot(direction_summary[n_peptides >= 3], aes(x = fc_range, y = -log10(min_pval))) +
+  geom_point(aes(color = is_mixed), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  scale_color_manual(values = c("FALSE" = "forestgreen", "TRUE" = "coral"),
+                     labels = c("Consistent", "Mixed")) +
+  labs(
+    title = "Peptide FC Range vs Best P-value",
+    subtitle = "Mixed-direction proteins may have opposing proteoform effects",
+    x = "FC Range (max - min log2FC)",
+    y = "-log10(min p-value)",
+    color = "Direction"
+  ) +
+  theme_minimal()
+
+print(p2)
+```
+
+# 6f. peptide.-level wioth proper prptein-aggregation (simes)
+```{r}
+# Re-source the updated module
+source("CFMS_Peptide_Level_Analysis_2.R")
+
+# 1. Aggregate peptide p-values to protein level
+protein_from_peptides <- aggregate_peptides_to_protein(
+  results_peptide, 
+  method = "simes"  # Best for correlated peptides
+)
+
+# View top proteins
+head(protein_from_peptides[, .(protein_id, n_peptides, pval_aggregated, 
+                                pBHadj_aggregated, mean_fc, n_sig_peptides_p05)])
+
+# 2. Compare ALL methods
+method_comparison <- compare_aggregation_methods(results_peptide)
+
+# 3. Full comparison including peptide→protein aggregation
+comparison_all <- compare_all_four_pipelines(
+  old_results = results$hybrid$differential_combined,
+  piqed_first_results = results_v2$differential_combined,
+  hybrid_results = results_hybrid$differential_combined,
+  peptide_results = results_peptide,
+  include_peptide_aggregated = TRUE,
+  aggregation_method = "simes",
+  output_dir = "five_pipeline_comparison"
+)
+```
+
+# 6g.final proteoform aware peptide-level analysis
+
+ What It Does (5 Steps)
+
+| Step | What | Output |
+|------|------|--------|
+| **1** | Peptide-level differential analysis | `01_peptide_level_results.csv` |
+| **2** | Simes aggregation to protein level | `02_protein_simes_aggregated.csv` |
+| **3** | Identify bidirectional proteins | `03_bidirectional_proteins.csv` |
+| **4** | Create final summary tables | `05_TOP_DISCOVERIES.csv`, `06_PROTEOFORM_CANDIDATES.csv` |
+| **5** | Generate visualizations | `ALL_PLOTS.pdf` |
+
+
+ Key Output Files
+proteoform_aware_results/
+├── 01_peptide_level_results.csv      ← All peptide p-values & FCs
+├── 02_protein_simes_aggregated.csv   ← Protein p-values (Simes method)
+├── 03_bidirectional_proteins.csv     ← Proteins with UP + DOWN peptides
+├── 04_protein_direction_summary.csv  ← Direction stats per protein
+├── 05_TOP_DISCOVERIES.csv            ← ⭐ Best hits by Simes p-value
+├── 06_PROTEOFORM_CANDIDATES.csv      ← ⭐ Bidirectional = proteoform candidates!
+├── ALL_PLOTS.pdf                     ← All visualizations
+└── plot_*.pdf                        ← Individual plots
+
+```{r}
+# Source the FIXED module
+source("CFMS_Proteoform_Aware_Final_v2.R")
+source("CFMS_Top20_Peptide_Plots.R")
+
+# Run with parallelization
+results_final <- run_proteoform_aware_analysis(
+  traces_list = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_conditions = c("aSYN"),
+  min_valid_samples = 4,
+  fc_threshold = 0.5,
+  pval_threshold = 0.05,
+  #n_cores = 4,  # Adjust based on your CPU (or leave NULL for auto-detect)
+  output_dir = "proteoform_aware_results")
+
+# Save PDF plots for top 20 candidates
+save_top20_proteoform_plots(results_final, output_dir = "top20_peptide_plots")
+
+# View top proteoform candidates
+head(results_final$final_summary$proteoform_candidates, 20)
+
+# View top discoveries
+head(results_final$final_summary$top_discoveries, 20)
+
+# See all peptides for a protein of interest
+visualize_protein_peptides(results_final$peptide_results, "P0AFL6")
+
+# # Your top proteins - look up each on UniProt
+# top_proteins <- c("P0AFL6", "P0A9Q7", "P13029", "P22259", "P0AFI2",
+#                   "P0A9M0", "P0ADG7", "P62768", "P52647", "P0A698",
+#                   "P15038", "P0A786", "P0A8M6", "P05793", "P15977",
+#                   "P33570", "P0A6K6", "P68767", "P0A6F3", "P00370")
+# 
+# # Quick lookup URL generator
+# for (p in top_proteins) {
+#   cat(paste0("https://www.uniprot.org/uniprotkb/", p, "/entry\n"))
+# }
+
+
+```
+
+
+ What the Bidirectional Score Means
+
+Bidirectional Score = (min of n_up_sig, n_down_sig) × 2 
+                    + FC_range (capped at 3)
+                    + -log10(best_pval)
+
+Higher score = More confident proteoform-specific regulation
+Example interpretation:
+Score > 5: Strong evidence for distinct proteoforms responding differently
+Score 3-5: Moderate evidence
+Score < 3: Weak evidence
+
+
+# 6h. aggregation analysis simes vs stouffer (peptide independencies)
+```{r}
+source("CFMS_Aggregation_Method_Analysis_v2.R")
+
+agg_results <- run_aggregation_analysis(
+  peptide_results = results_final$peptide_results,
+  expression_matrix = results_final$expression_matrix,  # optional but recommended
+  traces_list = pepTracesList_filtered,                 # for sibling correlation
+  output_dir = "aggregation_analysis"
+)
+
+# See recommendation
+agg_results$recommendation
+
+# Get protein p-values with best method
+best_pvals <- agg_results$method_comparison$merged_results
+```
+
+# 6i. Consistency analysis btw replicates vs within proteins
+```{r}
+source("CFMS_Replicate_Consistency_Analysis.R")
+
+rep_results <- run_replicate_consistency_analysis(
+  traces_list = pepTracesList_filtered,
+  design_matrix = design_matrix,
+  ref_condition = "ctrl",
+  treat_condition = "aSYN",
+  output_dir = "replicate_consistency_analysis"
+)
+
+# Key summary metrics
+rep_results$summary
+
+# Proteins with reproducible bidirectional behavior
+repro_bidir <- rep_results$bidirectional[is_reproducibly_bidirectional == TRUE]
+```
+
+
+# 7. check with Ludovic code for peptide traces along chromatogram
+```{r}
+source("CFMS_Peptide_Chromatogram_Plots.R")
+
+# Plot control samples with mean ± SD error bars
+plots <- generate_chromatogram_plots(
+  data = data,                        # Your data already in memory!
+  condition_filter = "aSYN",          # Only control samples
+  top_n_proteins = 20,                # Top 20 proteins
+  top_n_peptides = 20,                # Top 20 peptides per protein
+  plot_style = "mean_sd",             # Options: "mean_sd", "replicates", "combined"
+  output_dir = "chromatogram_plots_aSYN",
+  n_fractions = 32
+)
+
+
+source("CFMS_Peptide_Chromatogram_Plots_treat_vs_ctrl.R")
+
+# ctrl vs aSYN side-by-side, top 100 proteins
+plots_2 <- generate_comparison_plots(
+  data = data,
+  condition1 = "ctrl",
+  condition2 = "aSYN",
+  top_n_proteins = 100,
+  top_n_peptides = 20,
+  output_dir = "ctrl_vs_aSYN_plots",
+  n_fractions = 32
+)
+
+my_proteins <- c("P06612", "P00579", "P22106", "P62399", "P09373", 
+                 "P0A6C8", "P0A8V2", "P00864", "P0A8T7", "P21170", 
+                 "P42641", "P06959", "P68767", "P23003", "P09831", 
+                 "P0A6Z3", "P03018", "P0ABH9", "P0AFP6", "P25665")
+
+plots_3 <- generate_comparison_plots(
+  data = data,
+  condition1 = "ctrl",
+  condition2 = "aSYN",
+  priority_proteins = my_proteins,
+  top_n_proteins = 200,
+  show_protein_sum = FALSE,   # Only colored peptide lines
+  output_dir = "ctrl_vs_aSYN_peptides_only"
+)
+
+source("CFMS_Peptide_Chromatogram_Plots_zoom.R")
+
+plots_4 <- generate_comparison_plots(
+  data = data,
+  condition1 = "ctrl",
+  condition2 = "aSYN",
+  priority_proteins = my_proteins,
+  top_n_proteins = 100,
+  auto_zoom = TRUE,                   # Default: ON
+  intensity_threshold = 5000,         # Default: 5000
+  show_protein_sum = FALSE,
+  output_dir = "ctrl_vs_PEP_zoomed"
+)
+
+```
+
+
+
+
+---
+
+# C. PrInCE, Gaussian/window fitting & one-off tasks
+
+Originally the later sections of the `.Rmd`: PrInCE comparisons, Gaussian/window
+fitting, chromatogram-correlation explorations (relevant background for the
+planned phase-2 cross-correlation work), and a few one-off data-processing tasks
+for other projects (absolute Windows paths - templates only).
+
+
+# Plot hits from ATP
+To compare the quality / noisiness of the chromatograms
+```{r}
+load("../../../Analysis/PrInCE/Prince_ATP_hits.RData")
+prince_hits_ATP <- prince_hits
+rm(prince_hits)
+for(i in c("P75949")){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  try(plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i, aggregateReplicates=F))
+}
+```
+
+# PrInCE analysis
+##Prepare data
+```{r}
+
+ctrl_treat_traces <- integrateTraceIntensities(protein_traces_list, design_matrix = design_matrix, integrate_within = "Condition", aggr_fun = "sum")
+integrated_traces <- integrateTraceIntensities(protein_traces_list, design_matrix = design_matrix, aggr_fun = "sum")
+
+PCM18_treat <- as.matrix(ctrl_treat_traces$PEP$traces[,1:32])
+rownames(PCM18_treat) <- ctrl_treat_traces$PEP$traces$id
+
+PCM18_ctrl <- as.matrix(ctrl_treat_traces$ctrl$traces[,1:32])
+rownames(PCM18_ctrl) <- ctrl_treat_traces$ctrl$traces$id
+
+PCM18_integrated <- as.matrix(integrated_traces$traces[,1:32])
+rownames(PCM18_integrated) <- integrated_traces$traces$id
+
+PCM18_treat[PCM18_treat == 0.0] <- NA
+PCM18_ctrl[PCM18_ctrl == 0.0] <- NA
+PCM18_integrated[PCM18_integrated == 0.0] <- NA
+```
+
+##Functions
+
+```{r bestOfGuessAndRandom}
+bestOfGuessAndRandom <- function(gaussians1, gaussians2){
+  guess_or_random <- data.frame(protein_id=character(length=length(intersect(names(gaussians1), names(gaussians2)))), better=character(length=length(intersect(names(gaussians1), names(gaussians2)))), random_R2 = double(length=length(intersect(names(gaussians1), names(gaussians2)))), guess_R2 = double(length=length(intersect(names(gaussians1), names(gaussians2)))))
+i<-1
+for(id in intersect(names(gaussians1), names(gaussians2))){
+  guess_or_random[i,1] <- id
+  guess_or_random[i,3] <- gaussians1[[id]]$R2
+  guess_or_random[i,4] <- gaussians2[[id]]$R2
+  if(gaussians1[[id]]$R2 >= gaussians2[[id]]$R2){
+    guess_or_random[i,2] <- "random"
+  } else {
+    guess_or_random[i,2] <- "guess"
+  }
+  i <- i+1
+}
+
+guess_or_random <- guess_or_random %>% mutate(diff=random_R2 - guess_R2)
+
+bestOfRandomAndGuessGaussians <- c(gaussians1[union(filter(guess_or_random, grepl("random", better))$protein_id, setdiff(names(gaussians1),names(gaussians2)))], gaussians2[union(filter(guess_or_random, grepl("guess", better))$protein_id, setdiff(names(gaussians2),names(gaussians1)))])
+bestOfRandomAndGuessGaussians
+}
+```
+
+```{r Join areas function}
+#Give a list of replicate areas to join in the order from 1 to n (3 in our case), minimum number of peptides present in the area of the peak to keep it, minimum peptide intensity-weighted average correlation in the area of the peak to keep it and accessions of proteins to remove.
+joinAreasAndFoldChanges <- function(replicateAreas=list(), min_npep=5, min_weighted_corr=0.2, exclude_proteins=c()){
+  joined_areas <- replicateAreas[[1]] %>% select(protein_id, mu, low_lim, high_lim, excluded_frac, n_frac, n_pep, weighted_corr) %>% filter(n_pep >= min_npep & weighted_corr >= min_weighted_corr)
+  i <- 1
+  for(replicate in replicateAreas[1:(length(replicateAreas)-1)]){
+    replicate_selected_columns <- replicate %>% filter(n_pep >= min_npep & weighted_corr >= min_weighted_corr) %>% select(protein_id, mu, low_lim, high_lim, excluded_frac, n_frac, n_pep, weighted_corr, foldChange, log2area_ctrl, log2area_treat, percent_areactrl, percent_areatreat)
+    joined_areas <- joined_areas %>% full_join(replicate_selected_columns, by=join_by(protein_id, mu, low_lim, high_lim, excluded_frac, n_frac, n_pep, weighted_corr), suffix = c("", paste0("_rep", i)))
+    i <- i+1
+  }
+  replicate_selected_columns <- replicateAreas[[length(replicateAreas)]] %>% filter(n_pep >= min_npep & weighted_corr >= min_weighted_corr) %>% select(protein_id, mu, low_lim, high_lim, excluded_frac, foldChange, log2area_ctrl, log2area_treat, percent_areactrl, percent_areatreat)
+    joined_areas <- joined_areas %>% full_join(replicate_selected_columns, by=join_by(protein_id, mu, low_lim, high_lim, excluded_frac), suffix = c("_rep1", paste0("_rep", i)))
+    
+    return(filter(joined_areas, ! protein_id %in% exclude_proteins))
+}
+
+
+```
+
+##Fit gaussians to whole biolRep3 chromatograms
+```{r}
+#Fit gaussians to biolRep3 chromatograms
+ctrl_gaussians <- bestOfGuessAndRandom(build_gaussians_corr_mod(PCM18_ctrl, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "guess", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345), build_gaussians_corr_mod(PCM18_ctrl, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "random", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345))
+
+treat_gaussians <- bestOfGuessAndRandom(build_gaussians_corr_mod(PCM18_treat, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "guess", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345), build_gaussians_corr_mod(PCM18_treat, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "random", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345))
+
+integrated_gaussians <- bestOfGuessAndRandom(build_gaussians_corr_mod(PCM18_integrated, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "guess", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345), build_gaussians_corr_mod(PCM18_integrated, min_consecutive =3, smooth=F, min_R_squared = 0.9, method = "random", filter_gaussians_height = 0, filter_gaussians_variance_max = 3, min_iterations = 100, filter_gaussians_min_dist = 1, criterion="AICc", random_seed = 12345))
+
+save.image()
+```
+
+
+```{r window fitting}
+scanFitGaussians <- function(chromatogram_matrix, window_length, increment, min_R2=0.9, max_variance=4) {
+  list_of_gaussians=list()
+  i=0
+  while(ncol(chromatogram_matrix) > window_length + i*increment){
+    window_gaussians <- bestOfGuessAndRandom(build_gaussians(chromatogram_matrix[,(1+i*increment):(window_length+i*increment)] ,min_consecutive =3, smooth=F, min_R_squared = min_R2, method = "random", filter_gaussians_height = 0.075, filter_gaussians_variance_max = max_variance), build_gaussians(chromatogram_matrix[,(1+i*increment):(window_length+i*increment)], min_consecutive =3, smooth=F, min_R_squared = min_R2, method = "guess", filter_gaussians_height = 0.075, filter_gaussians_variance_max = max_variance))
+    i <- i+1
+    list_of_gaussians <- list_of_gaussians %>% list.append(window_gaussians)
+  }
+  list_of_gaussians
+}
+
+
+#TODO perhaps disregard gaussians with peaks too close to the edge
+joinGaussianWindows <- function(gaussianwindows, increment, wholeChromatogramGaussians=list()){
+  window<-0
+  i <- 1
+
+  all_gaussians <- data.frame(protein_id=character(length=1000), A=double(length=1000), mu=double(length=1000), sigma=double(length=1000))
+  
+  j<-0
+  for(window_iteration in gaussianwindows){
+    l<-1
+    protein_names <- names(window_iteration)
+    for(protein_fit in window_iteration){
+      for(k in 1:length(protein_fit$coefs$A)){
+        if(i>nrow(all_gaussians)){
+          all_gaussians <- all_gaussians %>% rbind(data.frame(protein_id=character(length=1000), A=double(length=1000), mu=double(length=1000), sigma=double(length=1000)))
+        }
+        all_gaussians[i,1]<-protein_names[l]
+        all_gaussians[i,2]<-protein_fit$coefs$A[k]
+        all_gaussians[i,3]<-protein_fit$coefs$mu[k]+j*increment
+        all_gaussians[i,4]<-protein_fit$coefs$sigma[k]
+        i<-i+1
+      }
+      l<-l+1
+    }
+    j<-j+1
+  }
+  print(length(wholeChromatogramGaussians))
+  if(length(wholeChromatogramGaussians)>0){
+    for(wholeChromatogramGaussians_entry in wholeChromatogramGaussians){
+      print(length(wholeChromatogramGaussians_entry))
+      protein_names <- names(wholeChromatogramGaussians_entry)
+      l<-1
+      for(protein_fit in wholeChromatogramGaussians_entry){
+        for(k in 1:length(protein_fit$coefs$A)){
+          if(i>nrow(all_gaussians)){
+            all_gaussians <- all_gaussians %>% rbind(data.frame(protein_id=character(length=1000), A=double(length=1000), mu=double(length=1000), sigma=double(length=1000)))
+          }
+          all_gaussians[i,1]<-protein_names[l]
+          all_gaussians[i,2]<-protein_fit$coefs$A[k]
+          all_gaussians[i,3]<-protein_fit$coefs$mu[k]
+          all_gaussians[i,4]<-protein_fit$coefs$sigma[k]
+          i<-i+1
+        }
+        l<-l+1
+      }
+    }
+  }
+  all_gaussians <- all_gaussians[order(all_gaussians$protein_id),]
+  return(all_gaussians[!all_gaussians$mu==0,])
+}
+
+gaussianScan <- scanFitGaussians(PCM18_integrated, 12, 4)
+joinedGaussians <- joinGaussianWindows(gaussianScan, 4, wholeChromatogramGaussians = list(integrated_gaussians, ctrl_gaussians, treat_gaussians))
+
+joinedGaussians_noWindowFitting <- joinGaussianWindows(list(), 4, wholeChromatogramGaussians = list(integrated_gaussians, ctrl_gaussians, treat_gaussians))
+
+joinedGaussians_OnlyIntegrated <- joinGaussianWindows(list(), 4, wholeChromatogramGaussians = list(integrated_gaussians))
+
+```
+
+```{r}
+createConsensusFromWindowFitting <- function(cofracData, joinedgaussians, min_gaussian_dist = 0){
+  best_fits <- data.frame(protein_name=character(), A=double(), mu=double(), sigma=double(), model_fold = double(), model_corr=double())
+  #Loop over all proteins
+  pb_tracker <- 0
+  pb <- txtProgressBar(min=0, max=uniqueN(joinedgaussians$protein_id), initial=0)
+  for(id in unique(joinedgaussians$protein_id)){
+    pb_tracker <- pb_tracker + 1
+    setTxtProgressBar(pb, pb_tracker)
+    fraction_numbers <- 1:ncol(cofracData) #x-axis values for model calculation
+    chromatogram <- cofracData[id,] #experimentally determined data
+    chromatogram[is.na(chromatogram)] <- 0 #Change all NAs in the data to zeroes for calculation 
+    gaussians <- joinedgaussians %>% filter(grepl(id, protein_id)) #take the gaussians for the current protein id
+    #Order them by mu
+    gaussians <- gaussians[order(gaussians$mu),]
+    #To store the current best candidate
+    best_combination <- NA
+    best_corr <- -1
+    best_square_deviations <- Inf #Metric actually used for selection
+    best_model <- NA
+    
+    #This loops over all possible combinations of the gaussians
+    for (i in 1:nrow(gaussians)){
+      combination <- utils::combn(1:nrow(gaussians),i)
+      
+      #This loop selects an individual combination, calculates a model and compares it to the experimental data
+      for(j in 1:ncol(combination)){
+        model <- double(length=ncol(cofracData))
+        
+        #If the differences between gaussian peak centers are smaller than mi_gaussian_dist, continue to the next combination
+        if(TRUE %in% (diff(gaussians[combination[,j],"mu"]) <= min_gaussian_dist)) next
+        
+        for(a in combination[,j]){
+          model <- model + gaussians$A[[a]]*exp(-(fraction_numbers - gaussians$mu[[a]])**2/(gaussians$sigma[[a]]**2))
+        }
+        
+        #Least squares, if lower than currently best candidate, replace with current model
+        square_deviations <- sum((chromatogram-model)**2)
+        if(best_square_deviations > square_deviations){
+          best_square_deviations <- square_deviations
+          best_combination <- combination[,j]
+          best_corr <- cor(chromatogram, model, method="pearson")
+          best_model <- model
+        }
+      }
+    }
+    best_fits <- best_fits %>% rbind(data.frame(gaussians[best_combination,], model_fold=sum(best_model)/sum(chromatogram), model_corr=best_corr))
+  }
+  close(pb)
+  best_fits
+}
+
+windowConsensus <- createConsensusFromWindowFitting(PCM18_integrated, joinedGaussians, min_gaussian_dist=1)
+
+windowConsensus_noWindowFitting <- createConsensusFromWindowFitting(PCM18_integrated, joinedGaussians_noWindowFitting, min_gaussian_dist=1)
+```
+
+
+```{r}
+calculateGaussianMixture <- function(gaussians, low, high, step=1){
+  x_values <- seq(low,high,step)
+  model <- double(length=length(x_values))
+      for(a in 1:nrow(gaussians)){
+        model <- model + gaussians$A[[a]]*exp(-(x_values - gaussians$mu[[a]])**2/(gaussians$sigma[[a]]**2))
+      }
+  model
+}
+
+#Min peak fraction controls what fraction of the signal in a given chromatographic fraction must come from a given peak to be included in the comparison. Zcriterion tells the percent of the peak area that will be included in the comparison (normal distribution)
+gaussianAreaComparison <- function(windowConsensus, data_ctrl, data_treat, z_criterion = 1.645, min_peak_fraction = 0.5, peptideTraces){
+  nfrac <- 
+  if(ncol(data_ctrl) != ncol(data_treat)){
+    stop("data_ctrl and data_treat have unequal number of columns!")
+  }
+  prince_fc <- data.frame(protein_id=windowConsensus$protein_id, mu=windowConsensus$mu, low_lim=double(length=nrow(windowConsensus)), high_lim=double(length=nrow(windowConsensus)), excluded_frac=character(length=nrow(windowConsensus)), n_frac=integer(length=nrow(windowConsensus)), n_pep=integer(length=nrow(windowConsensus)),  weighted_corr=double(length=nrow(windowConsensus)), foldChange=double(length=nrow(windowConsensus)), area_ctrl = double(length=nrow(windowConsensus)), area_treat = double(length=nrow(windowConsensus)), log2area_ctrl= double(length=nrow(windowConsensus)), log2area_treat= double(length=nrow(windowConsensus)), percent_areactrl=double(length=nrow(windowConsensus)), percent_areatreat=double(length=nrow(windowConsensus)))
+  for(rowN in 1:nrow(windowConsensus)){
+    
+    pepMatrix_selectedProt <- as.matrix(subset(peptideTraces, trace_subset_ids=windowConsensus[rowN, "protein_id"], trace_subset_type="protein_id")$traces[,1:ncol(data_ctrl)])
+    
+    low_lim <- round(windowConsensus[[rowN, 3]] - z_criterion*windowConsensus[[rowN, 4]]/sqrt(2))
+    low_lim <- ifelse(low_lim < 1, 1, low_lim)
+    high_lim <- round(windowConsensus[[rowN, 3]] + z_criterion*windowConsensus[[rowN, 4]]/sqrt(2))
+    high_lim <- ifelse(high_lim > ncol(data_ctrl), ncol(data_ctrl), high_lim)
+    prince_fc[rowN,"low_lim"] <- low_lim
+    prince_fc[rowN,"high_lim"] <- high_lim
+    protein_gaussians <- filter(windowConsensus, protein_id == windowConsensus[rowN, "protein_id"])
+    current_gaussian_model <- calculateGaussianMixture(windowConsensus[rowN,],1,ncol(data_ctrl),step=1)
+    full_model <- calculateGaussianMixture(protein_gaussians, 1, ncol(data_ctrl), step=1)
+    excluded_fractions <- c()
+    for(frac in low_lim:high_lim){
+      if(current_gaussian_model[[frac]]/full_model[[frac]] < min_peak_fraction){
+        excluded_fractions <- excluded_fractions %>% append(frac)
+      }
+    }
+    compared_fractions <- setdiff(low_lim:high_lim, excluded_fractions) # This are the indices of the fractions that will be used for area comparison
+    
+    prince_fc[rowN, "excluded_frac"] <- paste(excluded_fractions, collapse = "; ")
+    prince_fc[rowN, "n_frac"] <- length(compared_fractions)
+    n_pep <- 0
+    
+    for(i in 1:nrow(pepMatrix_selectedProt)){
+      if(TRUE %in% (pepMatrix_selectedProt[i, compared_fractions] > 0)) {
+        n_pep <- n_pep + 1
+      }
+    }
+    
+    prince_fc[rowN, "n_aSYN"] <- n_pep
+    
+    #suppressWarnings(prince_fc[rowN, "corr"] <- try((sum(cor(t(pepMatrix_selectedProt[,compared_fractions])), na.rm=T)-nrow(pepMatrix_selectedProt))/(n_pep**2 - n_pep), silent=T))
+    corr_matrix <- NA
+    weight_matrix <- NA
+    suppressWarnings(corr_matrix <- try(cor(t(pepMatrix_selectedProt[,compared_fractions])), silent=T))
+    try(weight_matrix <- outer(rowSums(pepMatrix_selectedProt[,compared_fractions]), rowSums(pepMatrix_selectedProt[,compared_fractions]), FUN="*"), silent=T)
+    try(diag(corr_matrix) <- NA, silent=T)
+    try(diag(weight_matrix) <- NA, silent=T)
+    
+    prince_fc[rowN, "weighted_corr"] <- sum(corr_matrix*weight_matrix, na.rm=T)/sum(weight_matrix, na.rm=T)
+    
+    if(windowConsensus[[rowN, 1]] %in% rownames(data_ctrl)){
+      area_control <- sum(data_ctrl[windowConsensus[[rowN, 1]], compared_fractions])
+      prince_fc[rowN,"percent_areactrl"] <- 100*area_control/sum(data_ctrl[windowConsensus[[rowN, 1]],])
+    } else {
+      area_control <- 0
+      prince_fc[rowN,"percent_areactrl"] <- NA
+    }
+    if(windowConsensus[[rowN, 1]] %in% rownames(data_treat)) {
+      area_ATP <- sum(data_treat[windowConsensus[[rowN, 1]], compared_fractions])
+      prince_fc[rowN,"percent_areatreat"] <- 100*area_ATP/sum(data_treat[windowConsensus[[rowN, 1]],])
+  
+    } else {
+      area_ATP <- 0
+      prince_fc[rowN,"percent_areatreat"] <- NA
+  
+    }
+    prince_fc[rowN,"foldChange"] <- log2(area_ATP/area_control)
+    prince_fc[rowN,"area_ctrl"] <- area_control
+    prince_fc[rowN,"area_treat"] <- area_ATP
+    prince_fc[rowN,"log2area_ctrl"] <- log2(area_control)
+    prince_fc[rowN,"log2area_treat"] <- log2(area_ATP)
+    
+  }
+  prince_fc
+}
+
+protein_traces_list_30pep <- proteinQuantification_sibPepCorrFix.tracesList(pepTracesList_filtered ,
+                                             quantLevel="protein_id",
+                                             topN = 30,
+                                             keep_less = TRUE, #remove proteins with less then 5 precursors
+                                             rm_decoys = TRUE,
+                                             use_sibPepCorr = TRUE,
+                                             use_repPepCorr = FALSE,
+                                             full_intersect_only = FALSE,
+                                             verbose = FALSE)
+
+PCM18_biolRep1_ctrl <-  as.matrix(protein_traces_list_30pep$ctrl_1$traces[,1:32])
+rownames(PCM18_biolRep1_ctrl) <- protein_traces_list_30pep$ctrl_1$traces$id
+PCM18_biolRep1_treat <-  as.matrix(protein_traces_list_30pep$PEP_1$traces[,1:32])
+rownames(PCM18_biolRep1_treat) <- protein_traces_list_30pep$PEP_1$traces$id
+
+PCM18_biolRep2_ctrl <-  as.matrix(protein_traces_list_30pep$ctrl_2$traces[,1:32])
+rownames(PCM18_biolRep2_ctrl) <- protein_traces_list_30pep$ctrl_2$traces$id
+PCM18_biolRep2_treat <-  as.matrix(protein_traces_list_30pep$PEP_2$traces[,1:32])
+rownames(PCM18_biolRep2_treat) <- protein_traces_list_30pep$PEP_2$traces$id
+
+PCM18_biolRep3_ctrl <-  as.matrix(protein_traces_list_30pep$ctrl_3$traces[,1:32])
+rownames(PCM18_biolRep3_ctrl) <- protein_traces_list_30pep$ctrl_3$traces$id
+PCM18_biolRep3_treat <-  as.matrix(protein_traces_list_30pep$PEP_3$traces[,1:32])
+rownames(PCM18_biolRep3_treat) <- protein_traces_list_30pep$PEP_3$traces$id
+
+biolRep1_fc <- gaussianAreaComparison(windowConsensus, PCM18_biolRep1_ctrl, PCM18_biolRep1_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+biolRep2_fc <- gaussianAreaComparison(windowConsensus, PCM18_biolRep2_ctrl, PCM18_biolRep2_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+biolRep3_fc <- gaussianAreaComparison(windowConsensus, PCM18_biolRep3_ctrl, PCM18_biolRep3_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+
+foldChanges <- full_join(biolRep1_fc, biolRep2_fc, by=join_by(protein_id, mu, low_lim, high_lim, excluded_frac), suffix = c("", "_rep2")) %>% full_join(biolRep3_fc, by=join_by(protein_id, mu, low_lim, high_lim, excluded_frac), suffix = c("_rep1", "_rep3"))
+
+foldChanges$ttest_pval <- 1
+
+
+for(rowN in 1:nrow(foldChanges)){
+  foldChanges[rowN, "ttest_pval"] <- try(t.test(foldChanges[rowN, c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3")], foldChanges[rowN, c("log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")])$p.value, silent = T)
+}
+
+foldChanges$limma_pval <- (limma::eBayes(limma::lmFit(foldChanges[c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3", "log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")], design=model.matrix(~factor(c(0,0,0,1,1,1))))))$p.value[,2] %>% as.numeric()
+
+foldChanges$limma_pBHadj <- foldChanges$limma_pval %>% p.adjust(method="fdr")
+
+
+foldChanges$meanFCnoInf <- rowMeans(data.frame(ifelse(foldChanges$foldChange_rep1 %>% is.infinite(), NA, foldChanges$foldChange_rep1), ifelse(foldChanges$foldChange_rep2 %>% is.infinite(), NA, foldChanges$foldChange_rep2), ifelse(foldChanges$foldChange_rep3 %>% is.infinite(), NA, foldChanges$foldChange_rep3)), na.rm=T)
+
+foldChanges <- foldChanges %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(protein_id == accession))
+
+save.image()
+```
+
+
+##Traces of changed proteins
+```{r}
+for(i in unique(filter(foldChanges, limma_pBHadj < 0.05)$protein_id)){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = paste(i, round(filter(foldChanges, limma_pBHadj < 0.05)$mu), collapse=" "))
+} #not saved in the nas
+
+```
+
+##No window fitting comparison
+```{r}
+biolRep1_fc_noWindowFitting <- gaussianAreaComparison(windowConsensus_noWindowFitting, PCM18_biolRep1_ctrl, PCM18_biolRep1_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+biolRep2_fc_noWindowFitting <- gaussianAreaComparison(windowConsensus_noWindowFitting, PCM18_biolRep2_ctrl, PCM18_biolRep2_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+biolRep3_fc_noWindowFitting <- gaussianAreaComparison(windowConsensus_noWindowFitting, PCM18_biolRep3_ctrl, PCM18_biolRep3_treat, peptideTraces = integrateTraceIntensities(pepTracesList_filtered))
+
+foldChanges_noWindowFitting <- joinAreasAndFoldChanges(replicateAreas = list(biolRep1_fc_noWindowFitting, biolRep2_fc_noWindowFitting, biolRep3_fc_noWindowFitting), min_npep=5, min_weighted_corr=0.2, exclude_proteins=setdiff(proteins_to_exclude, proteins_to_keep)
+)
+#setdiff(proteins_to_exclude, proteins_to_keep)
+
+foldChanges_noWindowFitting$ttest_pval <- 1
+
+
+for(rowN in 1:nrow(foldChanges_noWindowFitting)){
+  foldChanges_noWindowFitting[rowN, "ttest_pval"] <- try(t.test(foldChanges_noWindowFitting[rowN, c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3")], foldChanges_noWindowFitting[rowN, c("log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")])$p.value, silent = T)
+}
+
+foldChanges_noWindowFitting$ttest_pval <-as.numeric(foldChanges_noWindowFitting$ttest_pval)
+
+foldChanges_noWindowFitting$ttest_pBHadj <- foldChanges_noWindowFitting$ttest_pval %>% p.adjust(method="fdr")
+
+foldChanges_noWindowFitting$limma_pval <- (limma::eBayes(limma::lmFit(foldChanges_noWindowFitting[c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3", "log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")], design=model.matrix(~factor(c(0,0,0,1,1,1))))))$p.value[,2] %>% as.numeric()
+
+foldChanges_noWindowFitting$limma_pBHadj <- foldChanges_noWindowFitting$limma_pval %>% p.adjust(method="fdr")
+
+foldChanges_noWindowFitting$ibmt_pval <- (IBMT(limma::eBayes(limma::lmFit(foldChanges_noWindowFitting[,c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3", "log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")] - log2(foldChanges_noWindowFitting[,"n_frac"]), design=model.matrix(~factor(c(0,0,0,1,1,1))))), 1:2))$IBMT.p[,2] %>% as.numeric()
+
+foldChanges_noWindowFitting$ibmt_pBHadj <- foldChanges_noWindowFitting$ibmt_pval %>% p.adjust(method="fdr")
+
+foldChanges_noWindowFitting$meanFCnoInf <- rowMeans(data.frame(ifelse(foldChanges_noWindowFitting$foldChange_rep1 %>% is.infinite(), NA, foldChanges_noWindowFitting$foldChange_rep1), ifelse(foldChanges_noWindowFitting$foldChange_rep2 %>% is.infinite(), NA, foldChanges_noWindowFitting$foldChange_rep2), ifelse(foldChanges_noWindowFitting$foldChange_rep3 %>% is.infinite(), NA, foldChanges_noWindowFitting$foldChange_rep3)), na.rm=T)
+
+foldChanges_noWindowFitting <- foldChanges_noWindowFitting %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(protein_id == accession))
+```
+
+##Traces of changed proteins (no window fitting)
+```{r}
+for(i in unique(filter(foldChanges_noWindowFitting, ibmt_pBHadj < 0.005 & abs(meanFCnoInf) > 1)$protein_id)){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = paste(unique(filter(foldChanges_noWindowFitting, protein_id==i)$protein_id), paste(round(filter(foldChanges_noWindowFitting, protein_id==i & ibmt_pBHadj < 0.005)$mu), collapse=" ")))
+} #not saved in the nas
+
+```
+
+
+
+## CCprofiler borders with limma
+
+```{r}
+ccprofilerFeatureAreaComparison <- function(proteinFeatures, data_ctrl, data_treat, peptideTraces){
+  prince_fc <- data.frame(protein_id=proteinFeatures$protein_id, apex=proteinFeatures$apex, low_lim=double(length=nrow(proteinFeatures)), high_lim=double(length=nrow(proteinFeatures)), excluded_frac=character(length=nrow(proteinFeatures)), n_frac=integer(length=nrow(proteinFeatures)),n_pep=integer(length=nrow(proteinFeatures)), weighted_corr=double(length=nrow(proteinFeatures)), foldChange=double(length=nrow(proteinFeatures)), area_ctrl = double(length=nrow(proteinFeatures)), area_treat = double(length=nrow(proteinFeatures)), log2area_ctrl= double(length=nrow(proteinFeatures)), log2area_treat= double(length=nrow(proteinFeatures)), percent_areactrl=double(length=nrow(proteinFeatures)), percent_areatreat=double(length=nrow(proteinFeatures)))
+  
+  
+  for(rowN in 1:nrow(proteinFeatures)){
+    low_lim <- as.integer(proteinFeatures[rowN, "left_pp"])
+    high_lim <- as.integer(proteinFeatures[rowN, "right_pp"])
+    prince_fc[rowN,"low_lim"] <- low_lim
+    prince_fc[rowN,"high_lim"] <- high_lim
+    compared_fractions <- low_lim:high_lim # This are the indices of the fractions that will be used for area comparison
+    prince_fc[rowN, "excluded_frac"] <- ""
+    prince_fc[rowN, "n_frac"] <- length(compared_fractions)
+    
+    if(proteinFeatures[[rowN, 1]] %in% rownames(data_ctrl)){
+      area_control <- sum(data_ctrl[proteinFeatures[[rowN, 1]], compared_fractions])
+      prince_fc[rowN,"percent_areactrl"] <- 100*area_control/sum(data_ctrl[proteinFeatures[[rowN, 1]],])
+    } else {
+      area_control <- 0
+      prince_fc[rowN,"percent_areactrl"] <- NA
+    }
+    if(proteinFeatures[[rowN, 1]] %in% rownames(data_treat)) {
+      area_ATP <- sum(data_treat[proteinFeatures[[rowN, 1]], compared_fractions])
+      prince_fc[rowN,"percent_areatreat"] <- 100*area_ATP/sum(data_treat[proteinFeatures[[rowN, 1]],])
+  
+    } else {
+      area_ATP <- 0
+      prince_fc[rowN,"percent_areatreat"] <- NA
+  
+    }
+    prince_fc[rowN,"foldChange"] <- log2(area_ATP/area_control)
+    prince_fc[rowN,"area_ctrl"] <- area_control
+    prince_fc[rowN,"area_treat"] <- area_ATP
+    prince_fc[rowN,"log2area_ctrl"] <- log2(area_control)
+    prince_fc[rowN,"log2area_treat"] <- log2(area_ATP)
+    
+  }
+  prince_fc
+}
+
+
+ccprofiler_rep1_fc <- ccprofilerFeatureAreaComparison(proteinFeaturesFiltered, PCM18_biolRep1_ctrl, PCM18_biolRep1_treat, peptideTraces=integrateTraceIntensities(pepTracesList_filtered))
+
+ccprofiler_rep2_fc <- ccprofilerFeatureAreaComparison(proteinFeaturesFiltered, PCM18_biolRep2_ctrl, PCM18_biolRep2_treat, peptideTraces=integrateTraceIntensities(pepTracesList_filtered))
+
+  ccprofiler_rep3_fc <- ccprofilerFeatureAreaComparison(proteinFeaturesFiltered, PCM18_biolRep3_ctrl, PCM18_biolRep3_treat, peptideTraces=integrateTraceIntensities(pepTracesList_filtered))
+
+ccprofiler_rep1_fc <- ccprofiler_rep1_fc %>% mutate(mu=apex)
+ccprofiler_rep2_fc <- ccprofiler_rep2_fc %>% mutate(mu=apex)
+ccprofiler_rep3_fc <- ccprofiler_rep3_fc %>% mutate(mu=apex)
+
+
+ccprofiler_joinedAreas <- joinAreasAndFoldChanges(list(ccprofiler_rep1_fc, ccprofiler_rep2_fc, ccprofiler_rep3_fc), min_npep=0, min_weighted_corr=-1)
+
+ccprofiler_joinedAreas$limma_pval <- (limma::eBayes(limma::lmFit(ccprofiler_joinedAreas[c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3", "log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")], design=model.matrix(~factor(c(0,0,0,1,1,1))))))$p.value[,2] %>% as.numeric()
+
+ccprofiler_joinedAreas$ttest_pval <- 1
+
+for(i in 1:nrow(ccprofiler_joinedAreas)){
+  ccprofiler_joinedAreas[i, "ttest_pval"] <- try(t.test(as.numeric(ccprofiler_joinedAreas[i, c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3", "log2area_ctrl_rep4")]), as.numeric(ccprofiler_joinedAreas[i, c("log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3", "log2area_treat_rep4")]))$p.val, silent=T)
+}
+
+ccprofiler_joinedAreas$limma_pBHadj <- ccprofiler_joinedAreas$limma_pval %>% p.adjust(method="fdr")
+
+ccprofiler_joinedAreas$ttest_pBHadj <- ccprofiler_joinedAreas$ttest_pval %>% p.adjust(method="fdr")
+
+
+ccprofiler_joinedAreas$meanLog2FCnoInf <-rowMeans(data.frame(ifelse(ccprofiler_joinedAreas$foldChange_rep1 %>% is.infinite(), NA, ccprofiler_joinedAreas$foldChange_rep1), ifelse(ccprofiler_joinedAreas$foldChange_rep2 %>% is.infinite(), NA, ccprofiler_joinedAreas$foldChange_rep2), ifelse(ccprofiler_joinedAreas$foldChange_rep3 %>% is.infinite(), NA, ccprofiler_joinedAreas$foldChange_rep3)), na.rm=T)
+
+ccprofiler_joinedAreas$meanLog2FC <-rowMeans(data.frame(ccprofiler_joinedAreas$foldChange_rep1, ccprofiler_joinedAreas$foldChange_rep2, ccprofiler_joinedAreas$foldChange_rep3))
+
+ccprofiler_joinedAreas <- ccprofiler_joinedAreas %>% left_join(select(uniprot, accession, protein_name, mass, go_f, go_p, go_c), by=join_by(protein_id==accession))
+```
+## QC - correlations between chromatograms
+
+```{r}
+calculateChromatogramCorrelations <- function(traces1, traces2, accessions=NULL, start_fraction=1, end_fraction=ncol(traces1)-1){
+  correlations <- data.frame(matrix(nrow=uniqueN(accessions), ncol=5))
+  names(correlations) <- c("accession", "correlation", "sum", "sum_cond1", "sum_cond2")
+  i <- 1
+  if(is.null(accessions)){
+    used_accessions <- intersect(traces1$id, traces2$id)
+  } else {
+    used_accessions <- accessions
+  }
+  for(acc in used_accessions){
+    selected1 <- traces1 %>% filter(id == acc) %>% select((start_fraction):(end_fraction))
+    selected2 <- traces2 %>% filter(id == acc) %>% select((start_fraction):(end_fraction))
+    if(ifelse(is.na(all(as.numeric(selected1)==0) | all(as.numeric(selected2)==0)), T, all(as.numeric(selected1)==0) | all(as.numeric(selected2)==0))) {
+      next
+    }
+    correlations[i,1]<- acc
+    correlations[i,2]<- cor(as.numeric(selected1),as.numeric(selected2), method="pearson")
+    correlations[i,3] <- sum(as.numeric(selected1)) + sum(as.numeric(selected2))
+    correlations[i,4] <- sum(as.numeric(selected1)) 
+    correlations[i,5] <- sum(as.numeric(selected2))
+    i <- i+1
+  }
+  correlations
+}
+
+corr_ctrl1_ctrl2 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_1$traces, protein_traces_list$ctrl_2$traces)
+corr_ctrl1_ctrl3 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_1$traces, protein_traces_list$ctrl_3$traces)
+corr_ctrl2_ctrl3 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_2$traces, protein_traces_list$ctrl_3$traces)
+
+corr_aSYN1_aSYN2 <- calculateChromatogramCorrelations(protein_traces_list$PEP_1$traces, protein_traces_list$PEP_2$traces)
+corr_aSYN1_aSYN3 <- calculateChromatogramCorrelations(protein_traces_list$PEP_1$traces, protein_traces_list$PEP_3$traces)
+corr_aSYN2_aSYN3 <- calculateChromatogramCorrelations(protein_traces_list$PEP_2$traces, protein_traces_list$PEP_3$traces)
+
+corr_ctrl1_aSYN2 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_1$traces, protein_traces_list$PEP_2$traces)
+corr_ctrl1_aSYN3 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_1$traces, protein_traces_list$PEP_3$traces)
+corr_ctrl2_aSYN3 <- calculateChromatogramCorrelations(protein_traces_list$ctrl_2$traces, protein_traces_list$PEP_3$traces)
+
+corr_aSYN1_ctrl2 <- calculateChromatogramCorrelations(protein_traces_list$PEP_1$traces, protein_traces_list$ctrl_2$traces)
+corr_aSYN1_ctrl3 <- calculateChromatogramCorrelations(protein_traces_list$PEP_1$traces, protein_traces_list$ctrl_3$traces)
+corr_aSYN2_ctrl3 <- calculateChromatogramCorrelations(protein_traces_list$PEP_2$traces, protein_traces_list$ctrl_3$traces)
+
+correlations_dataframe <- rbind(data.frame(class="ctrl_ctrl", comparison="01_ctrl1_ctrl2", correlations=corr_ctrl1_ctrl2$correlation), data.frame(class="ctrl_ctrl", comparison="02_ctrl1_ctrl3", correlations=corr_ctrl1_ctrl3$correlation)) %>% rbind(data.frame(class="ctrl_ctrl", comparison="03_ctrl2_ctrl3", correlations=corr_ctrl2_ctrl3$correlation)) %>% rbind(data.frame(class="aSYN_aSYN", comparison="04_aSYN1_aSYN2", correlations=corr_aSYN1_aSYN2$correlation)) %>% rbind(data.frame(class="aSYN_aSYN", comparison="05_aSYN1_aSYN3", correlations=corr_aSYN1_aSYN3$correlation)) %>% rbind(data.frame(class="aSYN_aSYN", comparison="06_aSYN2_aSYN3", correlations=corr_aSYN2_aSYN3$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="07_ctrl1_aSYN2", correlations=corr_ctrl1_aSYN2$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="08_ctrl1_aSYN3", correlations=corr_ctrl1_aSYN3$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="10_ctrl2_aSYN3", correlations=corr_ctrl2_aSYN3$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="09_ctrl2_aSYN1", correlations=corr_aSYN1_ctrl2$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="11_ctrl3_aSYN1", correlations=corr_aSYN1_ctrl3$correlation)) %>% rbind(data.frame(class="ctrl_aSYN", comparison="12_ctrl3_aSYN2", correlations=corr_aSYN2_ctrl3$correlation)) %>% group_by(class) %>% arrange(factor(class, levels = c("ctrl_ctrl", "aSYN_aSYN", "ctrl_aSYN"))) %>% mutate(class = fct(class))
+
+ggplot(data = correlations_dataframe, mapping = aes(x=comparison, y=correlations, fill=class)) + geom_violin() + geom_boxplot(width=0.07, color="black", alpha=0.6, outliers=F)
+
+
+ctrl_stdevs <- apply(foldChanges_noWindowFitting[,c("log2area_ctrl_rep1", "log2area_ctrl_rep2", "log2area_ctrl_rep3")], 1, sd, na.rm=T)
+
+PEP_stdevs <- apply(foldChanges_noWindowFitting[,c("log2area_treat_rep1", "log2area_treat_rep2", "log2area_treat_rep3")], 1, sd, na.rm=T)
+
+foldChanges_noWindowFittingQC <- foldChanges_noWindowFitting %>% select(1:29)
+
+foldChanges_noWindowFittingQC$sd_ctrl <- ctrl_stdevs
+foldChanges_noWindowFittingQC$sd_treat <- PEP_stdevs
+
+```
+
+
+```{r}
+ggplot(data=protein_DiffExprProtein, mapping = aes(x=pVal)) + geom_histogram(binwidth=0.01)
+
+ggplot(data=ccprofiler_joinedAreas, mapping = aes(x=limma_pval)) + geom_histogram(binwidth=0.01)
+
+ggplot(data=foldChanges_noWindowFitting, mapping = aes(x=ibmt_pval)) + geom_histogram(binwidth=0.01)
+
+ggplot(data=foldChanges_noWindowFitting, mapping = aes(x=limma_pval)) + geom_histogram(binwidth=0.01)
+
+ggplot(data=foldChanges_noWindowFitting, mapping = aes(x=as.numeric(ttest_pval))) + geom_histogram(binwidth=0.01)
+
+```
+
+## Positions of changed peaks
+TODO highlight the hits in red on the first plot to simplify
+
+```{r}
+ggplot(data=foldChanges_noWindowFitting) + geom_point(mapping=aes(x=mu, y=meanFCnoInf)) + ylim(-7, 7) + labs(title="All PrInCE-detected peaks - aSYN") + xlab("Peak center [fraction nr.]") + ylab("Log2 fold change") + xlim(0,32)
+ggplot(data=filter(foldChanges_noWindowFitting, ibmt_pBHadj < 0.05)) + geom_point(mapping=aes(x=mu, y=meanFCnoInf), colour="red") + ylim(-7, 7) + labs(title="PrInCE-detected hits - aSYN") + xlab("Peak center [fraction nr.]") + ylab("Log2 fold change") + xlim(0,32) 
+
+ggplot(data=foldChanges_noWindowFitting) + geom_point(mapping=aes(x=mu, y=meanFCnoInf, colour="Non-hits")) + geom_point(data = filter(foldChanges_noWindowFitting, ibmt_pBHadj < 0.05) , mapping=aes(x=mu, y=meanFCnoInf, colour="Hits (q < 0.05)")) + ylim(-7, 7) + labs(title="All PrInCE-detected peaks - aSYN") + xlab("Peak center [fraction nr.]") + ylab("Log2 fold change") + xlim(0,32)  + scale_colour_manual(values = c("Non-hits"="black", "Hits (q < 0.05)"="red"))
+```
+##GO enrichment
+```{r}
+foldChanges_noWindowFitting <- foldChanges_noWindowFitting %>% mutate(isHit = (ibmt_pBHadj < 0.05))
+
+calculate_go_enrichment(foldChanges_noWindowFitting, protein_id = protein_id, is_significant = isHit, go_annotations_uniprot = go_f, plot_cutoff = "pval top10")
+```
+
+
+### Annotate hits as PEP-binding or not
+```{r}
+IlariaPiazzaLiPData <- read_excel("IlariaPiazza_LiPData.xlsx", sheet="aSYN")
+IlariaPiazzaAnnotations <- read_excel("IlariaPiazza_LiPData.xlsx", sheet="Encyc") %>% filter(`LiP-SMap_expID` == "aSYN")
+
+#Get LiP hits, but without those validated only at lower concentration
+IlariaPiazzaLiPHits <- IlariaPiazzaLiPData %>% filter((is_C1_validated | is_C2_validated) & !(is_C1_validated & !is_C2_validated)) %>% select(UniProtKB_ID)
+
+foldChanges_noWindowFitting <- foldChanges_noWindowFitting %>% mutate(isAnnotatedMetaboliteInteractor = protein_id %in% IlariaPiazzaAnnotations$`Uniprot ID`) %>% mutate(isLiPHit = protein_id %in% IlariaPiazzaLiPHits$UniProtKB_ID)
+
+ccprofiler_joinedAreas <- ccprofiler_joinedAreas %>% mutate(isAnnotatedMetaboliteInteractor = protein_id %in% IlariaPiazzaAnnotations$`Uniprot ID`) %>% mutate(isLiPHit = protein_id %in% IlariaPiazzaLiPHits$UniProtKB_ID)
+
+overall_annotated_number_gaussian <- uniqueN(filter(foldChanges_noWindowFitting, isAnnotatedMetaboliteInteractor | isLiPHit)$protein_id)
+
+overall_nonannotated_number_gaussian <- uniqueN(filter(foldChanges_noWindowFitting, !(isAnnotatedMetaboliteInteractor | isLiPHit))$protein_id)
+
+hit_annotated_number_gaussian <- uniqueN(filter(foldChanges_noWindowFitting, ibmt_pBHadj < 0.0049 & (isAnnotatedMetaboliteInteractor | isLiPHit))$protein_id)
+
+hit_nonannotated_number_gaussian <- uniqueN(filter(foldChanges_noWindowFitting, ibmt_pBHadj < 0.0049 & !(isAnnotatedMetaboliteInteractor | isLiPHit))$protein_id)
+                                                
+```
+
+
+## Overlap with Ilaria Piazza hits
+```{r}
+
+foldChanges_noWindowFitting_withLiPData <- foldChanges_noWindowFitting %>% filter(!is.na(ibmt_pBHadj)) %>% select(protein_id, mu, ibmt_pval, ibmt_pBHadj, meanFCnoInf, protein_name, go_f, isAnnotatedMetaboliteInteractor, isLiPHit) %>% left_join(select(IlariaPiazzaLiPData, UniProtKB_ID, is_C1_validated, is_C2_validated, is_known_alloTarget, is_known_reactant, is_known_notMetTarget, N_quantif_peps, protein_coverage), by=join_by(protein_id == UniProtKB_ID), suffix=c("", "_IlariaPiazza"))
+
+foldChanges_noWindowFitting_withLiPData_toSave <- filter(foldChanges_noWindowFitting_withLiPData, ibmt_pBHadj < 0.1 | is_C1_validated | is_C2_validated | isAnnotatedMetaboliteInteractor)
+
+foldChanges_noWindowFitting_withLiPData_toSave <- foldChanges_noWindowFitting_withLiPData_toSave[order(foldChanges_noWindowFitting_withLiPData_toSave$ibmt_pval),]
+
+foldChanges_noWindowFitting_withLiPData_toSave[is.na(foldChanges_noWindowFitting_withLiPData_toSave)] <- "NA"
+
+write_xlsx(foldChanges_noWindowFitting_withLiPData_toSave, path="aSYN_SEChits_withIlariaPiazzaData.xlsx")
+```
+
+# Spectronaut report processing for Marc (MaxLFQ and ibaq protein quantity)
+```{r read-and-process-data}
+library(tidyverse)
+# Read the TSV file
+data_PCM16 <- read_tsv("C:/Users/ailaria/Projects/PCM/20251215_PCM18_pg_ibaq_Report.tsv")
+# Select columns and extract information from r_FileName
+processed_data_PCM18 <- data_PCM16 %>%
+  select(R.FileName, PG.IBAQ, PG.Quantity, UniprotId = PG.ProteinAccessions) %>%
+  mutate(
+    # Extract replicate number from "biolrep#"
+    R.Replicate = str_extract(R.FileName, "biolrep(\\d+)") %>% 
+      str_extract("\\d+") %>% 
+      as.integer(),
+    
+    # Extract fraction number from "f##"
+    R.Fraction = str_extract(R.FileName, "_f(\\d+)_") %>% 
+      str_extract("\\d+") %>% 
+      as.integer(),
+    
+    # Extract condition (ctrl or PEP) - looks for these words in the filename
+    R.Condition = str_extract(R.FileName, "ctrl|ADP")
+  )
+# Save the processed data to a TSV file
+write_tsv(processed_data_PCM18, "C:/Users/ailaria/Projects/PCM/PCM16_pg_ibaq_maxLFQ_essential_columns_report.tsv")
+# View the result
+head(processed_data_PCM18)
+```
+
+
+# aSYN data processing 
+```{r}
+library(tidyverse)
+
+# Define the file path
+base_path <- "C:/Users/ailaria/Projects/alpha-synuclein/processing_data_Marc/"  # Update this to your actual path
+
+# List of file names
+files <- c(
+  "20250715_IA003_SEC_SILAC_BR_GFP_BR1_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  "20250715_IA003_SEC_SILAC_BR_GFP_BR2_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  "20250715_IA003_SEC_SILAC_BR_GFP_BR3_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  "20250715_IA003_SEC_SILAC_BR_InTox_BR1_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  "20250715_IA003_SEC_SILAC_BR_InTox_BR2_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  "20250715_IA003_SEC_SILAC_BR_InTox_BR3_GAL_H10_Report_AP_scheme_qvalue_rawquant (Normal).tsv"
+)
+
+# Function to read and process each file
+process_file <- function(file_name, base_path) {
+  read_tsv(paste0(base_path, file_name), show_col_types = FALSE) %>%
+    select(r_FileName = `R.FileName`, pg_Quantity = `PG.Quantity`, UniprotId = `PG.ProteinAccessions`) %>%
+    mutate(
+      # Extract replicate (BR1, BR2, BR3)
+      r_Replicate = str_extract(r_FileName, "BR[1-3]"),
+      
+      # Extract fraction (f1, f2, ..., f32)
+      r_Fraction = str_extract(r_FileName, "f\\d+"),
+      
+      # Extract condition and rename: GFP -> ctrl, InTox -> aSYN
+      r_Condition = case_when(
+        str_detect(r_FileName, "GFP") ~ "ctrl",
+        str_detect(r_FileName, "InTox") ~ "aSYN",
+        TRUE ~ NA_character_
+      )
+    )
+}
+
+# Read, process, and combine all files
+processed_data <- files %>%
+  map_dfr(~ process_file(.x, base_path))
+
+# Save the merged data
+write_tsv(processed_data, paste0(base_path, "aSYN_10h_pg_essential_columns_report.tsv"))
+
+# View the result
+head(processed_data)
+cat("\nTotal rows:", nrow(processed_data))
+colnames(processed_data)
+
+```
+
+
+# check ctrl correlations among all experimetns
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/ailaria/Projects/PCM/replicates comparison")
+
+# Set working directory to where your data files are
+setwd("C:/Users/ailaria/Projects/PCM/replicates comparison")
+
+# Now run the analysis
+#source("CFMS_Control_QC_Analysis_Adapted.R")
+# Source the module
+source("C:/Users/ailaria/Projects/PCM/replicates comparison/CFMS_Control_QC_ElutionAware_finalChecks.R")
+
+files <- c(
+  PEP = "C:/Users/ailaria/Projects/PCM/replicates comparison/20251126_114514_20251021_AP_scheme_qvalue_rawquant_Report.tsv",
+  aSYN = "C:/Users/ailaria/Projects/PCM/replicates comparison/20251202_PCM18_AP_qvalue_rawquant.tsv",
+  NAD = "C:/Users/ailaria/Projects/PCM/replicates comparison/20260108_PCM19_NAD_Anna_rawquant_Report.tsv",
+  ATP = "C:/Users/ailaria/Projects/PCM/replicates comparison/20251127_PCM20_directDIA_Anna_SEC_Report.tsv",
+  PGP = "C:/Users/ailaria/Projects/PCM/replicates comparison/20251215_PCM21_pg_ibaq_Anna_rawquant_Report.tsv"
+)
+
+
+# ════════════════════════════════════════════════════════════
+# FAST RUN (~5-15 minutes) - Use this first!
+# ════════════════════════════════════════════════════════════
+results_fast <- run_control_qc_elution(
+  file_paths = files,
+  ctrl_condition = "ctrl",
+  output_dir = "C:/Users/ailaria/Projects/PCM/replicates comparison/control_qc_fast_additionalChecks", # CHECK NAMING IST CORRECT AND MATCHES SOURCE
+  methods = c("sum", "median"),     # Fewer methods
+  run_elution_analysis = TRUE,
+  fit_gaussian = FALSE,             # Weighted mean (FAST!)
+  sample_frac = 0.2,                # Only 20% of peptides
+  n_cores = 8
+)
+
+# ════════════════════════════════════════════════════════════
+# MEDIUM RUN (~30-60 minutes) - Good balance
+# ════════════════════════════════════════════════════════════
+results_medium <- run_control_qc_elution(
+  file_paths = files,
+  ctrl_condition = "ctrl",
+  output_dir = "C:/Users/ailaria/Projects/PCM/replicates comparison/control_qc_medium_finalChecks",
+  methods = c("top5", "median", "iBAQ", "maxLFQ"), # No maxLFQ = MUCH faster!
+  run_elution_analysis = TRUE,
+  fit_gaussian = FALSE,             # Weighted mean (fast)
+  sample_frac = 1.0,                # All peptides
+  n_cores = 8
+)
+
+# ════════════════════════════════════════════════════════════
+# FULL RUN (hours) - Only if you need Gaussian R² values
+# ════════════════════════════════════════════════════════════
+results_full <- run_control_qc_elution(
+  file_paths = files,
+  ctrl_condition = "ctrl",
+  output_dir = "C:/Users/ailaria/Projects/PCM/replicates comparison/control_qc_full_finalChecks",
+  fit_gaussian = TRUE,              # Full Gaussian (slow!)
+  sample_frac = 1.0,
+  n_cores = 8
+)
+
+
+# View results
+results$comparison                          # Aggregation method comparison
+results$elution_analysis$position_correlation  # Cross-experiment position correlations
+results$elution_analysis$replicate_cv_summary  # Replicate consistency by experiment
+results$elution_analysis$width_anova_pval      # Width batch effect test
+```
+
+# BATCH CORRECTION
+```{r}
+
+source("C:/Users/ailaria/Projects/aSYN_pipelinePCM/SEC_batch_correction/cofrac_batch_correction_v2.R")
+results_batch_correction_10h <- run_cofrac_correction("C:/Users/ailaria/Projects/aSYN_pipelinePCM/20260304_IAA003_aSYN_10h_BRs_GFP_InTox_research_Report_BGS Factory Report (Normal).tsv", reference_replicate = "BR2", output_dir = "C:/Users/ailaria/Projects/asYN_pipelinePCM/SEC_batch_correction/corrected_BR2ref_10h",
+  save_tables         = TRUE,
+  save_plots          = TRUE)
+
+results_batch_correction_10h$shifts
+
+results_batch_correction_10h$plots$global_profiles
+
+
+
+```
+
