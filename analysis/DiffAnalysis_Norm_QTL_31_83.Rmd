@@ -37,10 +37,10 @@ renewenvironment{verbatim}{footnotesizeoldverbatim}{endoldverbatim}
    * Paths use here::here(); inputs read from data/raw/, outputs go to output/.
    * Exploratory / other-project / one-off code moved to analysis/experiments.Rmd.
  The original is preserved verbatim as ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd.
- KNOWN GAP: see the "6. Protein quantification" section and HANDOVER_NOTES.md - the
- step that builds `protein_traces_list` is missing from the original and is flagged
- (not invented). Until you fill it in (and add your data), the report will not knit
- end-to-end past that point.
+ PROTEIN QUANTIFICATION: the step that builds `protein_traces_list` (missing from
+ the original) is now in place in "6. Protein quantification" - it uses the lab
+ sibling/replicate peptide-correlation fix (Option A). The report still needs your
+ input files in data/raw/ to knit end-to-end.
 ============================================================================ -->
 
 # Introduction
@@ -77,7 +77,12 @@ experiment_name <- "QTL_31_83"
 data_location <- "20260414_QTL_83_31_IAA_Report_Angela Report (Normal).tsv"
 
 
-calibration_location <- "IA003_01_SEC_calibration_table.xlsx" 
+calibration_location <- "IA003_01_SEC_calibration_table.xlsx"
+
+# Complex Portal reference table (organism-specific). PER-BRANCH SETTING:
+#   yeast_QTL / yeast_aSYN -> "Complex_portal_559292.tsv"  (S. cerevisiae)
+#   Ecoli_PCM              -> "Complex_portal_83333.tsv"   (E. coli K-12)
+complex_portal_file <- "Complex_portal_559292.tsv"
 
 
 file_name_pattern <-c("260408_AS1_ailaria_QTL_") 
@@ -852,28 +857,26 @@ print(g)
 
 # 6. Protein quantification
 
-> **FLAG - GAP TO CONFIRM (see HANDOVER_NOTES.md, section 5).**
-> The sections below use `protein_traces_list`, a CCprofiler protein-level
-> `tracesList`, but the original `.Rmd` never created it in this file - that step
-> lived in external scripts. It was most likely produced by quantifying the
-> filtered peptide traces to protein level. **This is not invented**: uncomment and
-> adjust the call below to match exactly how you ran it, then the rest of the
-> pipeline can proceed.
+> **Protein quantification.** Builds the protein-level `tracesList` from the
+> filtered peptide traces using the lab "sibling/replicate peptide-correlation"
+> fix (`proteinQuantification_sibPepCorrFix.tracesList`, in
+> `R/ccprofiler_fixes.R`). This is the step that was missing from the original
+> `.Rmd`; **Option A** is the confirmed one, **Option B** is a stock-CCprofiler
+> alternative kept commented for reference.
 
-```{r protein-quantification, eval=FALSE}
-# LIKELY intended step - CONFIRM the function and arguments you actually used.
-# Option A: the lab "sibling/replicate peptide-correlation" fix (in ccprofiler_fixes.R):
-# protein_traces_list <- proteinQuantification_sibPepCorrFix.tracesList(
-#   pepTracesList_filtered,
-#   topN       = 2,
-#   keep_less  = FALSE,
-#   rm_decoys  = TRUE,
-#   quantLevel = "protein_id"
-# )
-#
-# Option B: stock CCprofiler protein quantification:
+```{r protein-quantification}
+# Option A (used): lab sibling/replicate peptide-correlation fix
+# (defined in R/ccprofiler_fixes.R). It already returns an object of class "tracesList".
+protein_traces_list <- proteinQuantification_sibPepCorrFix.tracesList(
+  pepTracesList_filtered,
+  topN       = 2,
+  keep_less  = FALSE,
+  rm_decoys  = TRUE,
+  quantLevel = "protein_id"
+)
+
+# Option B (alternative): stock CCprofiler protein quantification. Uncomment to use.
 # protein_traces_list <- proteinQuantification(pepTracesList_filtered, topN = 2)
-#
 # class(protein_traces_list) <- "tracesList"
 ```
 
@@ -1377,11 +1380,11 @@ for(i in Sample_id_treat) {
 # COMPLEX level analysis
 
 ```{r}
-# FLAG: this Complex Portal file is *E. coli* (taxid 83333), but this experiment is
-# yeast (strains 31/83). Confirm whether you want the S. cerevisiae table
-# (taxid 559292) and place it in data/raw/. Also fixed: sep was 't' (a stray
-# character) -> "\t" (a real tab).
-complex_portal_Ecoli <- read.csv(here("data", "raw", "Complex_portal_83333.tsv"), sep = "\t", header = TRUE) %>%
+# Complex Portal reference table for this organism. The filename is set once in
+# the SETUP section via `complex_portal_file` (this branch: S. cerevisiae,
+# taxid 559292). Place that file in data/raw/. (Original sep was 't', a stray
+# character; corrected to "\t".)
+complex_portal <- read.csv(here("data", "raw", complex_portal_file), sep = "\t", header = TRUE) %>%
   janitor::clean_names() 
 ```
 
@@ -1390,30 +1393,30 @@ complex_portal_Ecoli <- read.csv(here("data", "raw", "Complex_portal_83333.tsv")
 ```{r}
 # set hypothesis
 
-complexHypotheses_Ecoli <- complex_portal_Ecoli %>%
+complexHypotheses <- complex_portal %>%
   dplyr::select(x_complex_ac, recommended_name, aliases_for_complex, description, complex_properties, complex_assembly, expanded_participant_list ) %>% #only keep needed columns 
 separate_rows(expanded_participant_list, sep = "|") %>% #separate each partecipant in a different row
 separate(expanded_participant_list, c("protein_id", "stoichiometry"), sep = "(", convert = TRUE, remove = FALSE) %>% # separate the stoichiometry in a different column
 mutate(stoichiometry = gsub(")", "", stoichiometry)) %>% #remove second braket from the stoichiometry number
  dplyr::rename("complex_id"="x_complex_ac", "complex_name"="recommended_name") # fix col names
 
-complexHypotheses_Ecoli_minimal <- complexHypotheses_Ecoli %>%
+complexHypotheses_minimal <- complexHypotheses %>%
    dplyr::select(complex_id, complex_name, protein_id ) %>%
   mutate(complex_id = str_replace(complex_id, "CPX-", "")) %>%
   as.data.table()
 
-head(complexHypotheses_Ecoli_minimal)
+head(complexHypotheses_minimal)
 
 
-binary_Ecoli <- complexHypotheses_Ecoli_minimal %>%
+binary_hyp <- complexHypotheses_minimal %>%
   dplyr::select(complex_id, protein_id) %>%
   mutate(protein_id = gsub("-PRO_.*", "", protein_id))#remove -PRO_
 
 #### plus decoy
 
-pathLength <- calculatePathlength(binary_Ecoli)
+pathLength <- calculatePathlength(binary_hyp)
 
-EcoliTargetsPlusDecoys <- generateComplexDecoys(target_hypotheses=complexHypotheses_Ecoli_minimal,
+complexTargetsPlusDecoys <- generateComplexDecoys(target_hypotheses=complexHypotheses_minimal,
                                                 dist_info=pathLength,
                                                 min_distance = 3,
                                                 append=TRUE)
@@ -1433,14 +1436,14 @@ protein_traces_sum <- integrateTraceIntensities(protein_traces_list,
 
 ```{r}
 
-plotSummarizedMScoverage(hypotheses = complexHypotheses_Ecoli_minimal,
+plotSummarizedMScoverage(hypotheses = complexHypotheses_minimal,
                          protTraces = protein_traces_sum,
                          PDF = F)
 
 
 #' ## Complex feature finding
 complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
-                                        complex_hypothesis = EcoliTargetsPlusDecoys,
+                                        complex_hypothesis = complexTargetsPlusDecoys,
                                         corr_cutoff = 0.9,
                                         window_size = 7,
                                         parallelized = F,
@@ -1478,7 +1481,7 @@ complexFeaturesBestFilterdScored <- scoreFeatures(complexFeaturesBestFilterd, FD
 scoredDataAll <- appendSecondaryComplexFeatures(scoredPrimaryFeatures = complexFeaturesBestFilterdScored, allFeatures = complexFeatures, peakCorr_cutoff = 0.7)
 
 
-plotSummarizedComplexes(scoredDataAll, complexHypotheses_Ecoli_minimal, protein_traces_sum, PDF=F) # ,name="complex_completeness_pie")
+plotSummarizedComplexes(scoredDataAll, complexHypotheses_minimal, protein_traces_sum, PDF=F) # ,name="complex_completeness_pie")
 
 summarizeFeatures(scoredDataAll,
                 plot=TRUE,
@@ -1719,4 +1722,199 @@ dev.off()
 
 save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep_list,protein_DiffExprProtein_list,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))
 
+```
+
+# 7. Cross-correlation differential analysis (alternative / complement)
+
+The statistical test above compares **intensity / assembly state** between
+conditions. This section is a complementary, shape-based view: for each protein it
+compares the **elution profile shape and position** between the two conditions
+using the **cross-correlation function (CCF)**.
+
+For every protein we cross-correlate its mean profile in the reference condition
+(`strain31`) against the treatment (`strain83`) over a range of fraction lags and
+record:
+
+* `max_ccf` — the highest cross-correlation (how similar the two profiles are in
+  shape, scale-independent);
+* `best_lag` — the lag (in fractions) at which that maximum occurs, i.e. the
+  **peak shift** between conditions (0 = no shift);
+* `zero_lag_cor` — the correlation with no shift (similarity "as is").
+
+A non-zero `best_lag` (a peak that moves to a different fraction / apparent MW) or
+a low similarity flags proteins whose elution behaviour changes between strains —
+e.g. complex (dis)assembly — which an abundance-only test can miss.
+
+## 7a. Parameters
+
+```{r ccf-params}
+ccf_lag_max         <- 5                       # max shift (fractions) to scan
+ccf_shift_threshold <- 1                       # |best_lag| >= this  -> flagged "shifted"
+ccf_min_intensity   <- 0                       # require this summed intensity in BOTH conditions
+ccf_ref_condition   <- ref_condition           # strain31 (reference)
+ccf_treat_condition <- treatment_conditions[1] # strain83 (treatment)
+```
+
+## 7b. Per-condition mean elution profiles
+
+```{r ccf-condition-traces}
+# Average replicate protein traces within each condition. CCF is scale-invariant,
+# so aggr_fun = "sum" (used elsewhere in this pipeline) and "mean" are equivalent
+# for the correlation/shift; "sum" is used here because it is known to work with
+# this CCprofiler build.
+cond_traces <- integrateTraceIntensities(
+  protein_traces_list,
+  design_matrix    = design_matrix,
+  integrate_within = "Condition",
+  aggr_fun         = "sum"
+)
+
+# Robust extractor: traces$traces -> numeric matrix (proteins x fractions).
+.get_trace_matrix <- function(traces_obj) {
+  dt <- traces_obj$traces
+  frac_cols <- grep("^[0-9]+$", colnames(dt), value = TRUE)
+  frac_cols <- frac_cols[order(as.numeric(frac_cols))]
+  if (data.table::is.data.table(dt)) {
+    m <- as.matrix(dt[, ..frac_cols])
+  } else {
+    m <- as.matrix(dt[, frac_cols, drop = FALSE])
+  }
+  rownames(m) <- dt$id
+  m
+}
+
+ref_mat    <- .get_trace_matrix(cond_traces[[ccf_ref_condition]])
+treat_mat  <- .get_trace_matrix(cond_traces[[ccf_treat_condition]])
+common_ids <- intersect(rownames(ref_mat), rownames(treat_mat))
+message("Cross-correlation over ", length(common_ids), " proteins present in both conditions.")
+```
+
+## 7c. Compute the cross-correlation metrics per protein
+
+```{r ccf-compute}
+compute_ccf_metrics <- function(x, y, lag_max = 5) {
+  x[is.na(x)] <- 0
+  y[is.na(y)] <- 0
+  if (stats::sd(x) == 0 || stats::sd(y) == 0) {
+    return(c(max_ccf = NA_real_, best_lag = NA_real_, zero_lag_cor = NA_real_))
+  }
+  cc       <- stats::ccf(x, y, lag.max = lag_max, plot = FALSE)
+  acf_vals <- as.numeric(cc$acf)
+  lags     <- as.numeric(cc$lag)
+  i_max    <- which.max(acf_vals)
+  zero_i   <- which(lags == 0)
+  c(max_ccf      = acf_vals[i_max],
+    best_lag     = lags[i_max],
+    zero_lag_cor = if (length(zero_i)) acf_vals[zero_i] else NA_real_)
+}
+
+ccf_results <- data.table::rbindlist(lapply(common_ids, function(id) {
+  m <- compute_ccf_metrics(ref_mat[id, ], treat_mat[id, ], lag_max = ccf_lag_max)
+  data.table::data.table(
+    protein_id   = id,
+    max_ccf      = m[["max_ccf"]],
+    best_lag     = m[["best_lag"]],
+    zero_lag_cor = m[["zero_lag_cor"]],
+    int_ref      = sum(ref_mat[id, ],   na.rm = TRUE),
+    int_treat    = sum(treat_mat[id, ], na.rm = TRUE)
+  )
+}))
+
+ccf_results[, shifted := (!is.na(best_lag)) &
+              (abs(best_lag) >= ccf_shift_threshold) &
+              (int_ref   >= ccf_min_intensity) &
+              (int_treat >= ccf_min_intensity)]
+ccf_results[, log2_int_ratio := log2((int_treat + 1) / (int_ref + 1))]
+data.table::setorder(ccf_results, -shifted, -best_lag)
+
+message("Proteins flagged as shifted (|lag| >= ", ccf_shift_threshold, "): ",
+        sum(ccf_results$shifted, na.rm = TRUE))
+DT::datatable(ccf_results[order(-abs(best_lag))][1:min(.N, 100)],
+              caption = "Per-protein cross-correlation metrics (top by |shift|)")
+```
+
+## 7d. Diagnostic plots
+
+```{r ccf-plots, fig.width=7, fig.height=4}
+# Distribution of optimal lags (peak shifts)
+print(
+  ggplot(ccf_results[!is.na(best_lag)], aes(x = best_lag)) +
+    geom_bar(fill = "#4C72B0") + theme_classic() +
+    labs(title = "Optimal cross-correlation lag (peak shift) per protein",
+         x = "Optimal lag (fractions)   [0 = no shift]", y = "proteins")
+)
+
+# Profile-shape similarity (max CCF)
+print(
+  ggplot(ccf_results[!is.na(max_ccf)], aes(x = max_ccf)) +
+    geom_histogram(bins = 50, fill = "#55A868") + theme_classic() +
+    labs(title = "Maximum cross-correlation (profile-shape similarity)",
+         x = "max CCF", y = "proteins")
+)
+
+# Shift vs zero-lag similarity, hits highlighted
+print(
+  ggplot(ccf_results[!is.na(best_lag)],
+         aes(x = best_lag, y = zero_lag_cor, color = shifted)) +
+    geom_jitter(width = 0.12, height = 0, alpha = 0.6) +
+    scale_color_manual(values = c(`FALSE` = "grey70", `TRUE` = "firebrick")) +
+    theme_classic() +
+    labs(title = "Elution shift vs zero-lag similarity",
+         x = "Optimal lag (fractions)", y = "zero-lag correlation", color = "shifted")
+)
+```
+
+## 7e. Inspect top shifted proteins (overlaid profiles)
+
+```{r ccf-profile-plots, fig.width=7, fig.height=4}
+plot_ccf_protein <- function(id) {
+  df <- rbind(
+    data.frame(fraction = seq_len(ncol(ref_mat)),   intensity = ref_mat[id, ],
+               condition = ccf_ref_condition),
+    data.frame(fraction = seq_len(ncol(treat_mat)), intensity = treat_mat[id, ],
+               condition = ccf_treat_condition)
+  )
+  mrow <- ccf_results[protein_id == id]
+  ggplot(df, aes(x = fraction, y = intensity, color = condition)) +
+    geom_line(linewidth = 1) + geom_point(size = 1) + theme_classic() +
+    labs(title = paste0(id, "   (lag = ", mrow$best_lag,
+                        ", maxCCF = ", round(mrow$max_ccf, 2), ")"),
+         x = "Fraction", y = "Mean intensity")
+}
+
+top_shifted <- head(ccf_results[shifted == TRUE][order(-abs(best_lag))]$protein_id, 12)
+for (id in top_shifted) print(plot_ccf_protein(id))
+```
+
+## 7f. Complement to the statistical test
+
+```{r ccf-save-and-compare}
+# Save the cross-correlation table
+write.table(
+  ccf_results,
+  file      = here::here("output", "tables", "crosscorrelation_results.txt"),
+  sep       = "\t", quote = FALSE, row.names = FALSE
+)
+
+# If the statistical protein-level differential results exist, cross-tabulate
+# which proteins each approach flags (the "complement" view). Adjust the p-value /
+# log2FC column names to match your stats table if they differ.
+if (exists("protein_DiffExprProtein_list")) {
+  stat_dt <- data.table::rbindlist(protein_DiffExprProtein_list, fill = TRUE)
+  pcol <- intersect(c("pBHadj", "qVal", "pVal", "global_pBHadj"), names(stat_dt))[1]
+  if (!is.na(pcol) && "protein_id" %in% names(stat_dt)) {
+    stat_best <- stat_dt[, .(stat_p = min(get(pcol), na.rm = TRUE)), by = protein_id]
+    merged    <- merge(ccf_results, stat_best, by = "protein_id", all = TRUE)
+    merged[, stat_sig := !is.na(stat_p) & stat_p < 0.05]
+    print(table(shifted = merged$shifted, stat_significant = merged$stat_sig, useNA = "ifany"))
+    message("Saved comparison-ready table; 'shifted' (cross-correlation) vs ",
+            "'stat_significant' (", pcol, " < 0.05) shown above.")
+  } else {
+    message("Found protein_DiffExprProtein_list but no recognised p-value/protein_id ",
+            "column - join ccf_results to it manually on protein_id.")
+  }
+} else {
+  message("Statistical protein-level results not in memory; run section 6's ",
+          "differential test, then re-run this chunk to compare the two approaches.")
+}
 ```
