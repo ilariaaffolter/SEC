@@ -23,10 +23,22 @@ _Last updated: 2026-06-19._
   inline definitions.
 - ✅ **Docs**: `README.md` (overview/quickstart) and
   `docs/SETUP_AND_GIT_WORKFLOW.md` (beginner Git/RStudio/renv guide).
+- ✅ **External scripts received** (2026-06-19): the 5 still-needed "elution-aware"
+  modules are in `R/elution_aware/` with a README. The other ~15 scripts the old
+  `.Rmd` referenced are no longer needed and were left out.
 - ⏳ **Clean main-pipeline split** (`analysis/DiffAnalysis_Norm_QTL_31_83.Rmd`)
-  and **tidied experiments file** (`analysis/experiments.Rmd`): **next step** —
-  blocked on a few answers from you (see §5). The unmodified original is
-  preserved as `analysis/ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd`.
+  and **tidied experiments file** (`analysis/experiments.Rmd`): **in progress**.
+  The unmodified original is preserved as
+  `analysis/ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd`.
+
+### Git status note (2026-06-19)
+- Pushing now works; all work is on branch **`claude/clever-ride-3ab2zt`**.
+- The repo's **`main`** branch currently contains a stray file
+  `SEC_project_foundation.tar` — that's the archive committed as a single binary
+  blob (the manual upload added the `.tar` itself, not its extracted files). It's
+  harmless but should be removed. The clean way: merge
+  `claude/clever-ride-3ab2zt` into `main` (which has the real, extracted project)
+  and delete the stray `.tar`. Do NOT keep working from the manual upload.
 
 ---
 
@@ -102,27 +114,23 @@ None of these were invented/guessed — they are flagged here for you to confirm
 
 ---
 
-## 5. What I need from you to finish the clean split
+## 5. Decisions taken / what is still open
 
-To produce a **runnable** `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd` faithfully
-(without me guessing), please help with:
+**Resolved (2026-06-19):**
+1. ✅ **External scripts** — received the 5 still-needed ones (now in
+   `R/elution_aware/`); the rest are not needed and were left out.
+2. ✅ **Other-project chunks** — confirmed: move the `ctrl`/`aSYN`/`PEP`
+   exploratory chunks and the one-off tasks (Marc/PCM/batch) into
+   `experiments.Rmd` (kept, tidied, documented, not deleted).
 
-1. **The external scripts.** Do you have the `ELUTION_AWARE/*.R` and `CFMS_*.R`
-   files (and `cofrac_batch_correction_v2.R`, `CFMS_Control_QC_*` )? If yes,
-   upload them and I'll place them under the project and wire them up. If no,
-   I'll keep those (exploratory) sections in `experiments.Rmd`, clearly marked as
-   "needs external script X".
-2. **`protein_traces_list`.** How was it produced in your QTL run? Most likely it
-   is the output of a protein-quantification call on `pepTracesList_filtered`
-   (possibly `proteinQuantification_sibPepCorrFix.tracesList(...)`, which is in
-   the fixes file). If you can point me to the step (or it's in one of the
-   external scripts), I can complete the main pipeline.
-3. **The other-project chunks.** Confirm it's fine to move the `ctrl`/`aSYN`/`PEP`
-   exploratory chunks and the final one-off tasks (Marc/PCM/batch) into
-   `experiments.Rmd` (kept, tidied, not deleted) rather than the QTL main file.
-
-Default plan if I don't hear otherwise: QTL `strain31`/`strain83` chunks → main
-file; everything else → `experiments.Rmd`; every gap above flagged inline.
+**Still open:**
+- ⚠️ **`protein_traces_list`** — the assembly/complex sections need a CCprofiler
+  protein-level `tracesList`, but the step that creates it isn't in the `.Rmd`,
+  and the uploaded `R/elution_aware/` scripts produce a *different* (custom
+  `results`) object, not a CCprofiler `tracesList`. In the cleaned main pipeline
+  this step is inserted as a clearly-marked **FLAG** with the most likely intended
+  call (`proteinQuantification_sibPepCorrFix.tracesList(pepTracesList_filtered, …)`,
+  commented out) for you to confirm/adjust — it is **not** silently invented.
 
 ---
 
