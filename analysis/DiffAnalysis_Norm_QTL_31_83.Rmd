@@ -867,16 +867,20 @@ print(g)
 > `.Rmd`; **Option A** is the confirmed one, **Option B** is a stock-CCprofiler
 > alternative kept commented for reference.
 
-```{r protein-quantification}
+```{r protein-quantification, message=FALSE, warning=FALSE}
 # Option A (used): lab sibling/replicate peptide-correlation fix
 # (defined in R/ccprofiler_fixes.R). It already returns an object of class "tracesList".
-protein_traces_list <- proteinQuantification_sibPepCorrFix.tracesList(
+# NOTE: CCprofiler prints one BENIGN warning per protein that has >1 annotation row
+# ("multiple entries for protein_id ...: . Picking the first") - it only affects
+# which metadata row is kept, not the quantification. suppressWarnings() keeps it
+# from flooding the console/report.
+protein_traces_list <- suppressWarnings(proteinQuantification_sibPepCorrFix.tracesList(
   pepTracesList_filtered,
   topN       = 2,
   keep_less  = FALSE,
   rm_decoys  = TRUE,
   quantLevel = "protein_id"
-)
+))
 
 # Option B (alternative): stock CCprofiler protein quantification. Uncomment to use.
 # protein_traces_list <- proteinQuantification(pepTracesList_filtered, topN = 2)
