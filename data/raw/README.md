@@ -14,16 +14,16 @@ Portal table. So the layout is:
 data/raw/
 ├── IA003_01_SEC_calibration_table.xlsx   <- shared MW calibration (all comparisons)
 ├── Complex_portal_559292.tsv             <- shared Complex Portal table (S. cerevisiae)
-├── QTL_31_BY/   └── <the 31-vs-BY .tsv>
-├── QTL_31_RM/   └── <the 31-vs-RM .tsv>
-├── QTL_83_BY/   └── <the 83-vs-BY .tsv>
-├── QTL_83_RM/   └── <the 83-vs-RM .tsv>
-└── QTL_RM_BY/   └── <the RM-vs-BY .tsv>
+├── <...>_31_BY_<...>.tsv   ┐
+├── <...>_31_RM_<...>.tsv   │  the five Spectronaut reports, placed FLAT here
+├── <...>_83_BY_<...>.tsv   │  (the long original names are fine - no renaming)
+├── <...>_83_RM_<...>.tsv   │
+└── <...>_RM_BY_<...>.tsv   ┘
 ```
 
-The folder name is the **`comparison_id`** (matches the registry in the `.Rmd`
-SETUP). The `.Rmd` reads the input as
-`here::here("data", "raw", comparison_id, data_location)`.
+The `.Rmd` finds each comparison's file automatically by a short unique substring
+of its name (the `pattern` in the registry), so you don't rename or type the long
+Spectronaut filenames. Inputs are read with `here::here("data", "raw", <found file>)`.
 
 ## How it ties to the `.Rmd`
 
@@ -31,20 +31,21 @@ In the `# 1. SETUP` chunk there is a **comparison registry** and a selector:
 
 ```r
 comparisons <- list(
-  QTL_31_BY = list(tsv = "TODO_QTL_31_BY.tsv", ref = "BY", treat = "strain31"),
+  QTL_83_RM = list(pattern = "_83_RM_", ref = "RM", treat = "83"),
   ... )
-comparison_id <- "QTL_31_BY"   # <- pick the comparison to run
+comparison_id <- "QTL_83_RM"   # <- pick the comparison to run
 ```
 
 To run a comparison:
-1. Put its `.tsv` in `data/raw/<comparison_id>/`.
-2. In the registry, set that entry's `tsv` to the exact filename, and confirm
-   `ref`/`treat` (which strain is the baseline) and that those names match the
-   sample names in the file.
+1. Put its `.tsv` (flat) in `data/raw/`.
+2. In the registry, set `pattern` to a short unique substring of that file's name
+   (e.g. `"_83_RM_"`), and set `ref`/`treat` to the condition LABELS used inside
+   the data (verify with `unique(design_matrix$Condition)` after the design-matrix
+   chunk - they are NOT taken from the filename).
 3. Set `comparison_id` to that entry and knit. Outputs land in
    `output/<comparison_id>/`.
 
-Add a new comparison by adding a row to `comparisons` and a folder in `data/raw/`.
+Add a new comparison by adding a row to `comparisons` (and dropping its .tsv in `data/raw/`).
 
 ## Shared files
 

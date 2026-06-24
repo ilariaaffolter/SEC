@@ -84,11 +84,16 @@ Sys.setenv(LANG="en")
 #   ref/treat direction and that these names match the sample names in that .tsv.
 # ==========================================================================
 comparisons <- list(
-  QTL_31_BY = list(tsv = "TODO_QTL_31_BY.tsv", ref = "BY", treat = "strain31"),
-  QTL_31_RM = list(tsv = "TODO_QTL_31_RM.tsv", ref = "RM", treat = "strain31"),
-  QTL_83_BY = list(tsv = "TODO_QTL_83_BY.tsv", ref = "BY", treat = "strain83"),
-  QTL_83_RM = list(tsv = "TODO_QTL_83_RM.tsv", ref = "RM", treat = "strain83"),
-  QTL_RM_BY = list(tsv = "TODO_QTL_RM_BY.tsv", ref = "BY", treat = "RM")
+  # pattern = a SHORT unique substring of that comparison's .tsv filename (the
+  #   file is found automatically in data/raw/, so you don't type long names).
+  # ref / treat = condition LABELS as they appear INSIDE the data (parsed from
+  #   r_file_name in chunk 2b) - NOT from the .tsv filename. Verify with
+  #   unique(design_matrix$Condition) and adjust if needed.
+  QTL_31_BY = list(pattern = "_31_BY_", ref = "BY", treat = "31"),
+  QTL_31_RM = list(pattern = "_31_RM_", ref = "RM", treat = "31"),
+  QTL_83_BY = list(pattern = "_83_BY_", ref = "BY", treat = "83"),
+  QTL_83_RM = list(pattern = "_83_RM_", ref = "RM", treat = "83"),
+  QTL_RM_BY = list(pattern = "_RM_BY_", ref = "BY", treat = "RM")
 )
 
 ## ---- choose the comparison to run ----
@@ -98,15 +103,28 @@ comparison_id <- "QTL_31_BY"
 stopifnot(comparison_id %in% names(comparisons))
 .cmp                 <- comparisons[[comparison_id]]
 experiment_name      <- comparison_id
-data_location        <- .cmp$tsv
+# find this comparison's .tsv in data/raw/ by its unique filename substring
+.find_tsv <- function(pat) {
+  all_tsv <- list.files(here::here("data", "raw"), pattern = "\\.tsv$")
+  hits <- all_tsv[grepl(pat, all_tsv, fixed = TRUE)]
+  if (length(hits) == 0) stop("No .tsv in data/raw/ contains '", pat,
+                              "'. Files present: ", paste(all_tsv, collapse = ", "))
+  if (length(hits) > 1)  stop("Multiple .tsv match '", pat, "': ",
+                              paste(hits, collapse = ", "))
+  hits
+}
+data_location        <- .find_tsv(.cmp$pattern)
 condition1           <- .cmp$ref      # reference / baseline
 condition2           <- .cmp$treat    # treatment / test
 calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all comparisons
 complex_portal_file  <- "Complex_portal_559292.tsv"             # S. cerevisiae (taxid 559292)
 
-# Sample-name prefix used to parse fraction info. If different comparisons come
-# from runs with different prefixes, add a `pattern` field per registry entry
-# and set this from `.cmp$pattern`.
+# Prefix of each sample's INTERNAL run name (r_file_name) that is stripped when
+# parsing fraction/condition info in chunk 2b (this is NOT the .tsv filename).
+# IMPORTANT: chunk 2b also splits r_file_name by "_" into fixed positions
+# (date_instrument_operator_experiment_replicate_condition_fraction_position).
+# If your new runs name samples differently, that split (and this prefix) must be
+# adjusted - check unique(data$r_file_name) after the import.
 file_name_pattern <- c("260408_AS1_ailaria_QTL_")
 
 # colours: reference vs treatment
@@ -305,7 +323,7 @@ source(here::here("R", "ccprofiler_fixes.R"))
 if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
   load(file.path(out_dir, "rdata", "data_input.RData"))
 } else {
-  data <- read_protti(here("data", "raw", comparison_id, data_location))
+  data <- read_protti(here("data", "raw", data_location))
   save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
 }
 
