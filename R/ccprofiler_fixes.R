@@ -732,8 +732,21 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
     diff[wilcoxPval==2, wilcoxPval := NA ]
     if (length(unique(design_matrix$Replicate)) > 1) {
       diff[, betaPval_BHadj := p.adjust(betaPval, method = "fdr")]
-      Qv <- qvalue::qvalue(diff$betaPval, lambda = 0.4)
-      diff[, betaQval := Qv$qvalues]
+      # robust q-values (fix): estimate on non-NA p-values, and fall back to the
+      # default lambda sequence then BH if qvalue's pi0 estimation fails (small or
+      # degenerate beta-p-value distributions otherwise error inside pi0est()).
+      .qv <- rep(NA_real_, nrow(diff))
+      .ok <- !is.na(diff$betaPval)
+      if (any(.ok)) {
+        .qv[.ok] <- tryCatch(
+          qvalue::qvalue(diff$betaPval[.ok], lambda = 0.4)$qvalues,
+          error = function(e) tryCatch(
+            qvalue::qvalue(diff$betaPval[.ok])$qvalues,
+            error = function(e2) p.adjust(diff$betaPval[.ok], method = "BH")
+          )
+        )
+      }
+      diff[, betaQval := .qv]
       #diff[, wilcoxPval_BHadj := p.adjust(wilcoxPval, method = "fdr")]
       #wilcoxPvalQv <- qvalue::qvalue(diff$wilcoxPval, lambda = 0.4)
       #diff[, wilcoxQval := wilcoxPvalQv$qvalues]
