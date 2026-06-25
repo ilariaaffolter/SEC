@@ -540,6 +540,18 @@ setnames(design_matrix, c("condition_id","replicate_id","sample"), c("Condition"
 
 design_matrix$Condition <- factor(design_matrix$Condition, levels= condition_levels)
 
+# Safety net: factor() above turns Condition into NA if the registry ref/treat
+# don't match the labels parsed from the data. Fail fast with a clear message
+# instead (this mismatch is what previously cascaded into the q-value / hist
+# errors much further downstream).
+if (anyNA(design_matrix$Condition)) {
+  stop("design_matrix$Condition has NA: the comparison's ref/treat (",
+       paste(condition_levels, collapse = ", "),
+       ") do not match the condition labels in the data. Labels found: ",
+       paste(sort(unique(as.character(fraction_annotation_table$condition_id))), collapse = ", "),
+       ". Edit ref/treat in the SETUP comparison registry to match.")
+}
+
 
 ```
 
