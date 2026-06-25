@@ -975,10 +975,36 @@ diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assemb
                                              design_matrix= design_matrix, 
                                              compare_between = "Condition",
                                              quantLevel = "protein_id",
-                                             plot=T, 
+                                             plot=T,
                                              PDF=F #,
                                              #name = paste0("beta_pvalue_histogram_"ref_condition,"_",i)
                                              )
+
+# ---- categorize proteins by assembly change (treatment vs reference) ----
+# FIX: more_assembled_proteins_list / less_assembled_proteins_list were declared
+# above but never populated (that is why they were empty). Populate them here.
+# meanDiff follows $testOrder, and the within-protein sample order can vary, so
+# convert it to a fixed treatment-minus-reference difference => unambiguous sign.
+.treat <- treatment_conditions[1]
+diffAssemblyState[, treat_minus_ref := ifelse(
+  testOrder == paste0(.treat, ".vs.", ref_condition),  meanDiff,
+  ifelse(testOrder == paste0(ref_condition, ".vs.", .treat), -meanDiff, NA_real_))]
+
+assembly_padj_cutoff   <- 0.05   # set to 1 to ignore significance (use effect size only)
+assembly_effect_cutoff <- 0.1    # minimum |change| in assembled-mass fraction
+
+sig_assembly <- diffAssemblyState[!is.na(treat_minus_ref) &
+                                  betaPval_BHadj < assembly_padj_cutoff &
+                                  abs(treat_minus_ref) > assembly_effect_cutoff]
+
+more_assembled_proteins_list      <- sig_assembly[treat_minus_ref > 0]$protein_id  # more assembled in treatment
+less_assembled_proteins_list      <- sig_assembly[treat_minus_ref < 0]$protein_id  # less assembled in treatment
+proteins_withAssemblyChanges_list <- sig_assembly$protein_id
+
+message("Assembly changes (padj < ", assembly_padj_cutoff, ", |delta| > ", assembly_effect_cutoff,
+        "): ", length(more_assembled_proteins_list), " more-assembled, ",
+        length(less_assembled_proteins_list), " less-assembled in ", .treat, " vs ", ref_condition,
+        ". (If both are 0, relax assembly_padj_cutoff/assembly_effect_cutoff above.)")
 
 ```
 
@@ -1055,19 +1081,31 @@ pepTracesList_filtered_minN <- subset(pepTracesList_filtered, trace_subset_ids =
 ```{r perform_prot_grid_search}
 
 if(perform_prot_grid_search == T) {
-# Calculate the number of unique protein IDs to select (10% of total)
-num_ids <- ceiling(length(unique(pepTracesList_filtered_minN$ctrl_1$trace_annotation$protein_id)) * 0.1)
+# NOTE (faithful fix): the original sampled from `pepTracesList_filtered_minN$ctrl_1` and then set
+# `grid_peptideTraces <- grid_peptideTraces$ctrl_1`. This design has NO condition named "ctrl_1"
+# (conditions are strainBY/strainRM/strain31/strain83), so both returned NULL and the search could
+# not run. The real findProteinFeatures call below runs on traces INTEGRATED across all conditions,
+# so the parameter search should use the same kind of object. performProteinGridSearch() wants a
+# single `traces` object (not a tracesList), so: sample 10% of proteins, integrate that subset the
+# same way as the real run, then search on that single integrated object.
 
-# Randomly sample 10% of unique protein IDs
-subset_ids <- sample(unique(pepTracesList_filtered_minN$ctrl_1$trace_annotation$protein_id), num_ids)
+# protein universe is identical across list elements; use the first (robust to condition naming)
+.grid_prot_ids <- unique(pepTracesList_filtered_minN[[1]]$trace_annotation$protein_id)
 
-grid_peptideTraces <- subset(pepTracesList_filtered_minN,
+# 10% random subset (seed added for reproducibility - flag: NOT in the original, remove if unwanted)
+set.seed(123)
+num_ids    <- ceiling(length(.grid_prot_ids) * 0.1)
+subset_ids <- sample(.grid_prot_ids, num_ids)
+
+grid_subset <- subset(pepTracesList_filtered_minN,
                         trace_subset_ids = subset_ids,
                         trace_subset_type = "protein_id")
 
-# performProteinGridSearch doesn't work with Traces List -> only work on the control list:
-
-grid_peptideTraces <- grid_peptideTraces$ctrl_1
+# integrate the subset across conditions -> single `traces` object (same call as pepTracesIntegrated_sum)
+grid_peptideTraces <- integrateTraceIntensities(grid_subset,
+                                                 design_matrix   = NULL,
+                                                 integrate_within = NULL,
+                                                 aggr_fun        = "sum")
 
 
 # Perform a small grid search for 2 parameter combinations
@@ -1079,24 +1117,62 @@ grid_peptideTraces <- grid_peptideTraces$ctrl_1
                                       windows = c(5,7,10,12), #window_size, 7 for Isabel
                                       smoothing = c(7,9,11), #smoothing_length, 7 for Isabel 
                                       rt_heights = c(1,4,5), #rt_height, 1 for Isabel
-                                      n_cores = 5) #n_cores = 3, for Isabel
+                                      n_cores = max(1, min(parallel::detectCores() - 1, 5), na.rm = TRUE))  #portable; was 5 (3 for Isabel)
 
 
  lapply(proteinFeatures_grid, head, n = 2) }
 ```
 
-```{r proteinFeatures_bestStats, eval=FALSE}
-if(perform_prot_grid_search == T) {
-proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
-proteinFeatures_qvalueData <- lapply(proteinFeatures_scoredData, calculateQvalue, plot=F)
-proteinFeatures_stats <- qvaluePositivesPlotGrid(proteinFeatures_qvalueData)
-proteinFeatures_bestStats <- getBestQvalueParameters(proteinFeatures_stats, FDR_cutoff = 0.05)
-proteinFeatures_bestStats
+```{r proteinFeatures_bestStats}
+# Score the grid, pick the parameter set with the most features at 5% FDR, and expose the winning
+# parameters (best_corr_cutoff / best_window_size / best_smoothing_length / best_rt_height) so the
+# findProteinFeatures call below can USE them. Previously this chunk was eval=FALSE, so its result
+# was never fed forward and the real run used hard-coded parameters regardless of the search.
 
-save(proteinFeatures_grid,proteinFeatures_bestStats, file = "ProtGridSearch.RData")}
+.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")   # per-comparison (out_dir from SETUP)
 
-if(perform_prot_grid_search == F) {load(file = "ProtGridSearch.RData")}
-#if(perform_prot_grid_search == F) {load(file = "ProtGridSearch_fromJP02.RData")} # this one is to use in case you don't want to run the gridsearch at all
+if (perform_prot_grid_search == TRUE) {
+  proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
+  proteinFeatures_qvalueData <- lapply(proteinFeatures_scoredData, calculateQvalue, plot = FALSE)
+  proteinFeatures_stats      <- qvaluePositivesPlotGrid(proteinFeatures_qvalueData)
+  proteinFeatures_bestStats  <- getBestQvalueParameters(proteinFeatures_stats, FDR_cutoff = 0.05)
+  print(proteinFeatures_bestStats)
+  save(proteinFeatures_grid, proteinFeatures_bestStats, file = .gridsearch_file)
+} else {
+  if (file.exists(.gridsearch_file)) {
+    load(.gridsearch_file)
+  } else {
+    message("perform_prot_grid_search = F but ", .gridsearch_file,
+            " not found - findProteinFeatures will fall back to default parameters.")
+  }
+}
+# (to reuse a pre-computed search instead, point .gridsearch_file at e.g. ProtGridSearch_fromJP02.RData)
+
+# --- pull the winning parameters out of bestStats, defensively --------------------------------------
+# getBestQvalueParameters() returns a single row; CCprofiler has named these columns slightly
+# differently across versions, so look each one up under its known aliases and fall back to the
+# Isabel/PPlab defaults (= the values previously hard-coded below) if a column or the whole object is
+# missing. This keeps the run alive even if the grid search produced nothing usable.
+.bs <- if (exists("proteinFeatures_bestStats")) proteinFeatures_bestStats else NULL
+
+.gridParam <- function(stats, aliases, default) {
+  if (is.null(stats) || nrow(stats) == 0) return(default)
+  hit <- intersect(aliases, colnames(stats))
+  if (length(hit) == 0) return(default)
+  val <- stats[[hit[1]]][1]
+  if (length(val) == 0 || is.na(val)) default else val
+}
+
+best_corr_cutoff      <- .gridParam(.bs, c("corr", "corr_cutoff"),           0.85)
+best_window_size      <- .gridParam(.bs, c("window", "window_size"),         7)
+best_smoothing_length <- .gridParam(.bs, c("smoothing_length", "smoothing"), 3)
+best_rt_height        <- .gridParam(.bs, c("rt_height", "rt_heights"),       1)
+
+message("findProteinFeatures will use: corr_cutoff = ", best_corr_cutoff,
+        ", window_size = ", best_window_size,
+        ", smoothing_length = ", best_smoothing_length,
+        ", rt_height = ", best_rt_height,
+        if (perform_prot_grid_search) "  (chosen by grid search)" else "  (loaded / default)")
 
 ```
 
@@ -1113,16 +1189,23 @@ pepTracesIntegrated_sum <- integrateTraceIntensities(pepTracesList_filtered_minN
 #' # Perform protein-centric analysis
 # Suppress messages for clarity
 
+# Guard: if the grid-search chunks above were skipped entirely, set best_* to the original defaults
+# so this call still runs (normally best_* come from the proteinFeatures_bestStats chunk).
+if (!exists("best_corr_cutoff"))      best_corr_cutoff      <- 0.85
+if (!exists("best_window_size"))      best_window_size      <- 7
+if (!exists("best_smoothing_length")) best_smoothing_length <- 3
+if (!exists("best_rt_height"))        best_rt_height        <- 1
+
 suppressMessages(
   proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
-                                          corr_cutoff = 0.85, # 0.9,
-                                          window_size = 7,# 7,
-                                          parallelized = T,
-                                          n_cores = 6,
-                                          collapse_method = "apex_only",
-                                          perturb_cutoff = "5%",
-                                          rt_height = 1, #1,
-                                          smoothing_length = 3 #7)
+                                          corr_cutoff      = best_corr_cutoff,      # grid search (default 0.85)
+                                          window_size      = best_window_size,      # grid search (default 7)
+                                          parallelized     = T,
+                                          n_cores          = 6,
+                                          collapse_method  = "apex_only",
+                                          perturb_cutoff   = "5%",
+                                          rt_height        = best_rt_height,        # grid search (default 1)
+                                          smoothing_length = best_smoothing_length  # grid search (default 3)
 
 )
 )
