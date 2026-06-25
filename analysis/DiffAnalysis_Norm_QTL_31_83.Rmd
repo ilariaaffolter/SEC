@@ -86,14 +86,14 @@ Sys.setenv(LANG="en")
 comparisons <- list(
   # pattern = a SHORT unique substring of that comparison's .tsv filename (the
   #   file is found automatically in data/raw/, so you don't type long names).
-  # ref / treat = condition LABELS as they appear INSIDE the data (parsed from
-  #   r_file_name in chunk 2b) - NOT from the .tsv filename. Verify with
-  #   unique(design_matrix$Condition) and adjust if needed.
-  QTL_31_BY = list(pattern = "_31_BY_", ref = "BY", treat = "31"),
-  QTL_31_RM = list(pattern = "_31_RM_", ref = "RM", treat = "31"),
-  QTL_83_BY = list(pattern = "_83_BY_", ref = "BY", treat = "83"),
-  QTL_83_RM = list(pattern = "_83_RM_", ref = "RM", treat = "83"),
-  QTL_RM_BY = list(pattern = "_RM_BY_", ref = "BY", treat = "RM")
+  # ref / treat = condition LABELS exactly as they appear INSIDE the data (the
+  #   "strain.." token parsed from r_file_name, e.g. strain83 / strainRM) - NOT the
+  #   bare codes in the .tsv filename. Verify with unique(design_matrix$Condition).
+  QTL_31_BY = list(pattern = "_31_BY_", ref = "strainBY", treat = "strain31"),
+  QTL_31_RM = list(pattern = "_31_RM_", ref = "strainRM", treat = "strain31"),
+  QTL_83_BY = list(pattern = "_83_BY_", ref = "strainBY", treat = "strain83"),
+  QTL_83_RM = list(pattern = "_83_RM_", ref = "strainRM", treat = "strain83"),
+  QTL_RM_BY = list(pattern = "_RM_BY_", ref = "strainBY", treat = "strainRM")
 )
 
 ## ---- choose the comparison to run ----
@@ -568,6 +568,18 @@ design_matrix <- unique(subset(fraction_annotation_table, select=c("condition_id
 setnames(design_matrix, c("condition_id","replicate_id","sample"), c("Condition","Replicate","Sample_name"))
 
 design_matrix$Condition <- factor(design_matrix$Condition, levels= condition_levels)
+
+# Safety net: factor() above turns Condition into NA if the registry ref/treat
+# don't match the labels parsed from the data. Fail fast with a clear message
+# instead (this mismatch is what previously cascaded into the q-value / hist
+# errors much further downstream).
+if (anyNA(design_matrix$Condition)) {
+  stop("design_matrix$Condition has NA: the comparison's ref/treat (",
+       paste(condition_levels, collapse = ", "),
+       ") do not match the condition labels in the data. Labels found: ",
+       paste(sort(unique(as.character(fraction_annotation_table$condition_id))), collapse = ", "),
+       ". Edit ref/treat in the SETUP comparison registry to match.")
+}
 
 
 ```
