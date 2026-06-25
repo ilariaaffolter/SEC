@@ -96,6 +96,8 @@ condition1           <- .cmp$ref      # reference / baseline
 condition2           <- .cmp$treat    # treatment / test
 calibration_location <- "TODO_calibration_table.xlsx"
 complex_portal_file  <- "TODO_Complex_portal_<taxid>.tsv"   # e.g. 559292 (yeast), 83333 (E. coli)
+trypsin_id           <- "P00761"   # digestion-control protein for the trypsin QC plot
+                                   # (yeast DBs: "P00761"; contaminant-prefixed DBs e.g. E. coli: "CON_P00761")
 file_name_pattern    <- c("TODO_filename_prefix_")
 
 # colours: reference vs treatment
@@ -560,7 +562,7 @@ if (anyNA(design_matrix$Condition)) {
 ```{r data_filter_ccp_mod}
 
 data_filter_ccp_mod <- data_filter %>%
-  filter(!grepl("CON_", pg_protein_accessions) | pg_protein_accessions == "CON_P00761") %>% #remove contaminants, except for trypsin
+  filter(!grepl("CON_", pg_protein_accessions) | pg_protein_accessions == trypsin_id) %>% #remove contaminants, except for trypsin (trypsin_id in SETUP)
 dplyr::rename ("filename" = "r_file_name", "protein_id" = "pg_protein_accessions", "peptide_id"="pep_grouping_key", "intensity"="fg_quantity") %>%
  left_join(fraction_annotation_table) %>%
   group_by(filename, protein_id) %>% ### FILTER OUT ALL THE PROTEIN WITH LESS THAN 3 eg_precursor_id?
@@ -742,8 +744,20 @@ if(perform_normalization_cyclicloess==F) { pepTracesNormalized <- pepTracesImp}
 
 ### -Trypsin plot for QC before  and after normalization
 ```{r}
-plot(subset(pepTraces_raw, trace_subset_ids="CON_P00761", trace_subset_type="protein_id"), legend=F, design_matrix=design_matrix, name="Trypsin non-normalized")
-plot(subset(pepTracesNormalized, trace_subset_ids="CON_P00761", trace_subset_type="protein_id"), legend=F, design_matrix=design_matrix, name="Trypsin normalized")
+# Trypsin (digestion control) ID differs per dataset (set as trypsin_id in SETUP).
+# Resolve robustly (try trypsin_id, then its CON_/non-CON_ variant) and skip with a
+# message if absent, instead of crashing on an empty traces subset.
+.tryp_ids <- unique(unlist(lapply(pepTraces_raw, function(t) t$trace_annotation$protein_id)))
+.tryp <- intersect(c(trypsin_id, sub("^CON_", "", trypsin_id), paste0("CON_", trypsin_id)), .tryp_ids)
+if (length(.tryp) == 0) {
+  message("Trypsin control '", trypsin_id, "' not found - skipping the trypsin QC plot.")
+} else {
+  .tryp <- .tryp[1]
+  plot(subset(pepTraces_raw,       trace_subset_ids = .tryp, trace_subset_type = "protein_id"),
+       legend = F, design_matrix = design_matrix, name = "Trypsin non-normalized")
+  plot(subset(pepTracesNormalized, trace_subset_ids = .tryp, trace_subset_type = "protein_id"),
+       legend = F, design_matrix = design_matrix, name = "Trypsin normalized")
+}
 ```
 
 
