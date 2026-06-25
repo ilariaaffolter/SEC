@@ -711,10 +711,10 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
       n_perCondition <- min(.SD$replicates_perCondition)
       n_unique_perCondition <- min(.SD$unique_perCondition)
       if( (n_conditions > 1) & (n_perCondition > 1) & (n_unique_perCondition > 1) ) {
-        model = betareg(.SD$sum_assembled_norm_t ~ .SD$Condition)
+        model = suppressWarnings(betareg(.SD$sum_assembled_norm_t ~ .SD$Condition))  # benign "failed to converge" warnings flood the per-protein loop
         stat = lrtest(model)
         p = stat$`Pr(>Chisq)`[2]
-        w = wilcox.test(formula = .SD$sum_assembled_norm ~ .SD$Condition) #CHANGED - Removed paired=F, does not work with formula objects anymore
+        w = suppressWarnings(wilcox.test(formula = .SD$sum_assembled_norm ~ .SD$Condition)) #CHANGED - Removed paired=F; suppress benign "cannot compute exact p-value with ties"
         wilcoxPval = w$p.value
       } else {
         p = 2
