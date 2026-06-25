@@ -703,30 +703,60 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
     res[,sum_assembled_norm_t := (sum_assembled_norm * (n - 1) + 0.5)/n, by=c("protein_id")]
     res[,unique_perCondition := length(unique(round(sum_assembled_norm, digits = 3))), by=c("protein_id","Condition")]
 
-    diff <- res[, {
-      samples = unique(.SD[,get(compare_between)])
-      meanX = .SD[, .(m = mean(sum_assembled_norm)), by = .(get(compare_between))]
-      meanDiff = meanX[get==samples[1]]$m - meanX[get==samples[2]]$m
-      n_conditions <- unique(.SD$n_conditions)
-      n_perCondition <- min(.SD$replicates_perCondition)
-      n_unique_perCondition <- min(.SD$unique_perCondition)
-      if( (n_conditions > 1) & (n_perCondition > 1) & (n_unique_perCondition > 1) ) {
-        model = suppressWarnings(betareg(.SD$sum_assembled_norm_t ~ .SD$Condition))  # benign "failed to converge" warnings flood the per-protein loop
-        stat = lrtest(model)
-        p = stat$`Pr(>Chisq)`[2]
-        w = suppressWarnings(wilcox.test(formula = .SD$sum_assembled_norm ~ .SD$Condition)) #CHANGED - Removed paired=F; suppress benign "cannot compute exact p-value with ties"
-        wilcoxPval = w$p.value
+    # ---- per-protein assembly test (parallelized over proteins) ----
+    # The original ran betareg + lrtest + wilcox.test per protein in a data.table
+    # by-group loop. With thousands of proteins that is slow, so we parallelize.
+    # Each test is wrapped (suppressWarnings + tryCatch) so the benign betareg
+    # ("failed to converge") / wilcox ("ties") warnings never surface and one
+    # failing protein can't abort the run. Falls back to serial automatically.
+    # Output is identical to the original serial loop.
+    .assemblyTestOneProtein <- function(d, compare_between, quantLevel) {
+      cond    <- as.character(d[[compare_between]])
+      sa      <- d$sum_assembled_norm
+      samples <- unique(cond)
+      m1 <- mean(sa[cond == samples[1]])
+      m2 <- mean(sa[cond == samples[2]])
+      if ((unique(d$n_conditions) > 1) & (min(d$replicates_perCondition) > 1) &
+          (min(d$unique_perCondition) > 1)) {
+        p <- suppressWarnings(tryCatch(
+          lmtest::lrtest(betareg::betareg(d$sum_assembled_norm_t ~ d$Condition))$`Pr(>Chisq)`[2],
+          error = function(e) NA_real_))
+        wilcoxPval <- suppressWarnings(tryCatch(
+          stats::wilcox.test(d$sum_assembled_norm ~ d$Condition)$p.value,
+          error = function(e) NA_real_))
       } else {
-        p = 2
-        wilcoxPval = 2
+        p <- 2; wilcoxPval <- 2
       }
-      .(meanDiff = meanDiff,
-        meanAMF1 = meanX[get==samples[1]]$m,
-        meanAMF2 = meanX[get==samples[2]]$m,
-        betaPval = p,
-        wilcoxPval = wilcoxPval,
-        testOrder = paste0(samples[1],".vs.",samples[2]))},
-      by = .(get(quantLevel))]
+      out <- data.table::data.table(meanDiff = m1 - m2, meanAMF1 = m1, meanAMF2 = m2,
+                                    betaPval = p, wilcoxPval = wilcoxPval,
+                                    testOrder = paste0(samples[1], ".vs.", samples[2]))
+      out[[quantLevel]] <- d[[quantLevel]][1]
+      out
+    }
+    # Detach from the (large) enclosing env so each worker receives a tiny function,
+    # not a copy of tracesList/res. Calls are package-qualified, so no attach needed.
+    environment(.assemblyTestOneProtein) <- globalenv()
+
+    protein_chunks <- split(res, by = quantLevel)
+    n_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 8L)), error = function(e) 1L)
+
+    diff <- tryCatch({
+      if (n_cores <= 1L) stop("single core")
+      cl <- parallel::makeCluster(n_cores)
+      on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+      invisible(parallel::clusterEvalQ(cl, suppressMessages({
+        library(data.table); library(betareg); library(lmtest) })))
+      message(".. testing ", length(protein_chunks), " ", quantLevel,
+              "s for assembly change on ", n_cores, " cores")
+      data.table::rbindlist(parallel::parLapplyLB(
+        cl, protein_chunks, .assemblyTestOneProtein,
+        compare_between = compare_between, quantLevel = quantLevel))
+    }, error = function(e) {
+      message("Parallel assembly test unavailable (", conditionMessage(e),
+              "); running serially over ", length(protein_chunks), " ", quantLevel, "s.")
+      data.table::rbindlist(lapply(protein_chunks, .assemblyTestOneProtein,
+                                   compare_between = compare_between, quantLevel = quantLevel))
+    })
 
     diff[betaPval==2, betaPval := NA ]
     diff[wilcoxPval==2, wilcoxPval := NA ]
@@ -770,7 +800,7 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
       }
     }
 
-    setnames(diff, "get(quantLevel)", quantLevel)
+    if ("get(quantLevel)" %in% names(diff)) setnames(diff, "get(quantLevel)", quantLevel)  # no-op with the parallel path (already named)
     tests <- subset(diff, select = c("protein_id","meanDiff",
                                      "meanAMF1","meanAMF2",
                                      "betaPval", "betaPval_BHadj",
