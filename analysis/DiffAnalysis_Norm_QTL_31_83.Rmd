@@ -1140,14 +1140,26 @@ grid_peptideTraces <- integrateTraceIntensities(grid_subset,
 message("Grid search: ", .grid_ncomb, " parameter combinations x ", num_ids,
         " proteins on ", .grid_cores, " core(s). Runs once; then set perform_prot_grid_search <- F to reuse.")
 
-proteinFeatures_grid <- performProteinGridSearch(traces     = grid_peptideTraces,
-                                                 corrs      = grid_corrs,      #corr_cutoff (0.9 for Isabel)
-                                                 windows    = grid_windows,    #window_size (7 for Isabel)
-                                                 smoothing  = grid_smoothing,  #smoothing_length (7 for Isabel)
-                                                 rt_heights = grid_rt_heights, #rt_height (1 for Isabel)
-                                                 n_cores    = .grid_cores)
+# Wrapped in tryCatch: performProteinGridSearch uses a parallel cluster (snow), and if ANY single
+# parameter combination errors inside CCprofiler (e.g. the "object 'merged' not found" edge case),
+# the whole call aborts. Rather than killing the knit after a long run, fall back to default params.
+proteinFeatures_grid <- tryCatch(
+  performProteinGridSearch(traces     = grid_peptideTraces,
+                           corrs      = grid_corrs,      #corr_cutoff (0.9 for Isabel)
+                           windows    = grid_windows,    #window_size (7 for Isabel)
+                           smoothing  = grid_smoothing,  #smoothing_length (7 for Isabel)
+                           rt_heights = grid_rt_heights, #rt_height (1 for Isabel)
+                           n_cores    = .grid_cores),
+  error = function(e) {
+    message("performProteinGridSearch failed: ", conditionMessage(e))
+    message("  -> skipping parameter tuning; findProteinFeatures below falls back to default params.")
+    message("  -> to pinpoint the offending combination, shrink the grid vectors above or set ",
+            ".grid_cores <- 1L (serial) and re-run this chunk.")
+    NULL
+  }
+)
 
-lapply(proteinFeatures_grid, head, n = 2) }
+if (!is.null(proteinFeatures_grid)) lapply(proteinFeatures_grid, head, n = 2) }
 ```
 
 ```{r proteinFeatures_bestStats}
@@ -1158,20 +1170,21 @@ lapply(proteinFeatures_grid, head, n = 2) }
 
 .gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")   # per-comparison (out_dir from SETUP)
 
-if (perform_prot_grid_search == TRUE) {
-  proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
-  proteinFeatures_qvalueData <- lapply(proteinFeatures_scoredData, calculateQvalue, plot = FALSE)
-  proteinFeatures_stats      <- qvaluePositivesPlotGrid(proteinFeatures_qvalueData)
-  proteinFeatures_bestStats  <- getBestQvalueParameters(proteinFeatures_stats, FDR_cutoff = 0.05)
-  print(proteinFeatures_bestStats)
-  save(proteinFeatures_grid, proteinFeatures_bestStats, file = .gridsearch_file)
+if (perform_prot_grid_search == TRUE && exists("proteinFeatures_grid") && !is.null(proteinFeatures_grid)) {
+  # scoring wrapped too: if the grid ran but scoring/q-value estimation fails, don't kill the knit
+  tryCatch({
+    proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
+    proteinFeatures_qvalueData <- lapply(proteinFeatures_scoredData, calculateQvalue, plot = FALSE)
+    proteinFeatures_stats      <- qvaluePositivesPlotGrid(proteinFeatures_qvalueData)
+    proteinFeatures_bestStats  <- getBestQvalueParameters(proteinFeatures_stats, FDR_cutoff = 0.05)
+    print(proteinFeatures_bestStats)
+    save(proteinFeatures_grid, proteinFeatures_bestStats, file = .gridsearch_file)
+  }, error = function(e)
+    message("Grid scoring failed (", conditionMessage(e), "); findProteinFeatures will use defaults."))
+} else if (file.exists(.gridsearch_file)) {
+  load(.gridsearch_file)   # reuse a previous run's saved best parameters
 } else {
-  if (file.exists(.gridsearch_file)) {
-    load(.gridsearch_file)
-  } else {
-    message("perform_prot_grid_search = F but ", .gridsearch_file,
-            " not found - findProteinFeatures will fall back to default parameters.")
-  }
+  message("No grid-search results available - findProteinFeatures will fall back to default parameters.")
 }
 # (to reuse a pre-computed search instead, point .gridsearch_file at e.g. ProtGridSearch_fromJP02.RData)
 
