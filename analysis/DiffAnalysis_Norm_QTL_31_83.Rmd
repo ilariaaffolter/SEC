@@ -1092,9 +1092,35 @@ if(perform_prot_grid_search == T) {
 # protein universe is identical across list elements; use the first (robust to condition naming)
 .grid_prot_ids <- unique(pepTracesList_filtered_minN[[1]]$trace_annotation$protein_id)
 
-# 10% random subset (seed added for reproducibility - flag: NOT in the original, remove if unwanted)
+# ---- SPEED CONTROLS -------------------------------------------------------------------------------
+# The grid search is THE slow step: it runs findProteinFeatures once per parameter combination, so
+# cost ~= (#corrs * #windows * #smoothing * #rt_heights) full feature-finding runs, split over cores.
+# The original FULL grid was 3*4*3*3 = 108 runs (~45 min on ~5 cores). Three levers make it faster:
+#   (1) fewer combinations  - biggest effect. The reduced grid below brackets the same ranges and
+#       still INCLUDES the lab's preferred values (corr 0.9, window 7, smoothing 7, rt_height 1),
+#       so the search can still land on them.
+#   (2) more cores          - n_cores below (faster up to #combinations).
+#   (3) smaller subset      - lower grid_subset_fraction (faster but noisier q-values).
+# It also only needs to run ONCE per dataset: afterwards set perform_prot_grid_search <- F to reuse
+# the saved ProtGridSearch.RData instead of recomputing.
+# FLAG: the reduced grid is a handover change, NOT in the original. To restore the exhaustive search,
+# comment the "reduced" block and uncomment the "FULL (original)" block below.
+grid_subset_fraction <- 0.10   # 0.10 = 10% of proteins; try 0.05 to roughly halve the time
+
+# reduced grid (default): 3 * 2 * 2 * 2 = 24 runs
+grid_corrs      <- c(0.75, 0.9, 0.95)   # corr_cutoff - kept at 3 levels (most influential parameter)
+grid_windows    <- c(7, 12)             # window_size      (full grid was 5, 7, 10, 12)
+grid_smoothing  <- c(7, 11)             # smoothing_length (full grid was 7, 9, 11)
+grid_rt_heights <- c(1, 4)              # rt_height        (full grid was 1, 4, 5)
+# FULL (original) grid: 3 * 4 * 3 * 3 = 108 runs - uncomment to restore the exhaustive search:
+# grid_corrs      <- c(0.75, 0.9, 0.95)
+# grid_windows    <- c(5, 7, 10, 12)
+# grid_smoothing  <- c(7, 9, 11)
+# grid_rt_heights <- c(1, 4, 5)
+
+# random subset (seed added for reproducibility - flag: NOT in the original, remove if unwanted)
 set.seed(123)
-num_ids    <- ceiling(length(.grid_prot_ids) * 0.1)
+num_ids    <- ceiling(length(.grid_prot_ids) * grid_subset_fraction)
 subset_ids <- sample(.grid_prot_ids, num_ids)
 
 grid_subset <- subset(pepTracesList_filtered_minN,
@@ -1107,20 +1133,21 @@ grid_peptideTraces <- integrateTraceIntensities(grid_subset,
                                                  integrate_within = NULL,
                                                  aggr_fun        = "sum")
 
+# performProteinGridSearch parallelises over the parameter combinations (n_cores); use up to 8.
+.grid_cores <- parallel::detectCores()
+.grid_cores <- if (is.na(.grid_cores) || .grid_cores < 2L) 1L else min(.grid_cores - 1L, 8L)
+.grid_ncomb <- length(grid_corrs) * length(grid_windows) * length(grid_smoothing) * length(grid_rt_heights)
+message("Grid search: ", .grid_ncomb, " parameter combinations x ", num_ids,
+        " proteins on ", .grid_cores, " core(s). Runs once; then set perform_prot_grid_search <- F to reuse.")
 
-# Perform a small grid search for 2 parameter combinations
- # Depending on the computational resources this can take several minutes
+proteinFeatures_grid <- performProteinGridSearch(traces     = grid_peptideTraces,
+                                                 corrs      = grid_corrs,      #corr_cutoff (0.9 for Isabel)
+                                                 windows    = grid_windows,    #window_size (7 for Isabel)
+                                                 smoothing  = grid_smoothing,  #smoothing_length (7 for Isabel)
+                                                 rt_heights = grid_rt_heights, #rt_height (1 for Isabel)
+                                                 n_cores    = .grid_cores)
 
-
-   proteinFeatures_grid <- performProteinGridSearch(traces = grid_peptideTraces,
-                                      corrs = c(0.75, 0.9, 0.95), #corr_cutoff, 0.9 for Isabel. #tried 0.5, not good 
-                                      windows = c(5,7,10,12), #window_size, 7 for Isabel
-                                      smoothing = c(7,9,11), #smoothing_length, 7 for Isabel 
-                                      rt_heights = c(1,4,5), #rt_height, 1 for Isabel
-                                      n_cores = max(1, min(parallel::detectCores() - 1, 5), na.rm = TRUE))  #portable; was 5 (3 for Isabel)
-
-
- lapply(proteinFeatures_grid, head, n = 2) }
+lapply(proteinFeatures_grid, head, n = 2) }
 ```
 
 ```{r proteinFeatures_bestStats}
@@ -1309,7 +1336,11 @@ proteinFeaturesFiltered_featureValsFilled_0p15featurefdr <- fillFeatureVals(feat
 
 ## - differential analysis
 
-2 cond, 1 rep function
+2 conditions, pairwise. NOTE: this is **not** a 1-replicate-only test -
+testDifferentialExpression_beniFix() adapts to the number of replicates in
+design_matrix: with >= 2 replicates it runs a Welch two-sample t-test across
+replicates; with only 1 replicate it falls back to a fraction-wise t-test within
+each feature. The chunk below prints which path is taken. (R/ccprofiler_fixes.R, Section D.)
 
 " Differential analysis is performed in 5 steps: (i)
 Peptide-levelintensities are computed for each protein feature and
@@ -1335,6 +1366,13 @@ Multiple testing correction is performed by Benjamini-Hochberg
 adjustment of the protein-level p-values
 
 ```{r diff}
+
+# Report which differential test will run: the function branches on the replicate count in
+# design_matrix (the same check it uses internally), so this prints the actual path taken.
+.n_rep <- length(unique(design_matrix$Replicate))
+message("Differential test: ", .n_rep, " replicate(s) in design_matrix -> ",
+        if (.n_rep > 1) "Welch two-sample t-test across replicates (replicate-based)."
+        else "fraction-wise t-test within each feature (1-replicate fallback; global p-values = 1).")
           
             #' ## Perform peptide-level differential expression testing for all features
           
