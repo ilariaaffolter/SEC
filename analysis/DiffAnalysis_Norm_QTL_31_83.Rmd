@@ -1276,7 +1276,7 @@ suppressMessages(
 save(proteinFeatures, file = "proteinFeatures.RData")
 
 #' Score protein features and filter for a detection FDR of 5%
-proteinFeaturesFiltered <- scoreFeatures(proteinFeatures, FDR=0.05, PDF=TRUE, name="output_files/qvalueStats_proteinFeatures")
+proteinFeaturesFiltered <- scoreFeatures(proteinFeatures, FDR=0.05, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
 
 #' Evaluate protein feature stats
 summarizeFeatures(proteinFeaturesFiltered,
@@ -1299,7 +1299,7 @@ proteinFeaturesFiltered_featureValsFilled <- fillFeatureVals(featureVals = prote
                                                 tracesList = pepTracesList_filtered_minN,
                                                 design_matrix = design_matrix)
 
-proteinFeaturesFiltered_0p15featurefdr <- scoreFeatures(proteinFeatures, FDR=0.15, PDF=TRUE, name="output_files/qvalueStats_proteinFeatures")
+proteinFeaturesFiltered_0p15featurefdr <- scoreFeatures(proteinFeatures, FDR=0.15, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
 
 #' Evaluate protein feature stats
 summarizeFeatures(proteinFeaturesFiltered_0p15featurefdr,
@@ -1457,17 +1457,17 @@ for (i in comparison_level) {
   
   #' General volcano plots - local
   plotVolcano(protein_DiffExprPep_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2,  
-              name = paste0("output_files/pep_", i))
+              name = file.path(output_files_location, paste0("pep_", i)))
   plotVolcano(protein_DiffExprProtein_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
-              name = paste0("output_files/prot_", i))
+              name = file.path(output_files_location, paste0("prot_", i)))
   plotVolcano(protein_DiffExprProtein_i, PDF = F, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
               name = paste0("prot_", i)) #to see here
   
   #' global
   plotVolcano(protein_DiffExprPep_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
-              level = "global", name = paste0("output_files/global_pep_", i))
+              level = "global", name = file.path(output_files_location, paste0("global_pep_", i)))
   plotVolcano(protein_DiffExprProtein_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
-              level = "global", name = paste0("output_files/global_prot_", i))
+              level = "global", name = file.path(output_files_location, paste0("global_prot_", i)))
   
   #' Get different proteins - using data.table syntax
   diffProteins_i <- unique(protein_DiffExprProtein_i[pBHadj < 0.05 & abs(medianLog2FC) > 1]$feature_id)
@@ -1475,15 +1475,15 @@ for (i in comparison_level) {
   diffProteins_i_onlypadj <- unique(protein_DiffExprProtein_i[pBHadj < 0.05]$feature_id)
   
   #save data
-  write.table(diffProteins_i, paste0("output_files/diffProteins_", i, ".txt"),
+  write.table(diffProteins_i, file.path(output_files_location, paste0("diffProteins_", i, ".txt")),
               sep = "\t", quote = F, row.names = F, col.names = F)
-  write.table(diffProteins_i_onlypadj, paste0("output_files/diffProteins_onlypadj_", i, ".txt"),
+  write.table(diffProteins_i_onlypadj, file.path(output_files_location, paste0("diffProteins_onlypadj_", i, ".txt")),
               sep = "\t", quote = F, row.names = F, col.names = F)
   
   diffProteins_global_i <- unique(protein_DiffExprProtein_i[global_pBHadj < 0.05 & abs(global_medianLog2FC) > 1]$feature_id)
   
   #save data
-  write.table(diffProteins_global_i, paste0("output_files/diffProteins_global_", i, ".txt"),
+  write.table(diffProteins_global_i, file.path(output_files_location, paste0("diffProteins_global_", i, ".txt")),
               sep = "\t", quote = F, row.names = F, col.names = F)
   
   #' Volcano plots highlighting different Proteins          
