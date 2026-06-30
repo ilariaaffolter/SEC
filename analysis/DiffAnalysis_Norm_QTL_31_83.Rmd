@@ -1264,7 +1264,7 @@ suppressMessages(
 )
 
 
-save(proteinFeatures, file = "proteinFeatures.RData")
+save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
 
 #' Score protein features and filter for a detection FDR of 5%
 proteinFeaturesFiltered <- scoreFeatures(proteinFeatures, FDR=0.05, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
@@ -1386,9 +1386,9 @@ protein_DiffExprProtein <- protein_DiffExprProtein %>% left_join(select(uniprot,
 
 protein_DiffExprProtein_0p15featurefdr <- protein_DiffExprProtein_0p15featurefdr %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
           
-save(protein_DiffExprPep, file = "protein_DiffExprPep_list.RData")
-save(protein_DiffExprProtein, file = "protein_DiffExprProtein_list.RData")
-save.image()
+save(protein_DiffExprPep, file = file.path(out_dir, "rdata", "protein_DiffExprPep_list.RData"))
+save(protein_DiffExprProtein, file = file.path(out_dir, "rdata", "protein_DiffExprProtein_list.RData"))
+save.image(file = file.path(out_dir, "rdata", "workspace_image.RData"))
 
 ```
 
@@ -1670,7 +1670,8 @@ complexFeaturesCollapsed <- callapseByUniqueFeatureGroups(
                               rm_decoys = TRUE)
 
 ################' ## Extract feature values
-if(!file.exists("complex_featureVals.RData")){
+.complex_featureVals_file <- file.path(out_dir, "rdata", "complex_featureVals.RData")
+if(!file.exists(.complex_featureVals_file)){
 
 complex_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
                                           features = complexFeaturesCollapsed,
@@ -1679,10 +1680,10 @@ complex_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
                                           imputeZero = T,
                                           verbose = F)
 
-save(complex_featureVals, file = "complex_featureVals.RData")}
+save(complex_featureVals, file = .complex_featureVals_file)}
 
-if(file.exists("complex_featureVals.RData")){
-  load("complex_featureVals.RData")}
+if(file.exists(.complex_featureVals_file)){
+  load(.complex_featureVals_file)}
 
 ######################################################################################
 
