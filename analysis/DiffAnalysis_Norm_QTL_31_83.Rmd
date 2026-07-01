@@ -1216,12 +1216,18 @@ if (!exists("best_window_size"))      best_window_size      <- 7
 if (!exists("best_smoothing_length")) best_smoothing_length <- 3
 if (!exists("best_rt_height"))        best_rt_height        <- 1
 
+# findProteinFeatures is already parallelised; use up to 6 cores but never oversubscribe a smaller
+# machine (each worker copies the traces, so too many cores on a laptop causes memory thrash and can
+# be SLOWER, not faster). Raise the cap below if you are on a big-memory workstation.
+.pf_cores <- parallel::detectCores()
+.pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 6L)
+
 suppressMessages(
   proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
                                           corr_cutoff      = best_corr_cutoff,      # grid search (default 0.85)
                                           window_size      = best_window_size,      # grid search (default 7)
                                           parallelized     = T,
-                                          n_cores          = 6,
+                                          n_cores          = .pf_cores,
                                           collapse_method  = "apex_only",
                                           perturb_cutoff   = "5%",
                                           rt_height        = best_rt_height,        # grid search (default 1)
@@ -1229,6 +1235,14 @@ suppressMessages(
 
 )
 )
+
+# --- OPTIONAL: alternative-parameter exploration runs (DISABLED by default) -----------------------
+# The three findProteinFeatures calls below re-run feature finding at lower corr_cutoff (0.7 / 0.5 /
+# 0.4). They are NOT used anywhere downstream (parameter-exploration leftovers), and the low cutoffs
+# make them VERY slow - the 0.4/0.5 runs dominate runtime and are what made this chunk run overnight.
+# Set explore_alt_params <- TRUE only if you specifically want to inspect these alternatives.
+explore_alt_params <- FALSE
+if (explore_alt_params) {
 
 suppressMessages(
   proteinFeatures_0p7_corr_cutoff <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
@@ -1272,6 +1286,8 @@ suppressMessages(
 )
 )
 
+
+} # end if (explore_alt_params) -- alt-parameter comparison runs, off by default
 
 save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
 
@@ -1397,7 +1413,7 @@ protein_DiffExprProtein_0p15featurefdr <- protein_DiffExprProtein_0p15featurefdr
           
 save(protein_DiffExprPep, file = file.path(out_dir, "rdata", "protein_DiffExprPep_list.RData"))
 save(protein_DiffExprProtein, file = file.path(out_dir, "rdata", "protein_DiffExprProtein_list.RData"))
-save.image(file = file.path(out_dir, "rdata", "workspace_image.RData"))
+# save.image(file = file.path(out_dir, "rdata", "workspace_image.RData"))  # DISABLED: redundant full-workspace dump (all key objects are saved individually); large & slow. Uncomment only for a full-session checkpoint.
 
 ```
 
