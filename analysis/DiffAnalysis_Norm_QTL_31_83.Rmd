@@ -1185,6 +1185,18 @@ message("findProteinFeatures will use: corr_cutoff = ", best_corr_cutoff,
         ", rt_height = ", best_rt_height,
         if (perform_prot_grid_search) "  (chosen by grid search)" else "  (loaded / default)")
 
+# Persist the chosen parameters to a small human-readable file so they survive after the console
+# scrolls (the message above is console-only). Lands in output/<comparison_id>/output_files/.
+writeLines(c(
+  paste0("findProteinFeatures parameters | comparison_id = ", comparison_id),
+  paste0("source           = ", if (perform_prot_grid_search) "grid search" else "loaded / default"),
+  paste0("corr_cutoff      = ", best_corr_cutoff),
+  paste0("window_size      = ", best_window_size),
+  paste0("smoothing_length = ", best_smoothing_length),
+  paste0("rt_height        = ", best_rt_height),
+  paste0("written          = ", format(Sys.time()))
+), file.path(output_files_location, "grid_best_params.txt"))
+
 ```
 
 ## - findProteinFeatures
