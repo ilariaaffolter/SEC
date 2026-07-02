@@ -1621,6 +1621,14 @@ for (cmp in comparison_level) {
 # (testLocalVsGlobal groups by Condition anyway). FLAG: reconstruction of broken original code -
 # tell me if you actually meant a per-sample comparison.
 Sample_id_treat <- treatment_conditions   # condition label(s), e.g. "strain31" (name kept for the loop)
+
+# SPEED NOTE: testLocalVsGlobal is a CCprofiler PACKAGE function, so it can't be parallelised from
+# here. These loops run only ~once (one treatment condition x one comparison), so the multi-hour
+# runtime was entirely inside a single testLocalVsGlobal call with plot = TRUE, which renders ONE plot
+# per feature - that is the whole cost (the test itself is fast) - and the result was never used
+# (everything below was commented). Fix: plot = FALSE, and STORE the result so the chunk is useful.
+local_vs_global_list     <- list()   # raw per-feature local-vs-global test table
+local_vs_global_sig_list <- list()   # significant local-vs-global protein ids
 for(i in Sample_id_treat) {
             
           sample_vector <- c(i, ref_condition) 
@@ -1637,7 +1645,17 @@ for(i in Sample_id_treat) {
 
   local_vs_global_test <- testLocalVsGlobal(featureVals = testFilled_norm,
                                             compare_between = "Condition",
-                                            plot = TRUE)
+                                            plot = FALSE)  # was TRUE: 1 plot/feature was the entire bottleneck
+  local_vs_global_list[[length(local_vs_global_list) + 1L]] <- local_vs_global_test
+  # aggregate to protein level + keep the significant local-vs-global proteins (a feature-specific vs
+  # global change = assembly-state rearrangement). Wrapped: aggregateLocalVsGlobal is a package fn.
+  lvg_sig <- tryCatch(
+    unique(as.data.table(aggregateLocalVsGlobal(local_vs_global_test))[pBHadj < 0.05 & abs(medianDiff) > 0.3]$feature_id),
+    error = function(e) { message("  aggregateLocalVsGlobal skipped: ", conditionMessage(e)); NULL })
+  if (!is.null(lvg_sig)) {
+    local_vs_global_sig_list[[length(local_vs_global_sig_list) + 1L]] <- lvg_sig
+    message("Local-vs-global: ", length(lvg_sig), " proteins with a significant shift.")
+  }
   
   # local_vs_global_test_protein <- aggregateLocalVsGlobal(local_vs_global_test)
   # 
@@ -1659,6 +1677,9 @@ for(i in Sample_id_treat) {
   # }
   }
 }
+
+saveRDS(local_vs_global_list,     file.path(out_dir, "rdata", "local_vs_global_list.rds"))
+saveRDS(local_vs_global_sig_list, file.path(out_dir, "rdata", "local_vs_global_sig_list.rds"))
 ```
 
 
