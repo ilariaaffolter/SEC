@@ -1551,15 +1551,23 @@ for (i in comparison_level) {
 ```{r compare local vs global}
 
 #### local vs global
+
+# FIX: `Sample_id_treat` was never defined (undefined in the original too), so this chunk errored.
+# It also filtered the sample-level `Sample` column (values like "strain31_1") against `ref_condition`,
+# which is a CONDITION label ("strainBY"), so reference rows never matched. Reconstructed at the
+# CONDITION level: iterate the treatment condition(s) and compare each to the reference condition
+# (testLocalVsGlobal groups by Condition anyway). FLAG: reconstruction of broken original code -
+# tell me if you actually meant a per-sample comparison.
+Sample_id_treat <- treatment_conditions   # condition label(s), e.g. "strain31" (name kept for the loop)
 for(i in Sample_id_treat) {
             
           sample_vector <- c(i, ref_condition) 
           
           #filter for just 0- and condition x
           proteinFeaturesFiltered_featureValsFilled_i <- proteinFeaturesFiltered_featureValsFilled %>%
-            filter(Sample %in% sample_vector) %>%
-            mutate(Sample = factor(Sample, levels = sample_vector)) %>%
-            arrange(Sample)
+            filter(Condition %in% sample_vector) %>%
+            mutate(Condition = factor(Condition, levels = sample_vector)) %>%
+            arrange(Condition)
 
   for(cond in diffProteins_list){
   
@@ -1758,15 +1766,17 @@ complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
 # create list to append to
 complex_DiffExprPep_list <- list()
 
+# Sample_id_treat / Condition fix - see the "compare local vs global" chunk above for the rationale.
+Sample_id_treat <- treatment_conditions   # condition label(s); compare each treatment vs the reference
 for(i in Sample_id_treat) {
             
           sample_vector <- c(i, ref_condition) 
           
           #filter for just 0- and condition x
           complex_featureValsFilled_i <- complex_featureValsFilled %>%
-            filter(Sample %in% sample_vector) %>%
-            mutate(Sample = factor(Sample, levels = sample_vector)) %>%
-            arrange(Sample)
+            filter(Condition %in% sample_vector) %>%
+            mutate(Condition = factor(Condition, levels = sample_vector)) %>%
+            arrange(Condition)
 
 
           #' ## Perform peptide-level differential expression testing for all features
