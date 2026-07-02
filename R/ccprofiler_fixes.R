@@ -493,44 +493,47 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
   }
   featureValsBoth <- getQuantTraces(featureValsBoth, compare_between)
   message("Testing peptide-level differential expression")
-  if ("complex_id" %in% names(featureValsBoth)) {
-    grpn = uniqueN(featureValsBoth[, .(id, feature_id, complex_id,
-                                       apex)])
-    pb <- txtProgressBar(min = 0, max = grpn, style = 3)
-    tests <- featureValsBoth[, {
-      setTxtProgressBar(pb, .GRP)
+
+  # ---- per-feature differential test (parallelised over feature-groups) ----
+  # The original ran one/two t.tests per (id, feature_id, [complex_id], apex) group in a serial
+  # data.table by-group loop; with many features that is slow. We parallelise over the groups.
+  # The per-group computation is IDENTICAL to the original (t.tests only wrapped in suppressWarnings
+  # to avoid benign warning spam), so results match the serial version (row order may differ, which
+  # the downstream p-value adjustment and protein/complex aggregation do not depend on). The
+  # replicate-count branch is decided once, up front. Falls back to serial automatically.
+  # NOTE: the live text progress bar is replaced by a one-line message (bars don't work on a cluster).
+  has_reps <- length(unique(design_matrix$Replicate)) > 1
+  keycols  <- if ("complex_id" %in% names(featureValsBoth)) {
+    c("id", "feature_id", "complex_id", "apex")
+  } else {
+    c("id", "feature_id", "apex")
+  }
+
+  .diffTestOneGroup <- function(d, compare_between, has_reps, keycols) {
+    out <- d[, {
       samples = unique(.SD[, get(compare_between)])
-      qints = .SD[, .(s = sum(intensity)), by = .(get(compare_between),
-                                                  Replicate)]
-      if (length(unique(design_matrix$Replicate)) > 1) {
-        a = t.test(formula = log(qints$s) ~ qints$get,
-                   var.equal = FALSE)
+      qints = .SD[, .(s = sum(intensity)), by = .(get(compare_between), Replicate)]
+      if (has_reps) {
+        a = suppressWarnings(t.test(formula = log(qints$s) ~ qints$get, var.equal = FALSE))
+      } else {
+        a = suppressWarnings(t.test(formula = intensity ~ get(compare_between), var.equal = FALSE))
       }
-      else {
-        a = t.test(formula = intensity ~ get(compare_between),
-                   var.equal = FALSE)
-      }
-      ints = .SD[imputedFraction == F, .(s = sum(intensity)),
-                 by = .(get(compare_between))]
+      ints = .SD[imputedFraction == F, .(s = sum(intensity)), by = .(get(compare_between))]
       int1 = max(0, mean(ints[get == samples[1]]$s), na.rm = T)
       int2 = max(0, mean(ints[get == samples[2]]$s), na.rm = T)
       qint1 = mean(qints[get == samples[1]]$s)
       qint2 = mean(qints[get == samples[2]]$s)
-      global_ints = .SD[, .(s = unique(global_intensity)),
-                        by = .(get(compare_between), Replicate)]
-      global_ints_imp = .SD[, .(s = unique(global_intensity_imputed)),
-                            by = .(get(compare_between), Replicate)]
+      global_ints = .SD[, .(s = unique(global_intensity)), by = .(get(compare_between), Replicate)]
+      global_ints_imp = .SD[, .(s = unique(global_intensity_imputed)), by = .(get(compare_between), Replicate)]
       global_int1 = mean(global_ints[get == samples[1]]$s)
       global_int2 = mean(global_ints[get == samples[2]]$s)
       global_int1_imp = mean(global_ints_imp[get == samples[1]]$s)
       global_int2_imp = mean(global_ints_imp[get == samples[2]]$s)
-      if (length(unique(design_matrix$Replicate)) > 1) {
-        b = t.test(formula = log(global_ints_imp$s) ~
-                     global_ints_imp$get, var.equal = FALSE)
+      if (has_reps) {
+        b = suppressWarnings(t.test(formula = log(global_ints_imp$s) ~ global_ints_imp$get, var.equal = FALSE))
         global_pVal = b$p.value
         meanDiff = a$estimate[1] - a$estimate[2]
-      }
-      else {
+      } else {
         global_pVal = 1
         meanDiff = a$estimate
       }
@@ -543,61 +546,28 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
         global_int1_imp = global_int1_imp, global_int2_imp = global_int2_imp,
         global_log2FC_imp = log2(global_int1_imp/global_int2_imp),
         global_pVal = global_pVal)
-    }, by = .(id, feature_id, complex_id, apex)]
-    close(pb)
+    }]
+    cbind(unique(d[, ..keycols]), out)
   }
-  else {
-    grpn = uniqueN(featureValsBoth[, .(id, feature_id, apex)])
-    pb <- txtProgressBar(min = 0, max = grpn, style = 3)
-    tests <- featureValsBoth[, {
-      setTxtProgressBar(pb, .GRP)
-      samples = unique(.SD[, get(compare_between)])
-      qints = .SD[, .(s = sum(intensity)), by = .(get(compare_between),
-                                                  Replicate)]
-      if (length(unique(design_matrix$Replicate)) > 1) {
-        a = t.test(formula = log(qints$s) ~ qints$get,
-                   var.equal = FALSE)
-      }
-      else {
-        a = t.test(formula = intensity ~ get(compare_between),
-                   var.equal = FALSE)
-      }
-      ints = .SD[imputedFraction == F, .(s = sum(intensity)),
-                 by = .(get(compare_between))]
-      int1 = max(0, mean(ints[get == samples[1]]$s), na.rm = T)
-      int2 = max(0, mean(ints[get == samples[2]]$s), na.rm = T)
-      qint1 = mean(qints[get == samples[1]]$s)
-      qint2 = mean(qints[get == samples[2]]$s)
-      global_ints = .SD[, .(s = unique(global_intensity)),
-                        by = .(get(compare_between), Replicate)]
-      global_ints_imp = .SD[, .(s = unique(global_intensity_imputed)),
-                            by = .(get(compare_between), Replicate)]
-      global_int1 = mean(global_ints[get == samples[1]]$s)
-      global_int2 = mean(global_ints[get == samples[2]]$s)
-      global_int1_imp = mean(global_ints_imp[get == samples[1]]$s)
-      global_int2_imp = mean(global_ints_imp[get == samples[2]]$s)
-      if (length(unique(design_matrix$Replicate)) > 1) {
-        b = t.test(formula = log(global_ints_imp$s) ~
-                     global_ints_imp$get, var.equal = FALSE)
-        global_pVal = b$p.value
-        meanDiff = a$estimate[1] - a$estimate[2]
-      }
-      else {
-        global_pVal = 1
-        meanDiff = a$estimate
-      }
-      .(pVal = a$p.value, int1 = int1, int2 = int2, meanDiff = meanDiff,
-        qint1 = qint1, qint2 = qint2, log2FC = log2(qint1/qint2),
-        n_replicates = a$parameter + 1, Tstat = a$statistic,
-        testOrder = paste0(samples[1], ".vs.", samples[2]),
-        global_int1 = global_int1, global_int2 = global_int2,
-        global_log2FC = log2(global_int1/global_int2),
-        global_int1_imp = global_int1_imp, global_int2_imp = global_int2_imp,
-        global_log2FC_imp = log2(global_int1_imp/global_int2_imp),
-        global_pVal = global_pVal)
-    }, by = .(id, feature_id, apex)]
-    close(pb)
-  }
+  environment(.diffTestOneGroup) <- globalenv()   # keep workers lightweight (don't serialise featureValsBoth)
+
+  .diff_chunks <- split(featureValsBoth, by = keycols)
+  .diff_cores  <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 8L)), error = function(e) 1L)
+  tests <- tryCatch({
+    if (.diff_cores <= 1L) stop("single core")
+    cl <- parallel::makeCluster(.diff_cores)
+    on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    invisible(parallel::clusterEvalQ(cl, suppressMessages(library(data.table))))
+    message(".. testing ", length(.diff_chunks), " feature-groups on ", .diff_cores, " cores")
+    data.table::rbindlist(parallel::parLapplyLB(cl, .diff_chunks, .diffTestOneGroup,
+                          compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+  }, error = function(e) {
+    message("Parallel diff test unavailable (", conditionMessage(e),
+            "); running serially over ", length(.diff_chunks), " feature-groups.")
+    data.table::rbindlist(lapply(.diff_chunks, .diffTestOneGroup,
+                          compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+  })
+
   tests[is.na(log2FC) & (int1 == 0 | int2 == 0) & (meanDiff ==
                                                      0)]$log2FC <- 0
   tests[is.na(log2FC) & (int1 == 0 | int2 == 0) & (meanDiff >
