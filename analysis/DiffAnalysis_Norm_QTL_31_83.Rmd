@@ -1751,7 +1751,7 @@ for(i in Sample_id_treat) {
 
 
           #' ## Perform peptide-level differential expression testing for all features
-          complex_DiffExprPep_i <- testDifferentialExpression_1repfix_chatgpt(featureVals = complex_featureValsFilled_i,
+          complex_DiffExprPep_i <- testDifferentialExpression_beniFix(featureVals = complex_featureValsFilled_i,
                                                             compare_between = "Condition",
                                                             level = "peptide",
                                                             measuredOnly = FALSE)

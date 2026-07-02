@@ -516,7 +516,13 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
       if (has_reps) {
         a = suppressWarnings(t.test(formula = log(qints$s) ~ qints$get, var.equal = FALSE))
       } else {
-        a = suppressWarnings(t.test(formula = intensity ~ get(compare_between), var.equal = FALSE))
+        # 1-replicate fallback: PAIRED t-test across fractions (ported from _1repfix_chatgpt and the
+        # methods text). beniFix previously used an UNPAIRED two-sample t-test here, which also made
+        # a$estimate length-2 (a latent row-duplication risk in the else path). This makes beniFix
+        # equivalent to _1repfix_chatgpt in BOTH branches. No effect on multi-replicate runs.
+        cond1 <- .SD[get(compare_between) == samples[1], intensity]
+        cond2 <- .SD[get(compare_between) == samples[2], intensity]
+        a = suppressWarnings(t.test(cond1, cond2, paired = TRUE, var.equal = FALSE))
       }
       ints = .SD[imputedFraction == F, .(s = sum(intensity)), by = .(get(compare_between))]
       int1 = max(0, mean(ints[get == samples[1]]$s), na.rm = T)
