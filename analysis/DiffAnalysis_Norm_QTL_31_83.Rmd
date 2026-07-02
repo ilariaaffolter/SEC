@@ -1547,6 +1547,97 @@ for (i in comparison_level) {
 
 ```
 
+## - per-replicate view + GO enrichment of the significant hits
+
+Added for the handover. For the significant differential proteins of each comparison this shows
+(1) a **per-replicate** view of feature intensity - one point per biological replicate, i.e. exactly
+the spread the replicate-based t-test uses (ties back to the variance question) - and (2) a **GO
+over-representation** bar plot. The GO test is a plain hypergeometric test on the `go_p`/`go_f`/`go_c`
+annotations already fetched by `fetch_uniprot`, so it needs no extra packages and runs offline.
+
+```{r sig_hits_perReplicate_and_GO, fig.width=9, fig.height=6}
+# ---- controls --------------------------------------------------------------------------------
+sig_source   <- diffProteins_list   # local, padj<0.05 AND |log2FC|>1 (= diffProteins_<cmp>.txt).
+                                     # alternatives: diffProteins_onlypadj_list / diffProteins_global_list
+go_column    <- "go_p"              # GO to test: "go_p" (process) / "go_f" (function) / "go_c" (component)
+go_min_genes <- 2                   # min significant proteins per GO term to report
+go_top_n     <- 15                  # number of top enriched terms to plot
+max_facets   <- 24                  # cap on per-replicate protein panels (most significant first)
+
+.featVals <- as.data.table(proteinFeaturesFiltered_featureValsFilled)
+.protRes  <- as.data.table(protein_DiffExprProtein)
+
+for (cmp in comparison_level) {
+
+  prot_cmp <- .protRes[testOrder == cmp]
+  sig_ids  <- unique(sig_source[[cmp]]); sig_ids <- sig_ids[!is.na(sig_ids)]
+  if (length(sig_ids) == 0) { message("[", cmp, "] no significant hits - skipping."); next }
+  if ("pBHadj" %in% names(prot_cmp))                       # order by significance when available
+    sig_ids <- unique(prot_cmp[feature_id %in% sig_ids][order(pBHadj)]$feature_id)
+  message("[", cmp, "] ", length(sig_ids), " significant proteins.")
+
+  ## (1) per-replicate summed feature intensity (one point = one biological replicate) -----------
+  per_rep <- tryCatch(
+    .featVals[feature_id %in% sig_ids,
+              .(feature_intensity = sum(intensity, na.rm = TRUE)),
+              by = .(feature_id, Condition, Replicate)],
+    error = function(e) { message("  per-replicate table failed: ", conditionMessage(e)); NULL })
+
+  if (!is.null(per_rep) && nrow(per_rep) > 0) {
+    ord <- sig_ids[sig_ids %in% per_rep$feature_id]
+    if (length(ord) > max_facets) {
+      message("  per-replicate: showing the ", max_facets, " most significant of ", length(ord), ".")
+      ord <- ord[seq_len(max_facets)]
+    }
+    pr <- per_rep[feature_id %in% ord]; pr[, feature_id := factor(feature_id, levels = ord)]
+    print(ggplot(pr, aes(Condition, feature_intensity)) +
+            geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+            geom_point(aes(colour = factor(Replicate)),
+                       position = position_jitter(width = 0.12, height = 0), size = 1.6) +
+            scale_y_log10() + facet_wrap(~ feature_id, scales = "free_y") +
+            labs(title = paste0("Per-replicate feature intensity - ", cmp),
+                 y = "summed feature intensity (log10)", colour = "Replicate") +
+            theme_bw() + theme(axis.text.x = element_text(angle = 30, hjust = 1)))
+    per_rep_summary <- per_rep[, .(n_rep = .N,
+                                   mean_intensity = mean(feature_intensity, na.rm = TRUE),
+                                   cv_percent = 100 * sd(feature_intensity, na.rm = TRUE) /
+                                                mean(feature_intensity, na.rm = TRUE)),
+                               by = .(feature_id, Condition)]
+    fwrite(per_rep_summary,
+           file.path(output_files_location, paste0("perReplicate_summary_", cmp, ".txt")), sep = "\t")
+  }
+
+  ## (2) GO over-representation (hypergeometric): significant hits vs all tested proteins ---------
+  go_tbl <- tryCatch({
+    bg <- unique(prot_cmp[, .(feature_id, go = get(go_column))])
+    bg <- bg[!is.na(go) & nzchar(go)]
+    if (nrow(bg) < 5) stop("too few annotated background proteins")
+    pt <- bg[, .(term = trimws(unlist(strsplit(go, ";")))), by = feature_id][nzchar(term)]
+    N  <- length(unique(pt$feature_id))                                  # annotated background
+    n  <- length(unique(pt$feature_id[pt$feature_id %in% sig_ids]))      # annotated foreground
+    if (n < go_min_genes) stop("too few annotated significant proteins")
+    ts <- pt[, .(K = uniqueN(feature_id),
+                 k = uniqueN(feature_id[feature_id %in% sig_ids])), by = term][k >= go_min_genes]
+    if (nrow(ts) == 0) stop("no GO term reaches go_min_genes significant proteins")
+    ts[, pval := phyper(k - 1, K, N - K, n, lower.tail = FALSE)]         # P(overlap >= k)
+    ts[, padj := p.adjust(pval, method = "BH")]
+    ts <- ts[order(padj, -k)][seq_len(min(go_top_n, .N))]
+    fwrite(ts, file.path(output_files_location, paste0("GOenrichment_", go_column, "_", cmp, ".txt")),
+           sep = "\t")
+    ts
+  }, error = function(e) { message("  GO enrichment skipped: ", conditionMessage(e)); NULL })
+
+  if (!is.null(go_tbl) && nrow(go_tbl) > 0) {
+    go_tbl[, term_short := ifelse(nchar(term) > 60, paste0(substr(term, 1, 57), "..."), term)]
+    print(ggplot(go_tbl, aes(reorder(term_short, -padj), -log10(padj), fill = k)) +
+            geom_col() + coord_flip() +
+            geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey50") +
+            labs(title = paste0("GO ", go_column, " enrichment - ", cmp, " (", length(sig_ids), " hits)"),
+                 x = NULL, y = "-log10(BH-adjusted p)", fill = "n hits") +
+            theme_bw())
+  }
+}
+```
 
 ```{r compare local vs global}
 
