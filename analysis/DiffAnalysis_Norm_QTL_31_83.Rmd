@@ -1682,6 +1682,75 @@ saveRDS(local_vs_global_list,     file.path(out_dir, "rdata", "local_vs_global_l
 saveRDS(local_vs_global_sig_list, file.path(out_dir, "rdata", "local_vs_global_sig_list.rds"))
 ```
 
+## - GO enrichment: assembly-change proteins & local-vs-global hits
+
+GO over-representation (same offline hypergeometric test as the volcano-hits chunk) for two more
+hit sets: the assembly-change proteins (more- / less- / any-assembled) and the significant
+local-vs-global proteins. Uses the go_p/go_f/go_c annotations already fetched by fetch_uniprot;
+background = the relevant tested universe (assembly-tested proteome / differential proteome).
+
+```{r go_assembly_and_localglobal, fig.width=9, fig.height=6}
+go_column    <- "go_p"   # GO to test: "go_p" (process) / "go_f" (function) / "go_c" (component)
+go_min_genes <- 2        # min hit proteins per GO term
+go_top_n     <- 15       # top terms to plot
+
+# reusable, offline GO over-representation (hypergeometric) helper -----------------------------------
+go_enrichment <- function(foreground, background, annotation,
+                          id_col = "accession", go_col = "go_p", min_genes = 2, top_n = 15) {
+  fg <- unique(stats::na.omit(unlist(foreground)))
+  bg <- unique(stats::na.omit(unlist(c(background, fg))))          # foreground must sit inside background
+  if (length(fg) < min_genes || length(bg) < 5) return(NULL)
+  am <- as.data.table(as.data.frame(annotation)[, c(id_col, go_col)])
+  setnames(am, c(id_col, go_col), c("pid", "goann"))
+  am <- unique(am[pid %in% bg & !is.na(goann) & nzchar(goann)])
+  if (nrow(am) == 0) return(NULL)
+  pt <- am[, .(term = trimws(unlist(strsplit(goann, ";")))), by = pid][nzchar(term)]
+  N  <- uniqueN(pt$pid); n <- uniqueN(pt$pid[pt$pid %in% fg])      # annotated background / foreground
+  if (n < min_genes) return(NULL)
+  ts <- pt[, .(K = uniqueN(pid), k = uniqueN(pid[pid %in% fg])), by = term][k >= min_genes]
+  if (nrow(ts) == 0) return(NULL)
+  ts[, pval := phyper(k - 1, K, N - K, n, lower.tail = FALSE)]     # P(overlap >= k)
+  ts[, padj := p.adjust(pval, method = "BH")]
+  ts[order(padj, -k)][seq_len(min(top_n, .N))]
+}
+go_barplot <- function(go_tbl, title) {
+  if (is.null(go_tbl) || nrow(go_tbl) == 0) return(invisible(NULL))
+  gt <- copy(go_tbl); gt[, term_short := ifelse(nchar(term) > 60, paste0(substr(term, 1, 57), "..."), term)]
+  ggplot(gt, aes(reorder(term_short, -padj), -log10(padj), fill = k)) +
+    geom_col() + coord_flip() +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey50") +
+    labs(title = title, x = NULL, y = "-log10(BH-adjusted p)", fill = "n hits") + theme_bw()
+}
+# run + plot + save one hit set
+.run_go <- function(fg, bg, tag) {
+  fg <- unique(stats::na.omit(unlist(fg)))
+  if (length(fg) < go_min_genes) { message("[", tag, "] < ", go_min_genes, " proteins - skipping GO."); return(invisible(NULL)) }
+  gt <- tryCatch(go_enrichment(fg, bg, uniprot, "accession", go_column, go_min_genes, go_top_n),
+                 error = function(e) { message("[", tag, "] GO failed: ", conditionMessage(e)); NULL })
+  if (is.null(gt) || nrow(gt) == 0) { message("[", tag, "] no enriched GO terms."); return(invisible(NULL)) }
+  fwrite(gt, file.path(output_files_location, paste0("GOenrichment_", go_column, "_", tag, ".txt")), sep = "\t")
+  print(go_barplot(gt, paste0("GO ", go_column, " - ", tag, " (", length(fg), " proteins)")))
+}
+
+# ---- assembly-change proteins (background = all assembly-tested proteins) ----
+if (exists("diffAssemblyState")) {
+  .assembly_bg <- unique(as.data.table(diffAssemblyState)$protein_id)
+  if (exists("more_assembled_proteins_list"))      .run_go(more_assembled_proteins_list,      .assembly_bg, "moreAssembled")
+  if (exists("less_assembled_proteins_list"))      .run_go(less_assembled_proteins_list,      .assembly_bg, "lessAssembled")
+  if (exists("proteins_withAssemblyChanges_list")) .run_go(proteins_withAssemblyChanges_list, .assembly_bg, "assemblyChanged")
+} else message("diffAssemblyState not found - skipping assembly GO enrichment.")
+
+# ---- significant local-vs-global proteins (background = full differential proteome) ----
+if (exists("local_vs_global_sig_list") && length(local_vs_global_sig_list) > 0) {
+  .lvg_bg <- unique(as.data.table(protein_DiffExprProtein)$feature_id)
+  .lvg_nms <- names(local_vs_global_sig_list)
+  for (nm in seq_along(local_vs_global_sig_list)) {
+    tag <- paste0("localVsGlobal_", if (!is.null(.lvg_nms)) .lvg_nms[nm] else nm)
+    .run_go(local_vs_global_sig_list[[nm]], .lvg_bg, tag)
+  }
+} else message("local_vs_global_sig_list empty/not found - skipping local-vs-global GO enrichment.")
+```
+
 
 # COMPLEX level analysis
 
