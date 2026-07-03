@@ -2004,7 +2004,7 @@ for (i in diffComplexes_list) {
         plotFeatures(feature_table = scoredDataAll,
                      traces = protein_traces_list,
                      feature_id = id,
-                     annotation_label = "input_id",
+                     annotation_label = "protein_id",  # was "input_id" (peptide-level id, absent from protein traces); protein traces are labelled by protein_id
                      design_matrix=design_matrix,
                      calibration=calibration,
                      peak_area = T,
@@ -2026,7 +2026,7 @@ for (id in all_complexes) {
   plotFeatures(feature_table = scoredDataAll,
                traces = protein_traces_list,
                feature_id = id,
-               annotation_label = "input_id",
+               annotation_label = "protein_id",  # was "input_id" (peptide-level id, absent from protein traces); protein traces are labelled by protein_id
                design_matrix=design_matrix,
                calibration=calibration,
                peak_area = F,
