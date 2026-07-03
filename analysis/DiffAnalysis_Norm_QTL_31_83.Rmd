@@ -1798,7 +1798,11 @@ complexFeaturesBest <- getBestFeatures(complexFeatures)
 
 ```{r}
 
-complexFeaturesBestFilterd <- filterFeatures(complexFeaturesBest,
+# NOTE: bare `filterFeatures` is MASKED here by another loaded package's S4 generic (signature
+# object, filter - e.g. QFeatures/ProtGenerics pulled in via MSnbase), which has no method for a
+# data.table -> "unable to find an inherited method for function 'filterFeatures'". Qualify it to
+# CCprofiler's function explicitly. (If you hit the same error on another function, CCprofiler:: it too.)
+complexFeaturesBestFilterd <- CCprofiler::filterFeatures(complexFeaturesBest,
                                   complex_ids = NULL,
                                   protein_ids = NULL,
                                   min_feature_completeness = NULL,
