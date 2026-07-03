@@ -1701,9 +1701,9 @@ complex_portal <- read.csv(here("data", "raw", complex_portal_file), sep = "\t",
 
 complexHypotheses <- complex_portal %>%
   dplyr::select(x_complex_ac, recommended_name, aliases_for_complex, description, complex_properties, complex_assembly, expanded_participant_list ) %>% #only keep needed columns 
-separate_rows(expanded_participant_list, sep = "|") %>% #separate each partecipant in a different row
-separate(expanded_participant_list, c("protein_id", "stoichiometry"), sep = "(", convert = TRUE, remove = FALSE) %>% # separate the stoichiometry in a different column
-mutate(stoichiometry = gsub(")", "", stoichiometry)) %>% #remove second braket from the stoichiometry number
+separate_rows(expanded_participant_list, sep = "\\|") %>% #separate each partecipant in a different row  (sep is a REGEX -> "\\|" = literal pipe; plain "|" splits on every character)
+separate(expanded_participant_list, c("protein_id", "stoichiometry"), sep = "\\(", convert = TRUE, remove = FALSE) %>% # separate the stoichiometry in a different column  (sep is a REGEX -> "\\(" = literal "("; plain "(" is an invalid regex and errors)
+mutate(stoichiometry = gsub(")", "", stoichiometry, fixed = TRUE)) %>% #remove second bracket from the stoichiometry number  (fixed = TRUE -> literal ")")
  dplyr::rename("complex_id"="x_complex_ac", "complex_name"="recommended_name") # fix col names
 
 complexHypotheses_minimal <- complexHypotheses %>%
