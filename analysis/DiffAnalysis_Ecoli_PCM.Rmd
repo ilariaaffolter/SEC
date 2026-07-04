@@ -108,7 +108,7 @@ experiment_name      <- comparison_id
 data_location        <- metabolite_files[[metabolite]]
 condition1           <- ref_condition_name   # ctrl (reference)
 condition2           <- metabolite            # treatment / test
-calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all comparisons
+calibration_location <- "PCM17_calibration_table.xlsx"   # different for all the branches
 complex_portal_file  <- "Complex_portal_83333.tsv"              # E. coli K-12 (taxid 83333)
 trypsin_id           <- "CON_P00761"   # digestion-control protein for the trypsin QC plot
                                    # (yeast DBs: "P00761"; contaminant-prefixed DBs e.g. E. coli: "CON_P00761")
