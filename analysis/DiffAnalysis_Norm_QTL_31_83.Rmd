@@ -111,7 +111,7 @@ condition_levels       <- c(condition1, condition2)
 ```{r}
 run_qcs_wProtti <- T
 
-perform_normalization_cyclicloess <- F #(now it works :) Benni fixed it)
+perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
 load_proteinFeatures.RData <- F
 load_protein_DiffExprPep_and_Protein <- F
