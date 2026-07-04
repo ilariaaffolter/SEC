@@ -86,9 +86,14 @@ Sys.setenv(LANG="en")
 # ==========================================================================
 metabolite_files <- list(
   # TODO: one entry per metabolite -> its Spectronaut .tsv (metabolite vs ctrl).
-  ATP = "TODO_ctrl_vs_ATP.tsv",
-  PEP = "TODO_ctrl_vs_PEP.tsv"
-  # , ADP = "TODO_ctrl_vs_ADP.tsv", GTP = "...", NAD = "...", ...  (add all 8)
+  ATP = "20251127_PCM20_ATP_directDIA_Anna_SEC_Report.tsv",
+  PEP = "20251126_PCM17_PEP_114514_20251021_AP_scheme_qvalue_rawquant_Report.tsv",
+  ADP = "250708_asimonic_PCM16_ADP_Report_AP_scheme_qvalue (Normal).tsv", 
+  aKG = "20251202_PCM18_aKG_AP_qvalue_rawquant.tsv",
+  NAD = "20260108_PCM19_NAD_Anna_rawquant_Report.tsv", 
+  PGP = "20251215_PCM21_PGP_pg_ibaq_Anna_rawquant_Report.tsv",
+  pyr = "20250217_PCM13_pyr_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  Phe = "20250217_PCM12_Phe_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv"
 )
 ref_condition_name <- "ctrl"   # reference condition for every comparison
 
