@@ -91,9 +91,9 @@ metabolite_files <- list(
   ADP = "250708_asimonic_PCM16_ADP_Report_AP_scheme_qvalue (Normal).tsv", 
   aKG = "20251202_PCM18_aKG_AP_qvalue_rawquant.tsv",
   NAD = "20260108_PCM19_NAD_Anna_rawquant_Report.tsv", 
-  PGP = "20251215_PCM21_PGP_pg_ibaq_Anna_rawquant_Report.tsv",
-  pyr = "20250217_PCM13_pyr_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
-  Phe = "20250217_PCM12_Phe_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv"
+  PGP = "20251215_PCM21_PGP_pg_ibaq_Anna_rawquant_Report.tsv"#,
+  #pyr = "20250217_PCM13_pyr_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  #Phe = "20250217_PCM12_Phe_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv"
 )
 ref_condition_name <- "ctrl"   # reference condition for every comparison
 
