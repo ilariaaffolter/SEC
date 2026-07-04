@@ -1,5 +1,5 @@
 ---
-title: "IA006 - QTL - SEC of mutants 31 and 83- Differential Analysis - normalized"
+title: "IA002 - PCM - analysis of metabolites treatments of native Ecoli lysate - normalized"
 author: "Ilaria"
 date: "`r Sys.Date()`"
 output:
@@ -47,7 +47,7 @@ renewenvironment{verbatim}{footnotesizeoldverbatim}{endoldverbatim}
 
 # Introduction
 
-Yeast 83(15_6_c) and 31(6_3_c) grown and harvested at OD 0.8, 3 biological replicates each.
+Ecoli were grown and harvested at OD 0.8, 3 biological replicates each. Lysated natively, treated 10 min at RT with the respective metabolite, then SEC at RT, comparison with ctrl (no metabolite in the buffer).
 
 ## CHECKLIST script:
 
