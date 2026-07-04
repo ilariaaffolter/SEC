@@ -12,7 +12,7 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-rmd <- here("analysis", "DiffAnalysis_Norm_QTL_31_83.Rmd")  # rename per branch if you wish
+rmd <- here("analysis", "DiffAnalysis_Ecoli_PCM.Rmd")  # rename per branch if you wish
 
 # TODO: list the metabolites to run (must match names in `metabolite_files`).
 metabolites <- c("ATP", "PEP")   # add the rest of your 8

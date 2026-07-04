@@ -27,7 +27,7 @@ _Last updated: 2026-06-19._
   modules are in `R/elution_aware/` with a README. The other ~15 scripts the old
   `.Rmd` referenced are no longer needed and were left out.
 - ✅ **Clean main-pipeline split done**:
-  - `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd` — the cleaned QTL `strain31` vs
+  - `analysis/DiffAnalysis_Ecoli_PCM.Rmd` — the cleaned QTL `strain31` vs
     `strain83` pipeline (data import → QC → traces → align/impute/normalize →
     filter → assembly/complex differential → save). Fixes are sourced from
     `R/ccprofiler_fixes.R`; packages use `library()` only; paths use `here()`

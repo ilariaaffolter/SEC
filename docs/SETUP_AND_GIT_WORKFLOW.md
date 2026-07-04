@@ -93,7 +93,7 @@ renv::restore()            # installs the exact versions recorded in renv.lock
 
 1. Put your input files in **`data/raw/`** (see `data/raw/README.md` for the
    expected file names).
-2. Open `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd`.
+2. Open `analysis/DiffAnalysis_Ecoli_PCM.Rmd`.
 3. Click **Knit** (to produce the HTML report), or run it chunk by chunk with the
    green ▶ buttons.
 
@@ -141,7 +141,7 @@ The person receiving it should:
 3. Run `renv::restore()` (Part 4) to get the exact package versions.
 4. Put the data in `data/raw/` (you may need to send the data separately — it's
    not in the repo by default).
-5. Knit `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd`.
+5. Knit `analysis/DiffAnalysis_Ecoli_PCM.Rmd`.
 
 ---
 
