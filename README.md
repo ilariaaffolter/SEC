@@ -36,7 +36,7 @@ paths, so it can be handed over and run on another machine with minimal fuss.
    This installs every package (CRAN + Bioconductor + CCprofiler from GitHub) and
    writes `renv.lock`. Takes ~20–40 min the first time.
 5. **Add your data** to `data/raw/` (see [`data/raw/README.md`](data/raw/README.md)).
-6. **Knit** `analysis/DiffAnalysis_Norm_QTL_31_83.Rmd` (the *Knit* button), or run
+6. **Knit** `analysis/DiffAnalysis_yeast_QTL.Rmd` (the *Knit* button), or run
    it chunk by chunk.
 
 ### B. Someone hands the project to you (reproduce the environment)
@@ -63,7 +63,7 @@ SEC/
 │                              #   sourced on top of CCprofiler. See header for provenance.
 ├── analysis/
 │   ├── ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd  # your original .Rmd, preserved unchanged
-│   ├── DiffAnalysis_Norm_QTL_31_83.Rmd   # ← MAIN, cleaned pipeline  (being built — see HANDOVER_NOTES.md)
+│   ├── DiffAnalysis_yeast_QTL.Rmd   # ← MAIN, cleaned pipeline  (being built — see HANDOVER_NOTES.md)
 │   └── experiments.Rmd                    # exploratory / alternative approaches (being built)
 ├── data/
 │   └── raw/                   # your input files go here (git-ignored by default)
