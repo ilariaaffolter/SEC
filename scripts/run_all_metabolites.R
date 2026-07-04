@@ -14,8 +14,10 @@ suppressPackageStartupMessages({
 
 rmd <- here("analysis", "DiffAnalysis_Ecoli_PCM.Rmd")  # rename per branch if you wish
 
-# TODO: list the metabolites to run (must match names in `metabolite_files`).
-metabolites <- c("ATP", "PEP")   # add the rest of your 8
+# Metabolites to run (must match names in `metabolite_files` in the .Rmd).
+# These are the 6 currently uncommented there. If your "8" includes pyr and Phe,
+# uncomment them in metabolite_files (lines ~95-96) and add "pyr", "Phe" here.
+metabolites <- c("ATP", "PEP", "ADP", "aKG", "NAD", "PGP")
 
 for (m in metabolites) {
   cmp <- paste0("PCM_ctrl_vs_", m)

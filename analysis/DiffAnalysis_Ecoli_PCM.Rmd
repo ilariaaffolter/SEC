@@ -112,7 +112,9 @@ calibration_location <- "IA003_01_SEC_calibration_table.xlsx"   # shared by all 
 complex_portal_file  <- "Complex_portal_83333.tsv"              # E. coli K-12 (taxid 83333)
 trypsin_id           <- "CON_P00761"   # digestion-control protein for the trypsin QC plot
                                    # (yeast DBs: "P00761"; contaminant-prefixed DBs e.g. E. coli: "CON_P00761")
-file_name_pattern    <- c("TODO_PCM_filename_prefix_")
+# (file_name_pattern removed: the raw MS run names are parsed by token in section 2b —
+#  biolrep<N>, f<NN>, and the ctrl/<metabolite> condition word — which works across every
+#  metabolite's naming layout, so no per-file filename prefix is needed here.)
 
 # colours: reference vs treatment
 color_scheme_treatment <- setNames(c("#caf0f0", "#f6acca"), c(condition1, condition2))
@@ -310,7 +312,11 @@ source(here::here("R", "ccprofiler_fixes.R"))
 if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
   load(file.path(out_dir, "rdata", "data_input.RData"))
 } else {
-  data <- read_protti(here("data", "raw", comparison_id, data_location))
+  # Prefer data/raw/<comparison_id>/<file> (the per-comparison subfolder); fall back to a flat
+  # data/raw/<file> if the .tsv was dropped straight into data/raw instead of a subfolder.
+  data_path <- here("data", "raw", comparison_id, data_location)
+  if (!file.exists(data_path)) data_path <- here("data", "raw", data_location)
+  data <- read_protti(data_path)
   save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
 }
 
@@ -330,13 +336,34 @@ filename fraction_number heuselm_J130729_001 1
 
 #unique(data$r_file_name)
 
+# Parse fraction / replicate / condition from the raw MS run name (r_file_name) BY TOKEN,
+# not by underscore position. The metabolites were acquired on different days with different
+# naming layouts (e.g. ATP has 8 underscore-fields, PEP has 12), so a fixed field position — or
+# a fixed filename prefix — cannot serve all of them. These three tokens are shared by every file:
+#   fraction  = lowercase 'f' + digits   (case-sensitive, so a plate position like 'F5' is NOT read as a fraction)
+#   replicate = 'biolrep' + digits
+#   condition = the reference/treatment word (condition1 / condition2, i.e. ctrl / <metabolite>)
+# r_file_name is kept in full and used as-is as the join key (data_filter keeps it in full too),
+# so no prefix stripping is needed.
 fraction_annotation <- data %>%
-  separate(r_file_name, c("date", "instrument", "operator", "experiment", "replicate_number", "condition", "fraction_number", "plate_position"), sep="_", remove = FALSE, extra="drop") %>% # get the fraction number
-  dplyr::select(r_file_name, condition, fraction_number, replicate_number) %>%
+  dplyr::select(r_file_name) %>%
   distinct() %>%
-  mutate(r_file_name = str_replace_all(r_file_name, pattern = file_name_pattern, replacement = "")) %>%
-  mutate(fraction_number= str_replace_all(fraction_number, pattern = "f", replacement = "")) %>%
-  mutate(replicate_number= str_replace_all(replicate_number, pattern = "biolrep", replacement = ""))
+  mutate(
+    fraction_number  = str_match(r_file_name, "(?:^|_)f([0-9]+)(?:_|$)")[, 2],
+    replicate_number = str_match(r_file_name, "(?:^|_)biolrep([0-9]+)(?:_|$)")[, 2],
+    condition        = str_match(r_file_name, paste0("(?:^|_)(", condition1, "|", condition2, ")(?:_|$)"))[, 2]
+  )
+
+# Fail fast (like the design-matrix guard downstream) if any run name didn't yield all three
+# tokens, instead of letting NA fraction/condition cascade into the q-value / histogram steps.
+unparsed_runs <- fraction_annotation %>%
+  dplyr::filter(is.na(fraction_number) | is.na(replicate_number) | is.na(condition))
+if (nrow(unparsed_runs) > 0) {
+  stop("Could not parse fraction/replicate/condition from ", nrow(unparsed_runs),
+       " run name(s). Expected tokens f<NN>, biolrep<N>, and condition '",
+       condition1, "'/'", condition2, "'. First few:\n  ",
+       paste(utils::head(unparsed_runs$r_file_name, 8), collapse = "\n  "))
+}
   
 
 head(fraction_annotation, n = 20)
@@ -375,8 +402,9 @@ data_filter <- data %>%
    mutate(fg_quantity_log2 = log2(fg_quantity)) %>% 
   filter(fg_quantity >= 50) %>% # only include intensities above log2 value of 6 (= fg_quantity of 64). Lower intensities are likely false assignments. This is for the Astral: we are being less stringent than with the other instruments, where we use a cutoff of fg_quantity_log2>10 
   filter(pg_protein_accessions != "iRT-Kit_WR_fusion") %>%
-  dplyr::select(r_file_name, pg_protein_accessions, pep_grouping_key, fg_quantity, pep_stripped_sequence, pep_nr_of_missed_cleavages)%>%
-  mutate(r_file_name = str_replace_all(r_file_name, pattern = file_name_pattern, replacement = "")) #%>%
+  dplyr::select(r_file_name, pg_protein_accessions, pep_grouping_key, fg_quantity, pep_stripped_sequence, pep_nr_of_missed_cleavages)
+  # r_file_name kept in full (no prefix strip): section 2b parses fraction/condition/replicate by
+  # token, and data_filter shares this same full r_file_name key with fraction_annotation for the join.
   #rename(pg_precursor_id = pep_grouping_key)
   
 ```
