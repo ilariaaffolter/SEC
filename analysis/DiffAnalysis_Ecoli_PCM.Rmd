@@ -320,6 +320,29 @@ if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
   save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
 }
 
+# --- standardize the peptide/precursor id column -------------------------------------------
+# The rest of this report refers to `pep_grouping_key`; in the original workflow that column WAS
+# the precursor id (see the `pg_precursor_id` rename hint in section 2d). Different Spectronaut
+# export schemes name that unit differently, and these metabolites were processed on different
+# days, so the column can vary per file. If `pep_grouping_key` is absent, alias the best available
+# id here (precursor-level first) so the downstream code runs unchanged for every file. To force a
+# specific column, set `peptide_id_col <- "<name>"` in the SETUP chunk (section 1).
+if (!exists("peptide_id_col")) peptide_id_col <- NA_character_
+if (!"pep_grouping_key" %in% names(data)) {
+  .cand <- if (!is.na(peptide_id_col)) peptide_id_col else
+           c("eg_precursor_id", "eg_modified_sequence", "pep_stripped_sequence")
+  .use  <- .cand[.cand %in% names(data)][1]
+  if (is.na(.use)) {
+    stop("No peptide/precursor id column found (looked for 'pep_grouping_key', ",
+         paste(.cand, collapse = ", "), "). Columns present: ",
+         paste(names(data), collapse = ", "))
+  }
+  message("Note: 'pep_grouping_key' not in this export -> using '", .use,
+          "' as the peptide/precursor id (peptide_id in the CCprofiler traces will be ",
+          .use, "-level).")
+  data$pep_grouping_key <- data[[.use]]
+}
+
 head(data, n = 10)
 ```
 
