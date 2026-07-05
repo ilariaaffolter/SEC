@@ -1032,7 +1032,31 @@ normalize_sn <- function(X, window, step) {
   max_sec <- max(X$fraction_number)
   windows_sets<-SlidingWindow("data.frame",c(0:max_sec+1), window, step)
   #lmxn<-lapply(windows_sets,function(X){normalizeMedianValues(mxs[,subset(id_mapping, fraction_number %in% X)$filename])})
-  lmxn<-lapply(windows_sets,function(X){limma::normalizeCyclicLoess(mxs[,subset(id_mapping, fraction_number %in% X)$filename])})
+  # --- per-window loess (parallelised) --------------------------------------------------------
+  # Each fraction-window runs an INDEPENDENT limma::normalizeCyclicLoess on its own set of columns;
+  # the per-window results are averaged together afterwards. With many fractions (=> many windows)
+  # this is the hot loop, so we run the windows in parallel. Windows-safe PSOCK cluster, capped
+  # modestly (each worker holds a copy of the intensity matrix), with automatic serial fallback.
+  # parLapply preserves order, so the result is identical to the serial lapply below.
+  .norm_one_window <- function(X) {
+    limma::normalizeCyclicLoess(mxs[, subset(id_mapping, fraction_number %in% X)$filename])
+  }
+  environment(.norm_one_window) <- globalenv()   # resolve mxs / id_mapping on the worker (exported below)
+  .norm_env   <- environment()
+  .norm_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 4L)), error = function(e) 1L)
+  lmxn <- tryCatch({
+    if (.norm_cores <= 1L || length(windows_sets) < 3L) stop("serial")
+    cl <- parallel::makeCluster(.norm_cores)
+    on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    parallel::clusterExport(cl, c("mxs", "id_mapping"), envir = .norm_env)  # send the matrix ONCE per worker
+    invisible(parallel::clusterEvalQ(cl, requireNamespace("limma", quietly = TRUE)))
+    message(".. cyclic-loess normalization: ", length(windows_sets), " fraction-windows on ", .norm_cores, " cores")
+    parallel::parLapply(cl, windows_sets, .norm_one_window)
+  }, error = function(e) {
+    message("Parallel cyclic-loess unavailable (", conditionMessage(e), "); running serially over ",
+            length(windows_sets), " windows.")
+    lapply(windows_sets, .norm_one_window)
+  })
   lln<-do.call("rbind",lapply(lmxn, melt, na.rm=TRUE))
   names(lln)<-c("id", "filename", "intensity")
   lln_dt <- as.data.table(lln)
