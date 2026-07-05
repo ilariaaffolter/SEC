@@ -33,3 +33,11 @@ for (m in metabolites) {
   )
 }
 message("Done. Reports + results under output/PCM_ctrl_vs_*/")
+
+# Cross-metabolite overlap of the hit sets (more/less assembled + protein-level diff) across all
+# metabolites just rendered. Wrapped so a hiccup here never hides the successful per-metabolite runs.
+message("=== Cross-metabolite overlap analysis ===")
+tryCatch(
+  source(here("scripts", "overlap_between_metabolites.R")),
+  error = function(e) message("Overlap step skipped: ", conditionMessage(e))
+)

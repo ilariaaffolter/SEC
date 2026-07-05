@@ -1044,6 +1044,13 @@ message("Assembly changes (padj < ", assembly_padj_cutoff, ", |delta| > ", assem
         length(less_assembled_proteins_list), " less-assembled in ", .treat, " vs ", ref_condition,
         ". (If both are 0, relax assembly_padj_cutoff/assembly_effect_cutoff above.)")
 
+# Persist the assembly hit-sets so the later cross-metabolite overlap step
+# (scripts/overlap_between_metabolites.R) can load them for every metabolite.
+saveRDS(list(more_assembled = more_assembled_proteins_list,
+             less_assembled = less_assembled_proteins_list,
+             changed        = proteins_withAssemblyChanges_list),
+        file.path(out_dir, "rdata", "assembly_hits.rds"))
+
 ```
 
 ## - look-up traces of proteins WITH global assembly changes
