@@ -127,6 +127,11 @@ condition_levels       <- c(condition1, condition2)
 ```{r}
 run_qcs_wProtti <- T
 
+# Section 7 (cross-correlation differential analysis) is optional. Set to F to skip it —
+# each knit / metabolite render (run_all_metabolites.R) then stops after Section 6.
+# Default T = run it, as before.
+run_cross_correlation <- T
+
 perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
 load_proteinFeatures.RData <- F
@@ -2203,7 +2208,7 @@ e.g. complex (dis)assembly — which an abundance-only test can miss.
 
 ## 7a. Parameters
 
-```{r ccf-params}
+```{r ccf-params, eval=run_cross_correlation}
 ccf_lag_max         <- 5                       # max shift (fractions) to scan
 ccf_shift_threshold <- 1                       # |best_lag| >= this  -> flagged "shifted"
 ccf_min_intensity   <- 0                       # require this summed intensity in BOTH conditions
@@ -2213,7 +2218,7 @@ ccf_treat_condition <- treatment_conditions[1] # strain83 (treatment)
 
 ## 7b. Per-condition mean elution profiles
 
-```{r ccf-condition-traces}
+```{r ccf-condition-traces, eval=run_cross_correlation}
 # Average replicate protein traces within each condition. CCF is scale-invariant,
 # so aggr_fun = "sum" (used elsewhere in this pipeline) and "mean" are equivalent
 # for the correlation/shift; "sum" is used here because it is known to work with
@@ -2247,7 +2252,7 @@ message("Cross-correlation over ", length(common_ids), " proteins present in bot
 
 ## 7c. Compute the cross-correlation metrics per protein
 
-```{r ccf-compute}
+```{r ccf-compute, eval=run_cross_correlation}
 compute_ccf_metrics <- function(x, y, lag_max = 5) {
   x[is.na(x)] <- 0
   y[is.na(y)] <- 0
@@ -2291,7 +2296,7 @@ DT::datatable(ccf_results[order(-abs(best_lag))][1:min(.N, 100)],
 
 ## 7d. Diagnostic plots
 
-```{r ccf-plots, fig.width=7, fig.height=4}
+```{r ccf-plots, fig.width=7, fig.height=4, eval=run_cross_correlation}
 # Distribution of optimal lags (peak shifts)
 print(
   ggplot(ccf_results[!is.na(best_lag)], aes(x = best_lag)) +
@@ -2322,7 +2327,7 @@ print(
 
 ## 7e. Inspect top shifted proteins (overlaid profiles)
 
-```{r ccf-profile-plots, fig.width=7, fig.height=4}
+```{r ccf-profile-plots, fig.width=7, fig.height=4, eval=run_cross_correlation}
 plot_ccf_protein <- function(id) {
   df <- rbind(
     data.frame(fraction = seq_len(ncol(ref_mat)),   intensity = ref_mat[id, ],
@@ -2344,7 +2349,7 @@ for (id in top_shifted) print(plot_ccf_protein(id))
 
 ## 7f. Complement to the statistical test
 
-```{r ccf-save-and-compare}
+```{r ccf-save-and-compare, eval=run_cross_correlation}
 # Save the cross-correlation table
 write.table(
   ccf_results,
