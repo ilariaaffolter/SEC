@@ -794,9 +794,11 @@ plotImputationSummary(pepTracesMV, pepTracesImp, PDF = F,
 
 if(perform_normalization_cyclicloess==T) {
 # Normalize intensity values across samples
-pepTracesNormalized <- normalizeByCyclicLoess(pepTracesImp, window = 3, step = 1, plot = F) 
-
-normalizeByCyclicLoess(pepTracesImp, window = 3, step = 1, plot = T, PDF = F) #, name = "normalizeByCyclicLoess")
+pepTracesNormalized <- normalizeByCyclicLoess(pepTracesImp, window = 3, step = 1, plot = F)
+# NOTE: a second, identical normalizeByCyclicLoess() call used to run here purely to "draw a plot"
+# (plot=T). But the `plot`/`PDF` arguments are ignored inside the function, and the call above
+# already writes the prior/post-normalization PDFs. That duplicate ran the full (expensive)
+# normalization a second time for zero extra output, doubling this chunk's runtime — removed.
 
 #' # Assess total intensity after normalization
 plotGlobalIntensities(pepTracesNormalized, plot = T, PDF=F ) #, name = "IntensitySummary_postNormalization")
