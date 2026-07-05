@@ -198,6 +198,13 @@ for (d in c(out_dir,
 }
 cat("Outputs for this run go to: ", out_dir)
 
+# Also save every figure this report draws as a standalone PDF (not only embedded in the knit
+# document), into output/<comparison_id>/figures/ - so each metabolite's plots (Protti QC,
+# GO-enrichment global-vs-local, assembly-state, volcanoes, ...) are available as separate files.
+# Filenames are <chunk-label>-<n>.pdf; the plot titles inside identify the content.
+knitr::opts_chunk$set(dev = c("png", "pdf"),
+                      fig.path = file.path(out_dir, "figures", ""))
+
 ```
 
 
@@ -448,7 +455,7 @@ if(run_qcs_wProtti == T){
 
 ## 3a. Intensity distribution before filtering 
 
-```{r}
+```{r qc_intensity_distribution}
 data %>%
   mutate(fg_quantity_log2 = log2(fg_quantity)) %>%
   qc_intensity_distribution(
