@@ -127,6 +127,9 @@ condition_levels       <- c(condition1, condition2)
 ```{r}
 run_qcs_wProtti <- T
 
+# for the feature finding section, work on peptide level, not precursor level (Ilaria s mistake):
+peptide_id_col <- "pep_stripped_sequence"
+
 # Section 7 (cross-correlation differential analysis) is optional. Set to F to skip it —
 # each knit / metabolite render (run_all_metabolites.R) then stops after Section 6.
 # Default T = run it, as before.
