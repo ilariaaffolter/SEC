@@ -283,7 +283,7 @@ sourced **on top of** the official CCprofiler package, so the corrected versions
 take precedence when called from this document.
 
 ```{r load-fixes, message=FALSE, warning=FALSE}
-source(here::here("R", "ccprofiler_fixes.R"))
+source(here::here("R", "ccprofiler_fixes.R"), local = TRUE)  # local=TRUE: define the fixes in the report env so they see design_matrix etc. under rmarkdown::render (new.env)
 ```
 
 # 2. DATA preparation
