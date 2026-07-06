@@ -144,7 +144,7 @@ plot_individual_traces <- F
 
 perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
-load_proteinFeatures.RData <- F
+load_proteinFeatures.RData <- T
 load_protein_DiffExprPep_and_Protein <- F
 ################### ordering the samples?
 
