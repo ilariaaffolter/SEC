@@ -1318,6 +1318,13 @@ if (!exists("best_rt_height"))        best_rt_height        <- 1
 .pf_cores <- parallel::detectCores()
 .pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 6L)
 
+# Skip the (slow ~1h) findProteinFeatures if a previous run already saved proteinFeatures.RData
+# AND load_proteinFeatures.RData is TRUE in the SETUP chunk. Set it back to F to force a fresh run.
+.pf_file <- file.path(out_dir, "rdata", "proteinFeatures.RData")
+if (load_proteinFeatures.RData && file.exists(.pf_file)) {
+  load(.pf_file)   # restores `proteinFeatures` from the previous run
+  message("Loaded cached proteinFeatures from ", .pf_file, " (skipped findProteinFeatures).")
+} else {
 suppressMessages(
   proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
                                           corr_cutoff      = best_corr_cutoff,      # grid search (default 0.85)
@@ -1331,6 +1338,7 @@ suppressMessages(
 
 )
 )
+}
 
 # --- OPTIONAL: alternative-parameter exploration runs (DISABLED by default) -----------------------
 # The three findProteinFeatures calls below re-run feature finding at lower corr_cutoff (0.7 / 0.5 /
