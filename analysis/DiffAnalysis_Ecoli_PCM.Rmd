@@ -1316,7 +1316,7 @@ if (!exists("best_rt_height"))        best_rt_height        <- 1
 # machine (each worker copies the traces, so too many cores on a laptop causes memory thrash and can
 # be SLOWER, not faster). Raise the cap below if you are on a big-memory workstation.
 .pf_cores <- parallel::detectCores()
-.pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 6L)
+.pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 12L)
 
 # Skip the (slow ~1h) findProteinFeatures if a previous run already saved proteinFeatures.RData
 # AND load_proteinFeatures.RData is TRUE in the SETUP chunk. Set it back to F to force a fresh run.
