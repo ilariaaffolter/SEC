@@ -558,7 +558,7 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
   environment(.diffTestOneGroup) <- globalenv()   # keep workers lightweight (don't serialise featureValsBoth)
 
   .diff_chunks <- split(featureValsBoth, by = keycols)
-  .diff_cores  <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 8L)), error = function(e) 1L)
+  .diff_cores  <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
   tests <- tryCatch({
     if (.diff_cores <= 1L) stop("single core")
     cl <- parallel::makeCluster(.diff_cores)
@@ -715,7 +715,7 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
     environment(.assemblyTestOneProtein) <- globalenv()
 
     protein_chunks <- split(res, by = quantLevel)
-    n_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 8L)), error = function(e) 1L)
+    n_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
 
     diff <- tryCatch({
       if (n_cores <= 1L) stop("single core")
@@ -1049,7 +1049,7 @@ normalize_sn <- function(X, window, step) {
   }
   environment(.norm_one_window) <- globalenv()   # resolve mxs / id_mapping on the worker (exported below)
   .norm_env   <- environment()
-  .norm_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 4L)), error = function(e) 1L)
+  .norm_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
   lmxn <- tryCatch({
     if (.norm_cores <= 1L || length(windows_sets) < 3L) stop("serial")
     cl <- parallel::makeCluster(.norm_cores)
