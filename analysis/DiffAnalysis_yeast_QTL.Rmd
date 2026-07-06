@@ -14,6 +14,8 @@ output:
     code_folding: hide
     keep_md: true #enable to save all plots in a folder when knitting to html 
 fontsize: 11pt
+params:
+  comparison_id: "QTL_31_BY"   # default; overridden by scripts/run_all_comparisons.R
 editor_options: 
   markdown: 
     wrap: 72
@@ -97,7 +99,7 @@ comparisons <- list(
 )
 
 ## ---- choose the comparison to run ----
-comparison_id <- "QTL_31_BY"
+comparison_id <- if (exists("params") && !is.null(params$comparison_id)) params$comparison_id else "QTL_31_BY"
 
 ## ---- everything below is derived from the choice (no need to edit) ----
 stopifnot(comparison_id %in% names(comparisons))
@@ -1007,6 +1009,13 @@ message("Assembly changes (padj < ", assembly_padj_cutoff, ", |delta| > ", assem
         "): ", length(more_assembled_proteins_list), " more-assembled, ",
         length(less_assembled_proteins_list), " less-assembled in ", .treat, " vs ", ref_condition,
         ". (If both are 0, relax assembly_padj_cutoff/assembly_effect_cutoff above.)")
+
+# Persist the assembly hit-sets so the later cross-comparison overlap step
+# (scripts/overlap_between_comparisons.R) can load them for every comparison.
+saveRDS(list(more_assembled = more_assembled_proteins_list,
+             less_assembled = less_assembled_proteins_list,
+             changed        = proteins_withAssemblyChanges_list),
+        file.path(out_dir, "rdata", "assembly_hits.rds"))
 
 ```
 
