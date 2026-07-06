@@ -563,6 +563,7 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
     if (.diff_cores <= 1L) stop("single core")
     cl <- parallel::makeCluster(.diff_cores)
     on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # give workers the master's library paths
     invisible(parallel::clusterEvalQ(cl, suppressMessages(library(data.table))))
     message(".. testing ", length(.diff_chunks), " feature-groups on ", .diff_cores, " cores")
     data.table::rbindlist(parallel::parLapplyLB(cl, .diff_chunks, .diffTestOneGroup,
@@ -720,6 +721,11 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
       if (n_cores <= 1L) stop("single core")
       cl <- parallel::makeCluster(n_cores)
       on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+      # PSOCK workers start with the DEFAULT library paths, which may not include the user's
+      # package library (e.g. a OneDrive / non-standard location) where betareg + lmtest live.
+      # Point each worker at the master's .libPaths() so they can load them - otherwise every
+      # worker errors and the assembly test silently falls back to the (much slower) serial path.
+      parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())
       invisible(parallel::clusterEvalQ(cl, suppressMessages({
         library(data.table); library(betareg); library(lmtest) })))
       message(".. testing ", length(protein_chunks), " ", quantLevel,
@@ -1048,6 +1054,7 @@ normalize_sn <- function(X, window, step) {
     if (.norm_cores <= 1L || length(windows_sets) < 3L) stop("serial")
     cl <- parallel::makeCluster(.norm_cores)
     on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # give workers the master's library paths (limma may live there)
     parallel::clusterExport(cl, c("mxs", "id_mapping"), envir = .norm_env)  # send the matrix ONCE per worker
     invisible(parallel::clusterEvalQ(cl, requireNamespace("limma", quietly = TRUE)))
     message(".. cyclic-loess normalization: ", length(windows_sets), " fraction-windows on ", .norm_cores, " cores")
