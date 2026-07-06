@@ -1063,36 +1063,45 @@ normalize_sn <- function(X, window, step) {
   #lmxn<-lapply(windows_sets,function(X){normalizeMedianValues(mxs[,subset(id_mapping, fraction_number %in% X)$filename])})
   # --- per-window loess (parallelised) --------------------------------------------------------
   # Each fraction-window runs an INDEPENDENT limma::normalizeCyclicLoess on its own set of columns;
-  # the per-window results are averaged together afterwards. With many fractions (=> many windows)
-  # this is the hot loop, so we run the windows in parallel. Windows-safe PSOCK cluster, capped
-  # modestly (each worker holds a copy of the intensity matrix), with automatic serial fallback.
-  # parLapply preserves order, so the result is identical to the serial lapply below.
-  .norm_one_window <- function(X) {
-    limma::normalizeCyclicLoess(mxs[, subset(id_mapping, fraction_number %in% X)$filename])
-  }
-  environment(.norm_one_window) <- globalenv()   # resolve mxs / id_mapping on the worker (exported below)
-  .norm_env   <- environment()
+  # the per-window results are then averaged together (per id x filename). With many fractions
+  # (=> many windows) this is the hot loop, so we run the windows in parallel.
+  #
+  # Two things kept this the slowest step even at 12 cores (workers only ~20% busy):
+  #   1. each worker was sent a COPY of the WHOLE intensity matrix (clusterExport) and every window
+  #      then re-sliced it - so more workers meant more broadcast overhead, not more speed;
+  #   2. the melt + rbind + per-group averaging of all windows ran SERIALLY on the master afterwards
+  #      (a single core), which dominated the wall-clock.
+  # Fix, WITHOUT changing the numbers: pre-slice each window's columns on the master so every task
+  # is self-contained (it carries ONLY the columns it needs - far less data than broadcasting the
+  # full matrix to every worker), and melt each window's result INSIDE the worker so the reshape
+  # runs in parallel too. The master then only rbindlist()s and averages. parLapplyLB load-balances
+  # the unequal windows. Serial fallback is automatic and numerically identical.
+  # (No batching here, unlike the diff/assembly tests: there are only ~dozens of windows and each is
+  #  a chunky loess, so per-window dispatch is already efficient - batching would only hurt balance.)
+  .win_mats <- lapply(windows_sets, function(X) mxs[, subset(id_mapping, fraction_number %in% X)$filename])
+  .norm_one_window <- function(sub) reshape2::melt(limma::normalizeCyclicLoess(sub), na.rm = TRUE)
+  environment(.norm_one_window) <- globalenv()  # tiny function to each worker (not a copy of mxs / .win_mats)
   .norm_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
   lmxn <- tryCatch({
-    if (.norm_cores <= 1L || length(windows_sets) < 3L) stop("serial")
+    if (.norm_cores <= 1L || length(.win_mats) < 3L) stop("serial")
     cl <- parallel::makeCluster(.norm_cores)
     on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
-    parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # give workers the master's library paths (limma may live there)
-    parallel::clusterExport(cl, c("mxs", "id_mapping"), envir = .norm_env)  # send the matrix ONCE per worker
-    invisible(parallel::clusterEvalQ(cl, requireNamespace("limma", quietly = TRUE)))
-    message(".. cyclic-loess normalization: ", length(windows_sets), " fraction-windows on ", .norm_cores, " cores")
-    parallel::parLapply(cl, windows_sets, .norm_one_window)
+    parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # workers get the master's library paths (limma / reshape2 may live there)
+    invisible(parallel::clusterEvalQ(cl, {
+      requireNamespace("limma", quietly = TRUE); requireNamespace("reshape2", quietly = TRUE) }))
+    message(".. cyclic-loess normalization: ", length(.win_mats), " fraction-windows on ", .norm_cores, " cores")
+    parallel::parLapplyLB(cl, .win_mats, .norm_one_window)
   }, error = function(e) {
     message("Parallel cyclic-loess unavailable (", conditionMessage(e), "); running serially over ",
-            length(windows_sets), " windows.")
-    lapply(windows_sets, .norm_one_window)
+            length(.win_mats), " windows.")
+    lapply(.win_mats, .norm_one_window)
   })
-  lln<-do.call("rbind",lapply(lmxn, melt, na.rm=TRUE))
-  names(lln)<-c("id", "filename", "intensity")
-  lln_dt <- as.data.table(lln)
-  lln_dt[,mean_intensity := mean(intensity, na.rm=T), by=c("id","filename")]
-  lln_dt_sub <- unique(subset(lln_dt, select = c("id","filename","mean_intensity")))
-  names(lln_dt_sub)<-c("id", "filename", "intensity")
+  # per-window long tables -> one table -> average the per-window intensities for each id x filename.
+  # rbindlist replaces an O(n^2) do.call(rbind); the direct grouped mean replaces an
+  # assign-to-every-row + unique() pass - both give the identical result, far faster.
+  lln_dt <- data.table::rbindlist(lmxn)
+  data.table::setnames(lln_dt, c("id", "filename", "intensity"))
+  lln_dt_sub <- lln_dt[, .(intensity = mean(intensity, na.rm = TRUE)), by = c("id", "filename")]
   #lxn<-ddply(lln, .(id,filename),function(X){mean(X$intensity)})
   #names(lxn)<-c("id", "filename", "intensity")
   #return(lxn)
