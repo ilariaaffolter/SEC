@@ -132,6 +132,13 @@ run_qcs_wProtti <- T
 # Default T = run it, as before.
 run_cross_correlation <- T
 
+# The assembly section draws ONE trace/assembly plot PER protein - the loops in "look-up traces
+# of proteins with assembly changes" and the per-protein plotting inside getMassAssemblyChange().
+# That is hundreds of plots per metabolite (chunk 1084 has no p-value filter at all) and is the
+# single biggest reason that section is slow. Default F skips them (recommended for batch runs via
+# run_all_metabolites.R); set T when you want to eyeball individual proteins interactively.
+plot_individual_traces <- F
+
 perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
 load_proteinFeatures.RData <- F
@@ -1025,7 +1032,7 @@ diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assemb
                                              design_matrix= design_matrix, 
                                              compare_between = "Condition",
                                              quantLevel = "protein_id",
-                                             plot=T,
+                                             plot=plot_individual_traces,   # was T; per-protein plots dominate this chunk's runtime
                                              PDF=F #,
                                              #name = paste0("beta_pvalue_histogram_"ref_condition,"_",i)
                                              )
@@ -1070,7 +1077,7 @@ saveRDS(list(more_assembled = more_assembled_proteins_list,
 LET'S have a look at these proteins that change in assembly in at least
 one of the treatments:
 
-```{r}
+```{r, eval=plot_individual_traces}
  # lookup all the proteins_withAssembly Changes in any of the treatment conditions
 
 
@@ -1081,7 +1088,7 @@ for(i in filter(diffAssemblyState, betaPval_BHadj < 0.05 & abs(meanDiff) > 0.1)$
 
 ```
 
-```{r filter not by pval, but by the strength of the difference}
+```{r filter not by pval, but by the strength of the difference, eval=plot_individual_traces}
 for(i in filter(diffAssemblyState, abs(meanDiff) > 0.1)$protein_id){
   pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
   plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i)
@@ -1092,7 +1099,7 @@ for(i in filter(diffAssemblyState, abs(meanDiff) > 0.1)$protein_id){
 actually, the other way around => fix this by inverting the factor
 order for ATP and ctrl. Proteins that are LESS assembled
 
-```{r}
+```{r, eval=plot_individual_traces}
 
 #get all the proteins in the list
 all_elements_less_assembled_proteinslist <- unique(unlist(less_assembled_proteins_list))
@@ -1108,7 +1115,7 @@ for(i in all_elements_less_assembled_proteinslist){
 
 Proteins that are MORE assembled
 
-```{r}
+```{r, eval=plot_individual_traces}
 
 #get all the proteins in the list
 all_elements_more_assembled_proteinslist <- unique(unlist(more_assembled_proteins_list))
