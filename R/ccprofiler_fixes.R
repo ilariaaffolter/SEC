@@ -559,15 +559,25 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
 
   .diff_chunks <- split(featureValsBoth, by = keycols)
   .diff_cores  <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
+  # Batch the per-feature-group tasks (same reason as the assembly test: thousands of tiny
+  # parLapply tasks are dispatch-bound, not compute-bound). Each worker handles a batch of groups.
+  .diff_nbatches <- max(1L, min(length(.diff_chunks), .diff_cores * 4L))
+  .diff_batches  <- split(.diff_chunks,
+                          rep(seq_len(.diff_nbatches), length.out = length(.diff_chunks)))
+  .diffTestBatch <- function(chunk_list, fun1, compare_between, has_reps, keycols) {
+    data.table::rbindlist(lapply(chunk_list, fun1,
+                                 compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+  }
+  environment(.diffTestBatch) <- globalenv()
   tests <- tryCatch({
     if (.diff_cores <= 1L) stop("single core")
     cl <- parallel::makeCluster(.diff_cores)
     on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
     parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # give workers the master's library paths
     invisible(parallel::clusterEvalQ(cl, suppressMessages(library(data.table))))
-    message(".. testing ", length(.diff_chunks), " feature-groups on ", .diff_cores, " cores")
-    data.table::rbindlist(parallel::parLapplyLB(cl, .diff_chunks, .diffTestOneGroup,
-                          compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+    message(".. testing ", length(.diff_chunks), " feature-groups on ", .diff_cores, " cores (", length(.diff_batches), " batches)")
+    data.table::rbindlist(parallel::parLapplyLB(cl, .diff_batches, .diffTestBatch,
+                          fun1 = .diffTestOneGroup, compare_between = compare_between, has_reps = has_reps, keycols = keycols))
   }, error = function(e) {
     message("Parallel diff test unavailable (", conditionMessage(e),
             "); running serially over ", length(.diff_chunks), " feature-groups.")
@@ -717,6 +727,19 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
     protein_chunks <- split(res, by = quantLevel)
     n_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
 
+    # Group the per-protein tables into ~4x n_cores BATCHES. One parLapply task per protein means
+    # thousands of tiny tasks, and the cluster then spends almost all its time dispatching them
+    # (workers sit idle, ~17% CPU) rather than computing. Batching gives each worker one larger
+    # task and keeps it busy. Result is identical (row order is irrelevant downstream).
+    .n_batches   <- max(1L, min(length(protein_chunks), n_cores * 4L))
+    .asm_batches <- split(protein_chunks,
+                          rep(seq_len(.n_batches), length.out = length(protein_chunks)))
+    .assemblyTestBatch <- function(chunk_list, fun1, compare_between, quantLevel) {
+      data.table::rbindlist(lapply(chunk_list, fun1,
+                                   compare_between = compare_between, quantLevel = quantLevel))
+    }
+    environment(.assemblyTestBatch) <- globalenv()
+
     diff <- tryCatch({
       if (n_cores <= 1L) stop("single core")
       cl <- parallel::makeCluster(n_cores)
@@ -729,10 +752,10 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
       invisible(parallel::clusterEvalQ(cl, suppressMessages({
         library(data.table); library(betareg); library(lmtest) })))
       message(".. testing ", length(protein_chunks), " ", quantLevel,
-              "s for assembly change on ", n_cores, " cores")
+              "s for assembly change on ", n_cores, " cores (", length(.asm_batches), " batches)")
       data.table::rbindlist(parallel::parLapplyLB(
-        cl, protein_chunks, .assemblyTestOneProtein,
-        compare_between = compare_between, quantLevel = quantLevel))
+        cl, .asm_batches, .assemblyTestBatch,
+        fun1 = .assemblyTestOneProtein, compare_between = compare_between, quantLevel = quantLevel))
     }, error = function(e) {
       message("Parallel assembly test unavailable (", conditionMessage(e),
               "); running serially over ", length(protein_chunks), " ", quantLevel, "s.")
