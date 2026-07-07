@@ -509,8 +509,8 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
     c("id", "feature_id", "apex")
   }
 
-  .diffTestOneGroup <- function(d, compare_between, has_reps, keycols) {
-    out <- d[, {
+  .diffTestPartition <- function(part, compare_between, has_reps, keycols) {
+    part[, {
       samples = unique(.SD[, get(compare_between)])
       qints = .SD[, .(s = sum(intensity)), by = .(get(compare_between), Replicate)]
       if (has_reps) {
@@ -552,36 +552,43 @@ testDifferentialExpression_beniFix <- function (featureVals, compare_between = "
         global_int1_imp = global_int1_imp, global_int2_imp = global_int2_imp,
         global_log2FC_imp = log2(global_int1_imp/global_int2_imp),
         global_pVal = global_pVal)
-    }]
-    cbind(unique(d[, ..keycols]), out)
+    }, by = keycols]
   }
-  environment(.diffTestOneGroup) <- globalenv()   # keep workers lightweight (don't serialise featureValsBoth)
+  environment(.diffTestPartition) <- globalenv()   # lightweight worker fn (its data travels as the partition arg)
 
-  .diff_chunks <- split(featureValsBoth, by = keycols)
   .diff_cores  <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
-  # Batch the per-feature-group tasks (same reason as the assembly test: thousands of tiny
-  # parLapply tasks are dispatch-bound, not compute-bound). Each worker handles a batch of groups.
-  .diff_nbatches <- max(1L, min(length(.diff_chunks), .diff_cores * 4L))
-  .diff_batches  <- split(.diff_chunks,
-                          rep(seq_len(.diff_nbatches), length.out = length(.diff_chunks)))
-  .diffTestBatch <- function(chunk_list, fun1, compare_between, has_reps, keycols) {
-    data.table::rbindlist(lapply(chunk_list, fun1,
-                                 compare_between = compare_between, has_reps = has_reps, keycols = keycols))
-  }
-  environment(.diffTestBatch) <- globalenv()
+  # --- partition the feature-groups across cores (NOT one task per group) --------------------------
+  # The previous version split featureValsBoth into one data.table PER GROUP (tens of thousands of
+  # tiny tables) and shipped them to the workers. Serialising + GC-managing that many data.table
+  # objects (each carries fixed per-object overhead) swamped the master and thrashed memory, so the
+  # workers sat almost idle (~16% CPU) for hours. Instead: give each group a partition id, hand each
+  # worker ONE data.table (its whole partition), and let it run data.table's native in-C by-group
+  # test locally. This ships ~O(cores) tables (one bulk copy of the data) instead of ~O(groups) tiny
+  # ones, and each worker uses optimised grouping. Result is identical (group/row order is irrelevant
+  # to the downstream p-value adjustment and protein/complex aggregation).
+  .n_groups    <- uniqueN(featureValsBoth, by = keycols)
+  .diff_nparts <- max(1L, min(.n_groups, .diff_cores * 4L))
+  featureValsBoth[, ".part" := (.GRP %% .diff_nparts) + 1L, by = keycols]  # whole groups -> one partition
+  .diff_parts <- split(featureValsBoth, by = ".part", keep.by = FALSE)
+  featureValsBoth[, ".part" := NULL]
+
+  cl <- NULL   # defined up-front so the interrupt/exit handlers can always test it safely
   tests <- tryCatch({
-    if (.diff_cores <= 1L) stop("single core")
+    if (.diff_cores <= 1L || length(.diff_parts) < 2L) stop("serial")
     cl <- parallel::makeCluster(.diff_cores)
-    on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    on.exit(if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
     parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # give workers the master's library paths
-    invisible(parallel::clusterEvalQ(cl, suppressMessages(library(data.table))))
-    message(".. testing ", length(.diff_chunks), " feature-groups on ", .diff_cores, " cores (", length(.diff_batches), " batches)")
-    data.table::rbindlist(parallel::parLapplyLB(cl, .diff_batches, .diffTestBatch,
-                          fun1 = .diffTestOneGroup, compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+    invisible(parallel::clusterEvalQ(cl, { suppressMessages(library(data.table)); data.table::setDTthreads(1L) }))
+    message(".. testing ", .n_groups, " feature-groups on ", .diff_cores, " cores (", length(.diff_parts), " partitions)")
+    data.table::rbindlist(parallel::parLapplyLB(cl, .diff_parts, .diffTestPartition,
+                          compare_between = compare_between, has_reps = has_reps, keycols = keycols))
+  }, interrupt = function(e) {
+    if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE)
+    stop("Differential test interrupted by user.", call. = FALSE)
   }, error = function(e) {
     message("Parallel diff test unavailable (", conditionMessage(e),
-            "); running serially over ", length(.diff_chunks), " feature-groups.")
-    data.table::rbindlist(lapply(.diff_chunks, .diffTestOneGroup,
+            "); running serially over ", length(.diff_parts), " partitions.")
+    data.table::rbindlist(lapply(.diff_parts, .diffTestPartition,
                           compare_between = compare_between, has_reps = has_reps, keycols = keycols))
   })
 
