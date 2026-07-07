@@ -731,43 +731,52 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
     # not a copy of tracesList/res. Calls are package-qualified, so no attach needed.
     environment(.assemblyTestOneProtein) <- globalenv()
 
-    protein_chunks <- split(res, by = quantLevel)
     n_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
-
-    # Group the per-protein tables into ~4x n_cores BATCHES. One parLapply task per protein means
-    # thousands of tiny tasks, and the cluster then spends almost all its time dispatching them
-    # (workers sit idle, ~17% CPU) rather than computing. Batching gives each worker one larger
-    # task and keeps it busy. Result is identical (row order is irrelevant downstream).
-    .n_batches   <- max(1L, min(length(protein_chunks), n_cores * 4L))
-    .asm_batches <- split(protein_chunks,
-                          rep(seq_len(.n_batches), length.out = length(protein_chunks)))
-    .assemblyTestBatch <- function(chunk_list, fun1, compare_between, quantLevel) {
-      data.table::rbindlist(lapply(chunk_list, fun1,
+    # --- partition the proteins across cores (NOT one shipped table per protein) --------------------
+    # Same fix as the differential test: splitting res into one data.table PER PROTEIN (thousands of
+    # tiny tables) and shipping those to the workers means the master spends its time serialising +
+    # GC-managing thousands of objects while the workers sit almost idle (~17% CPU). Instead, give
+    # each protein a partition id, hand each worker ONE data.table (its whole partition), and let it
+    # split LOCALLY (in-process, free) and run the per-protein betareg/lrtest/wilcox loop. Ships
+    # ~O(cores) tables (one bulk copy of res) instead of ~O(proteins) tiny ones. The per-protein test
+    # (.assemblyTestOneProtein) is UNCHANGED, so results are identical (protein/row order is
+    # irrelevant to the downstream BH adjustment and hit categorisation).
+    .n_prot     <- uniqueN(res, by = quantLevel)
+    .asm_nparts <- max(1L, min(.n_prot, n_cores * 4L))
+    res[, ".part" := (.GRP %% .asm_nparts) + 1L, by = quantLevel]   # whole proteins -> one partition
+    .asm_parts <- split(res, by = ".part", keep.by = FALSE)
+    res[, ".part" := NULL]
+    .assemblyTestBatch <- function(part, fun1, compare_between, quantLevel) {
+      data.table::rbindlist(lapply(split(part, by = quantLevel), fun1,   # split locally on the worker
                                    compare_between = compare_between, quantLevel = quantLevel))
     }
     environment(.assemblyTestBatch) <- globalenv()
 
+    cl <- NULL   # defined up-front so the interrupt/exit handlers can always test it safely
     diff <- tryCatch({
-      if (n_cores <= 1L) stop("single core")
+      if (n_cores <= 1L || length(.asm_parts) < 2L) stop("single core")
       cl <- parallel::makeCluster(n_cores)
-      on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+      on.exit(if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
       # PSOCK workers start with the DEFAULT library paths, which may not include the user's
       # package library (e.g. a OneDrive / non-standard location) where betareg + lmtest live.
       # Point each worker at the master's .libPaths() so they can load them - otherwise every
       # worker errors and the assembly test silently falls back to the (much slower) serial path.
       parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())
       invisible(parallel::clusterEvalQ(cl, suppressMessages({
-        library(data.table); library(betareg); library(lmtest) })))
-      message(".. testing ", length(protein_chunks), " ", quantLevel,
-              "s for assembly change on ", n_cores, " cores (", length(.asm_batches), " batches)")
+        library(data.table); library(betareg); library(lmtest); data.table::setDTthreads(1L) })))
+      message(".. testing ", .n_prot, " ", quantLevel,
+              "s for assembly change on ", n_cores, " cores (", length(.asm_parts), " partitions)")
       data.table::rbindlist(parallel::parLapplyLB(
-        cl, .asm_batches, .assemblyTestBatch,
+        cl, .asm_parts, .assemblyTestBatch,
         fun1 = .assemblyTestOneProtein, compare_between = compare_between, quantLevel = quantLevel))
+    }, interrupt = function(e) {
+      if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE)
+      stop("Assembly test interrupted by user.", call. = FALSE)
     }, error = function(e) {
       message("Parallel assembly test unavailable (", conditionMessage(e),
-              "); running serially over ", length(protein_chunks), " ", quantLevel, "s.")
-      data.table::rbindlist(lapply(protein_chunks, .assemblyTestOneProtein,
-                                   compare_between = compare_between, quantLevel = quantLevel))
+              "); running serially over ", .n_prot, " ", quantLevel, "s.")
+      data.table::rbindlist(lapply(.asm_parts, .assemblyTestBatch,
+                                   fun1 = .assemblyTestOneProtein, compare_between = compare_between, quantLevel = quantLevel))
     })
 
     diff[betaPval==2, betaPval := NA ]
