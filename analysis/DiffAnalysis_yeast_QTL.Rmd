@@ -145,6 +145,7 @@ run_qcs_wProtti <- T
 perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
 load_proteinFeatures.RData <- F
+load_normalized.RData <- F   # set T to skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData).
 load_protein_DiffExprPep_and_Protein <- F
 ################### ordering the samples?
 
@@ -759,12 +760,24 @@ plotImputationSummary(pepTracesMV, pepTracesImp, PDF = F,
 ```{r Normalize intensity values across samples}
 
 if(perform_normalization_cyclicloess==T) {
+# Cache the (~30min) cyclic-loess normalization, same idea as proteinFeatures.RData: if
+# load_normalized.RData is TRUE in SETUP and a previous run saved pepTracesNormalized.RData,
+# load it and skip normalizeByCyclicLoess. Set the flag to F (or delete the file) to force a
+# fresh normalization after changing anything upstream (imputation, filtering, the input data).
+.norm_file <- file.path(out_dir, "rdata", "pepTracesNormalized.RData")
+if (load_normalized.RData && file.exists(.norm_file)) {
+  load(.norm_file)   # restores `pepTracesNormalized` from the previous run
+  message("Loaded cached pepTracesNormalized from ", .norm_file, " (skipped normalizeByCyclicLoess).")
+} else {
 # Normalize intensity values across samples
 pepTracesNormalized <- normalizeByCyclicLoess(pepTracesImp, window = 3, step = 1, plot = F)
 # NOTE: a second, identical normalizeByCyclicLoess() call used to run here purely to "draw a plot"
 # (plot=T). But the `plot`/`PDF` arguments are ignored inside the function, and the call above
 # already writes the prior/post-normalization PDFs. That duplicate ran the full (expensive)
 # normalization a second time for zero extra output, doubling this chunk's runtime - removed.
+save(pepTracesNormalized, file = .norm_file)
+message("Saved pepTracesNormalized to ", .norm_file, " (re-runs with load_normalized.RData=T skip normalization).")
+}
 
 #' # Assess total intensity after normalization
 plotGlobalIntensities(pepTracesNormalized, plot = T, PDF=F ) #, name = "IntensitySummary_postNormalization")
