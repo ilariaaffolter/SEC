@@ -1747,9 +1747,10 @@ for(i in Sample_id_treat) {
   
    testFilled_norm <- proteinFeaturesFiltered_featureValsFilled_i[feature_id %in% cond]
 
-  local_vs_global_test <- testLocalVsGlobal(featureVals = testFilled_norm,
-                                            compare_between = "Condition",
-                                            plot = FALSE)  # was TRUE: 1 plot/feature was the entire bottleneck
+  local_vs_global_test <- testLocalVsGlobal_fix(featureVals = testFilled_norm,
+                                                compare_between = "Condition",
+                                                design_matrix = design_matrix,  # explicit (was a global the pkg fn couldn't see under render)
+                                                plot = FALSE)  # was TRUE: 1 plot/feature was the entire bottleneck
   local_vs_global_list[[length(local_vs_global_list) + 1L]] <- local_vs_global_test
   # aggregate to protein level + keep the significant local-vs-global proteins (a feature-specific vs
   # global change = assembly-state rearrangement). Wrapped: aggregateLocalVsGlobal is a package fn.
