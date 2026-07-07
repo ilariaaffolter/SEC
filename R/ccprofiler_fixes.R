@@ -1174,15 +1174,24 @@ normalize_sn <- function(X, window, step) {
   .norm_one_window <- function(sub) reshape2::melt(limma::normalizeCyclicLoess(sub), na.rm = TRUE)
   environment(.norm_one_window) <- globalenv()  # tiny function to each worker (not a copy of mxs / .win_mats)
   .norm_cores <- tryCatch(max(1L, min(parallel::detectCores() - 1L, 12L)), error = function(e) 1L)
+  cl <- NULL   # defined up-front so the interrupt/exit handlers can always test it safely
   lmxn <- tryCatch({
     if (.norm_cores <= 1L || length(.win_mats) < 3L) stop("serial")
     cl <- parallel::makeCluster(.norm_cores)
-    on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+    on.exit(if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
     parallel::clusterCall(cl, function(p) .libPaths(p), .libPaths())  # workers get the master's library paths (limma / reshape2 may live there)
     invisible(parallel::clusterEvalQ(cl, {
       requireNamespace("limma", quietly = TRUE); requireNamespace("reshape2", quietly = TRUE) }))
     message(".. cyclic-loess normalization: ", length(.win_mats), " fraction-windows on ", .norm_cores, " cores")
     parallel::parLapplyLB(cl, .win_mats, .norm_one_window)
+  }, interrupt = function(e) {
+    # User pressed Stop mid-normalization. R was streaming a data chunk to a worker over the socket
+    # (the base::serialize() body that prints on interrupt is a cosmetic "interrupted mid-transfer"
+    # trace, NOT data corruption). Tear the workers down and abort cleanly - instead of leaving
+    # orphaned Rscript.exe workers, or letting an interrupt-induced socket error fall through to the
+    # error handler below and silently restart the whole thing serially (much slower).
+    if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE)
+    stop("Cyclic-loess normalization interrupted by user.", call. = FALSE)
   }, error = function(e) {
     message("Parallel cyclic-loess unavailable (", conditionMessage(e), "); running serially over ",
             length(.win_mats), " windows.")
