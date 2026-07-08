@@ -1162,7 +1162,15 @@ pepTracesList_filtered_minN <- subset(pepTracesList_filtered, trace_subset_ids =
 
 ```{r perform_prot_grid_search}
 
-if(perform_prot_grid_search == T) {
+# Reuse a cached grid search if one exists and caching is on (mirrors load_proteinFeatures.RData):
+# performProteinGridSearch is the slow step, and its result (ProtGridSearch.RData) is per-comparison
+# and deterministic (set.seed below), so re-runs of the same metabolite LOAD it instead of recomputing
+# an identical search. Set load_proteinFeatures.RData <- F (or delete the file) to force a fresh search.
+.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")
+.grid_reuse      <- load_proteinFeatures.RData && file.exists(.gridsearch_file)
+if (.grid_reuse) message("Reusing cached grid search from ", .gridsearch_file, " (skipped performProteinGridSearch).")
+
+if(perform_prot_grid_search == T && !.grid_reuse) {
 # NOTE (faithful fix): the original sampled from `pepTracesList_filtered_minN$ctrl_1` and then set
 # `grid_peptideTraces <- grid_peptideTraces$ctrl_1`. This design has NO condition named "ctrl_1"
 # (conditions are strainBY/strainRM/strain31/strain83), so both returned NULL and the search could
