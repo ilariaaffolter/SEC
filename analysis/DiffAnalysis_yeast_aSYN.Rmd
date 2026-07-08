@@ -2126,7 +2126,11 @@ dev.off()
 
 ```{r}
 
-save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep_list,protein_DiffExprProtein_list,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))
+# FLAG (bug fix): the original referenced protein_DiffExprPep_list / protein_DiffExprProtein_list,
+# which are never created - the ORIGINAL report (ORIGINAL_*.Rmd) has the identical broken save. The
+# real objects are protein_DiffExprPep / protein_DiffExprProtein (the "_list" is only a FILENAME
+# convention; see the per-object saves above). Corrected the two names so the save works; nothing else.
+save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep,protein_DiffExprProtein,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))
 
 ```
 
