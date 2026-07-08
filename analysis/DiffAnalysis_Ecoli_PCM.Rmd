@@ -134,6 +134,7 @@ peptide_id_col <- "pep_stripped_sequence"
 # each knit / metabolite render (run_all_metabolites.R) then stops after Section 6.
 # Default T = run it, as before.
 run_cross_correlation <- T
+run_complex_analysis  <- F   # skip the (slow, memory-heavy) COMPLEX-level analysis section - not needed for the protein-level cross-metabolite overlap. Set T to run the full complex pipeline.
 
 # The assembly section draws ONE trace/assembly plot PER protein - the loops in "look-up traces
 # of proteins with assembly changes" and the per-protein plotting inside getMassAssemblyChange().
@@ -1880,7 +1881,7 @@ if (exists("local_vs_global_sig_list") && length(local_vs_global_sig_list) > 0) 
 
 # COMPLEX level analysis
 
-```{r}
+```{r, eval=run_complex_analysis}
 # Complex Portal reference table for this organism. The filename is set once in
 # the SETUP section via `complex_portal_file` (this branch: S. cerevisiae,
 # taxid 559292). Place that file in data/raw/. (Original sep was 't', a stray
@@ -1891,7 +1892,7 @@ complex_portal <- read.csv(here("data", "raw", complex_portal_file), sep = "\t",
 
 ## - set hypothesis
 
-```{r}
+```{r, eval=run_complex_analysis}
 # set hypothesis
 
 complexHypotheses <- complex_portal %>%
@@ -1927,7 +1928,7 @@ complexTargetsPlusDecoys <- generateComplexDecoys(target_hypotheses=complexHypot
 
 ## - get Complex features
 
-```{r}
+```{r, eval=run_complex_analysis}
 #' ## Summarize protein traces across conditions
 protein_traces_sum <- integrateTraceIntensities(protein_traces_list,
                                                 design_matrix = NULL,
@@ -1935,7 +1936,7 @@ protein_traces_sum <- integrateTraceIntensities(protein_traces_list,
                                                 aggr_fun = "sum")
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 
 plotSummarizedMScoverage(hypotheses = complexHypotheses_minimal,
                          protTraces = protein_traces_sum,
@@ -1957,12 +1958,12 @@ complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
 
 ## - filter Complex features
 
-```{r, eval=TRUE, message=FALSE, warning=FALSE, cache=FALSE}
+```{r, eval=run_complex_analysis, message=FALSE, warning=FALSE, cache=FALSE}
 
 complexFeaturesBest <- getBestFeatures(complexFeatures)
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 
 # NOTE: bare `filterFeatures` is MASKED here by another loaded package's S4 generic (signature
 # object, filter - e.g. QFeatures/ProtGenerics pulled in via MSnbase), which has no method for a
@@ -2004,7 +2005,7 @@ extract complex features from pep traces pepTracesList_filtered_minN
 
 by condition
 
-```{r}
+```{r, eval=run_complex_analysis}
 
 
 complexFeaturesUnique <- getUniqueFeatureGroups(
@@ -2041,7 +2042,7 @@ complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
 
 ## - differential
 
-```{r}
+```{r, eval=run_complex_analysis}
 # Reordering the vector
 
 
@@ -2072,7 +2073,7 @@ for(i in Sample_id_treat) {
 }
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 for (i in complex_DiffExprPep_list) {
   
 #plots some numbers
@@ -2087,7 +2088,7 @@ hist(i$pVal, breaks = 100)
 }
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 complex_DiffExprProtein_list <- list()
 
 for (i in seq_along(complex_DiffExprPep_list)) {
@@ -2112,7 +2113,7 @@ hist(complex_DiffExprProtein$pVal, breaks = 100)
     }
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 complex_DiffExprComplex_list <- list()
 
 for (i in seq_along(complex_DiffExprProtein_list)) {
@@ -2139,24 +2140,24 @@ for (i in seq_along(complex_DiffExprProtein_list)) {
 
 ## - general volcano plots
 
-```{r}
+```{r, eval=run_complex_analysis}
 for(i in complex_DiffExprPep_list) {
   plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 for(i in complex_DiffExprProtein_list) {
   plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
 ```
 
-```{r}
+```{r, eval=run_complex_analysis}
 for(i in complex_DiffExprComplex_list) {
   plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
 ```
 
 ## - Get differential complexes
 
-```{r}
+```{r, eval=run_complex_analysis}
 
 diffComplexes_list <- list()
 
@@ -2181,7 +2182,7 @@ for (j in seq_along(complex_DiffExprComplex_list)) {
 
 ## - plot diffComplexes
 
-```{r}
+```{r, eval=run_complex_analysis}
   #' # Plot some differential protein features
   #' 
 for (i in diffComplexes_list) {
@@ -2204,7 +2205,7 @@ for (i in diffComplexes_list) {
 
 ## - plot all_complexes
 
-```{r}
+```{r, eval=run_complex_analysis}
 
 all_complexes <- unique(complex_featureValsFilled$complex_id)
 
