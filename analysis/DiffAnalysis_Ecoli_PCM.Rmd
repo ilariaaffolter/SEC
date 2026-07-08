@@ -16,6 +16,7 @@ output:
 fontsize: 11pt
 params:
   metabolite: "ATP"   # default; overridden by scripts/run_all_metabolites.R
+  run_complex_analysis: false   # default off; scripts/run_complex_all_metabolites.R sets this TRUE
 editor_options: 
   markdown: 
     wrap: 72
@@ -134,7 +135,7 @@ peptide_id_col <- "pep_stripped_sequence"
 # each knit / metabolite render (run_all_metabolites.R) then stops after Section 6.
 # Default T = run it, as before.
 run_cross_correlation <- T
-run_complex_analysis  <- F   # skip the (slow, memory-heavy) COMPLEX-level analysis section - not needed for the protein-level cross-metabolite overlap. Set T to run the full complex pipeline.
+run_complex_analysis  <- if (exists("params") && !is.null(params$run_complex_analysis)) isTRUE(params$run_complex_analysis) else F   # gated COMPLEX section; default OFF (not needed for the protein-level overlap). scripts/run_complex_all_metabolites.R renders with params$run_complex_analysis=TRUE; or set T here to run it interactively.
 
 # The assembly section draws ONE trace/assembly plot PER protein - the loops in "look-up traces
 # of proteins with assembly changes" and the per-protein plotting inside getMassAssemblyChange().
@@ -2178,6 +2179,25 @@ for (j in seq_along(complex_DiffExprComplex_list)) {
   highlight_complex <- diffComplexes
   plotVolcano(i, highlight = highlight_complex, PDF = FALSE, pBHadj_cutoff = 0.05)
 }
+
+# ---- persist complex-level hit-sets (mirrors assembly_hits.rds) so a cross-metabolite complex
+# overlap (scripts/overlap_complex_between_metabolites.R) can load them for every metabolite. Same
+# cutoff as diffComplexes above (pBHadj < 0.05 & |medianLog2FC| > 1). medianLog2FC follows $testOrder,
+# so convert to a fixed treatment-minus-reference direction for an unambiguous up/down split (same
+# approach as assembly_hits' treat_minus_ref).
+.treat_c     <- treatment_conditions[1]
+.complex_all <- data.table::rbindlist(lapply(complex_DiffExprComplex_list, as.data.table), fill = TRUE)
+.complex_all[, treat_lfc := data.table::fifelse(
+  testOrder == paste0(.treat_c, ".vs.", ref_condition),  medianLog2FC,
+  data.table::fifelse(testOrder == paste0(ref_condition, ".vs.", .treat_c), -medianLog2FC, NA_real_))]
+.complex_sig <- .complex_all[pBHadj < 0.05 & abs(medianLog2FC) > 1]
+saveRDS(list(
+  up      = unique(as.character(.complex_sig[treat_lfc > 0]$complex_id)),   # complex UP in treatment vs ctrl
+  down    = unique(as.character(.complex_sig[treat_lfc < 0]$complex_id)),   # complex DOWN in treatment vs ctrl
+  changed = unique(as.character(.complex_sig$complex_id))),                 # any significant change
+  file.path(out_dir, "rdata", "complex_hits.rds"))
+message("Complex hits (pBHadj<0.05, |medianLog2FC|>1): ",
+        length(unique(as.character(.complex_sig$complex_id))), " differential complexes -> complex_hits.rds")
 ```
 
 ## - plot diffComplexes
