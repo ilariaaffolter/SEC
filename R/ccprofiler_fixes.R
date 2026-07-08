@@ -712,9 +712,18 @@ getMassAssemblyChange_aljazfix <- function(tracesList, design_matrix,
       m2 <- mean(sa[cond == samples[2]])
       if ((unique(d$n_conditions) > 1) & (min(d$replicates_perCondition) > 1) &
           (min(d$unique_perCondition) > 1)) {
-        p <- suppressWarnings(tryCatch(
-          lmtest::lrtest(betareg::betareg(d$sum_assembled_norm_t ~ d$Condition))$`Pr(>Chisq)`[2],
-          error = function(e) NA_real_))
+        # FLAG: a pathological betareg fit (non-convergence on degenerate data) can spin ONE worker
+        # for many minutes and stall the whole cluster - the other cores go idle and you see a single
+        # core at ~7%. Cap each fit at a wall-clock limit; a timeout is treated exactly like the
+        # existing betareg error guard -> NA (a fit this slow on ~n_samples points is unreliable
+        # anyway). setTimeLimit(transient=TRUE) applies only to the rest of THIS call and is cleared
+        # right after. (Only affects fits that would otherwise hang; normal fits here take <1s.)
+        p <- suppressWarnings(tryCatch({
+          setTimeLimit(elapsed = 30, transient = TRUE)
+          .pv <- lmtest::lrtest(betareg::betareg(d$sum_assembled_norm_t ~ d$Condition))$`Pr(>Chisq)`[2]
+          setTimeLimit()   # clear the cap on success
+          .pv
+        }, error = function(e) { setTimeLimit(); NA_real_ }))
         wilcoxPval <- suppressWarnings(tryCatch(
           stats::wilcox.test(d$sum_assembled_norm ~ d$Condition)$p.value,
           error = function(e) NA_real_))
