@@ -1046,14 +1046,27 @@ proteins_withAssemblyChanges_list <- list()
 
 # compare the treatmets to the ref (the list is specified in the vectors treatment_conditions and ref_condition in the Analysis SETUP section)
 
-diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assembly,    
-                                             design_matrix= design_matrix, 
+# Cache the (slow) assembly test - getMassAssemblyChange runs betareg per protein, so cache it the
+# same way as proteinFeatures/diff: when diffAssemblyState.RData exists and load_proteinFeatures.RData
+# is TRUE, load it and skip the recompute; otherwise compute + save. The categorisation below always
+# re-runs on diffAssemblyState, so the cutoffs stay adjustable without recomputing betareg. Set
+# load_proteinFeatures.RData <- F (or delete the file) to force a fresh assembly test.
+.assembly_file <- file.path(out_dir, "rdata", "diffAssemblyState.RData")
+if (load_proteinFeatures.RData && file.exists(.assembly_file)) {
+  load(.assembly_file)   # restores diffAssemblyState from a previous run
+  message("Loaded cached diffAssemblyState from ", .assembly_file, " (skipped getMassAssemblyChange).")
+} else {
+diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assembly,
+                                             design_matrix= design_matrix,
                                              compare_between = "Condition",
                                              quantLevel = "protein_id",
                                              plot=plot_individual_traces,   # was T; per-protein plots dominate this chunk's runtime
                                              PDF=F #,
                                              #name = paste0("beta_pvalue_histogram_"ref_condition,"_",i)
                                              )
+  save(diffAssemblyState, file = .assembly_file)
+  message("Saved diffAssemblyState to ", .assembly_file, " (re-runs with load_proteinFeatures.RData=T skip getMassAssemblyChange).")
+}
 
 # ---- categorize proteins by assembly change (treatment vs reference) ----
 # FIX: more_assembled_proteins_list / less_assembled_proteins_list were declared
