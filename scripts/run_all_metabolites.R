@@ -24,13 +24,22 @@ for (m in metabolites) {
   out <- here("output", cmp)
   dir.create(out, recursive = TRUE, showWarnings = FALSE)
   message("=== Rendering ", cmp, " ===")
-  rmarkdown::render(
-    input       = rmd,
-    params      = list(metabolite = m),
-    output_file = paste0("report_", cmp, ".html"),
-    output_dir  = out,
-    envir       = new.env(parent = globalenv())
+  # Wrap each render so one failed metabolite can't abort the whole batch - the others still run and
+  # their outputs are saved. Each render is an isolated new.env; nothing is shared between metabolites.
+  tryCatch(
+    rmarkdown::render(
+      input       = rmd,
+      params      = list(metabolite = m),
+      output_file = paste0("report_", cmp, ".html"),
+      output_dir  = out,
+      envir       = new.env(parent = globalenv())
+    ),
+    error = function(e) message("!! ", cmp, " FAILED: ", conditionMessage(e), " - continuing with the next metabolite.")
   )
+  # Release this metabolite's memory before the next one so RAM plateaus instead of climbing over the
+  # batch: gc() collects the finished render and finalizes its parallel-worker socket connections,
+  # which lets leftover Rscript.exe workers exit rather than piling up across a long run.
+  invisible(gc(full = TRUE))
 }
 message("Done. Reports + results under output/PCM_ctrl_vs_*/")
 

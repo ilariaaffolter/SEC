@@ -38,13 +38,17 @@ for (m in metabolites) {
   out <- here("output", cmp)
   dir.create(out, recursive = TRUE, showWarnings = FALSE)
   message("=== Complex-level render: ", cmp, " ===")
-  rmarkdown::render(
-    input       = rmd,
-    params      = list(metabolite = m, run_complex_analysis = TRUE),
-    output_file = paste0("report_complex_", cmp, ".html"),  # separate name; keeps the protein-level report
-    output_dir  = out,
-    envir       = new.env(parent = globalenv())
+  tryCatch(
+    rmarkdown::render(
+      input       = rmd,
+      params      = list(metabolite = m, run_complex_analysis = TRUE),
+      output_file = paste0("report_complex_", cmp, ".html"),  # separate name; keeps the protein-level report
+      output_dir  = out,
+      envir       = new.env(parent = globalenv())
+    ),
+    error = function(e) message("!! complex ", cmp, " FAILED: ", conditionMessage(e), " - continuing with the next metabolite.")
   )
+  invisible(gc(full = TRUE))   # release memory + finalize worker connections before the next metabolite
 }
 message("Done. Complex reports + complex_hits.rds under output/PCM_ctrl_vs_*/")
 
