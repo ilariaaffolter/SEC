@@ -149,6 +149,7 @@ perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyc
 load_proteinFeatures.RData <- T
 load_normalized.RData <- T   # skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData). Set F to force fresh after changing upstream data/filtering.
 load_protein_DiffExprPep_and_Protein <- T
+load_uniprot.RData <- T   # cache the UniProt annotation fetch (rdata/uniprot.RData) so every render reuses ONE identical, reproducible fetch instead of re-hitting UniProt each time. fetch_uniprot is non-deterministic: a bad fetch drops/NAs the `mass` column, which silently makes the assembly state read as ~0% monomer. Set F (or delete the file) to force a fresh fetch.
 ################### ordering the samples?
 
 sample_sort_by_number <- T # if need to reorder samples e.g. based on treatment concentration
@@ -665,19 +666,52 @@ as.data.table()
 ## 4c. create TRACE ANNOTATION table
 
 ```{r Fetch_uniprot for traceAnnotation df}
+# Cache the UniProt annotation fetch (same pattern as the normalized / proteinFeatures / diff caches).
+# fetch_uniprot is a live network call with NO built-in determinism: across renders it can return the
+# full table, a table with no `mass` column, or one with all-NA mass - and a missing monomer mass
+# silently corrupts the assembly QC (every protein then reads as ~100% assembled / 0% monomer).
+# Caching pins ONE fetch so every metabolite reuses identical, reproducible annotation. The
+# fetch_uniprot call itself is unchanged; only its result is persisted and reused.
+.uniprot_file <- file.path(out_dir, "rdata", "uniprot.RData")
+if (load_uniprot.RData && file.exists(.uniprot_file)) {
+  load(.uniprot_file)   # restores `uniprot` from a previous run
+  message("Loaded cached UniProt annotation from ", .uniprot_file, " (skipped fetch_uniprot).")
+} else {
 uniprot <- fetch_uniprot(unique(data_filter_ccp_mod$protein_id),
                          columns = c("protein_name", "length", "sequence", "mass", "gene_names","organism_name","xref_geneid",
     "xref_string", "go_f", "go_p", "go_c", "cc_interaction", "ft_act_site", "ft_binding",
     "cc_cofactor", "cc_catalytic_activity", "xref_pdb"),
-    batchsize = 50) 
+    batchsize = 50)
+  save(uniprot, file = .uniprot_file)
+  message("Saved UniProt annotation to ", .uniprot_file, " (re-runs with load_uniprot.RData=T skip fetch_uniprot).")
+}
 ```
 
 ```{r traceAnnotation_table}
 ## Trace annotation table
 
 ## information from uniprot
+# Guard the mass column before renaming. If fetch_uniprot returned no `mass` column, the rename below
+# crashes; if it returned an all-NA mass, protein_mw ends up NA and CCprofiler reads every protein as
+# ~100% assembled (0% monomer). Fail loudly here instead of producing a silently-meaningless QC.
+if (!"mass" %in% names(uniprot)) {
+  stop("fetch_uniprot returned no 'mass' column for this run - the UniProt fetch was incomplete. ",
+       "Delete ", .uniprot_file, " and re-run to re-fetch. Without monomer mass the assembly state ",
+       "is meaningless (every protein reads as 0% monomer).")
+}
 traceAnnotation <- as.data.table(uniprot) %>%
   dplyr::rename("Mass" ="mass") # there is a bug in the annotateTraces function, it doesn't add the protein_mw column if the mass column is "mass" and not "Mass". Tried to fix the function but not fully managed: it does add the column, but put NAs as values....
+
+# Sanity-check the monomer mass just loaded: mostly-NA mass => the assembly state would be garbage.
+.na_mass_frac <- mean(is.na(traceAnnotation$Mass))
+if (.na_mass_frac > 0.9) {
+  stop(sprintf(paste0("UniProt mass is NA for %.0f%% of proteins - the fetch effectively returned no ",
+                      "monomer mass, so the assembly state would be meaningless (0%% monomer). Delete ",
+                      "%s and re-run to re-fetch."), 100 * .na_mass_frac, .uniprot_file))
+} else if (.na_mass_frac > 0.5) {
+  warning(sprintf(paste0("UniProt mass is NA for %.0f%% of proteins - the assembly state may be ",
+                         "unreliable. Consider deleting %s and re-fetching."), 100 * .na_mass_frac, .uniprot_file))
+}
 
 head(traceAnnotation, n = 2)
 ```
@@ -1015,6 +1049,20 @@ protein_traces_list <- suppressWarnings(proteinQuantification_sibPepCorrFix.trac
 ```{r}
 
 # evaluate protein mass distribution
+# Backstop before the assembly split: annotateMassDistribution uses assembly_boundary = 2*protein_mw,
+# so if protein_mw did not attach (missing/NA UniProt mass, or a mass-format parse miss upstream) the
+# result reads as ~0% monomer for every protein. Refuse to compute a meaningless QC.
+.mw_vals    <- unlist(lapply(protein_traces_list, function(t) t$trace_annotation$protein_mw), use.names = FALSE)
+.na_mw_frac <- if (length(.mw_vals)) mean(is.na(.mw_vals)) else 1
+if (.na_mw_frac > 0.9) {
+  stop(sprintf(paste0("protein_mw is NA/absent for %.0f%% of proteins - monomer mass did not attach, so the ",
+                      "assembly state would be meaningless (0%% monomer). Re-fetch UniProt (delete the cached ",
+                      "rdata/uniprot.RData) and re-run; if it persists, check the 'Mass' column and ",
+                      "uniprot_mass_format in the annotateTraces call."), 100 * .na_mw_frac))
+} else if (.na_mw_frac > 0.5) {
+  warning(sprintf("protein_mw is NA for %.0f%% of proteins - the assembly state may be unreliable.", 100 * .na_mw_frac))
+}
+
 protTraces_assembly <- annotateMassDistribution(protein_traces_list)
 
 
