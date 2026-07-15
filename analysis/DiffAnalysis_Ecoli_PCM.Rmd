@@ -677,11 +677,27 @@ if (load_uniprot.RData && file.exists(.uniprot_file)) {
   load(.uniprot_file)   # restores `uniprot` from a previous run
   message("Loaded cached UniProt annotation from ", .uniprot_file, " (skipped fetch_uniprot).")
 } else {
-uniprot <- fetch_uniprot(unique(data_filter_ccp_mod$protein_id),
-                         columns = c("protein_name", "length", "sequence", "mass", "gene_names","organism_name","xref_geneid",
+  # Fetch, then RETRY any accessions UniProt did not return. fetch_uniprot batches internally and, on a
+  # flaky response, silently returns only a SUBSET of the queried proteins (a warning, not an error).
+  # The missing proteins then get no monomer mass, which is what made the assembly state read as ~0%
+  # monomer for some metabolites. Re-querying just the missing ids (a few times, smaller batch) drives
+  # coverage to ~100%. The query is unchanged - same proteins, same columns; only completeness improves.
+  .uniprot_ids  <- unique(data_filter_ccp_mod$protein_id)
+  .uniprot_cols <- c("protein_name", "length", "sequence", "mass", "gene_names","organism_name","xref_geneid",
     "xref_string", "go_f", "go_p", "go_c", "cc_interaction", "ft_act_site", "ft_binding",
-    "cc_cofactor", "cc_catalytic_activity", "xref_pdb"),
-    batchsize = 50)
+    "cc_cofactor", "cc_catalytic_activity", "xref_pdb")
+  uniprot <- fetch_uniprot(.uniprot_ids, columns = .uniprot_cols, batchsize = 50)
+  for (.try in 1:3) {
+    .have    <- if (!is.null(uniprot) && "input_id" %in% names(uniprot)) as.character(uniprot$input_id) else character(0)
+    .missing <- setdiff(as.character(.uniprot_ids), .have)
+    if (length(.missing) == 0) break
+    message(sprintf("fetch_uniprot: %d/%d proteins not returned yet - retry %d ...",
+                    length(.missing), length(.uniprot_ids), .try))
+    .more <- tryCatch(fetch_uniprot(.missing, columns = .uniprot_cols, batchsize = 20), error = function(e) NULL)
+    if (!is.null(.more) && nrow(.more)) uniprot <- data.table::rbindlist(list(uniprot, .more), use.names = TRUE, fill = TRUE)
+  }
+  .cov <- mean(as.character(.uniprot_ids) %in% as.character(uniprot$input_id))
+  message(sprintf("UniProt fetch coverage: %.1f%% of %d proteins annotated.", 100 * .cov, length(.uniprot_ids)))
   save(uniprot, file = .uniprot_file)
   message("Saved UniProt annotation to ", .uniprot_file, " (re-runs with load_uniprot.RData=T skip fetch_uniprot).")
 }
@@ -760,6 +776,20 @@ pepTraces_raw <- annotateTraces(traces= traces_list,
 #' # Annotate traces with molecular weight calibration
 pepTraces_raw <- annotateMolecularWeight(pepTraces_raw,
                                      calibration)
+
+# Ensure protein_mw is populated (kDa) from the UniProt mass. CCprofiler's annotateTraces sets
+# protein_mw = mass(Da)/1000 via a merge on protein_id == input_id, but any protein the fetch did not
+# return is left NA -> the assembly state then reads as ~0% monomer. Re-attach it deterministically
+# using CCprofiler's OWN formula (the same values annotateTraces intends), keyed protein_id == input_id,
+# so the downstream mass distribution is correct regardless of any fetch/merge quirk.
+.mw_kda <- setNames(as.numeric(gsub(",", "", as.character(traceAnnotation$Mass))) / 1000,
+                    as.character(traceAnnotation$input_id))
+for (.s in names(pepTraces_raw)) {
+  .pid <- as.character(pepTraces_raw[[.s]]$trace_annotation$protein_id)
+  pepTraces_raw[[.s]]$trace_annotation[, protein_mw := unname(.mw_kda[.pid])]
+}
+.mw_ok <- mean(!is.na(pepTraces_raw[[1]]$trace_annotation$protein_mw))
+message(sprintf("protein_mw populated for %.1f%% of traces (kDa, from UniProt mass).", 100 * .mw_ok))
 
 summary(pepTraces_raw)
 ```
