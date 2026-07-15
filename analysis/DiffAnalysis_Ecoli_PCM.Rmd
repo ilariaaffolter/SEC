@@ -777,20 +777,6 @@ pepTraces_raw <- annotateTraces(traces= traces_list,
 pepTraces_raw <- annotateMolecularWeight(pepTraces_raw,
                                      calibration)
 
-# Ensure protein_mw is populated (kDa) from the UniProt mass. CCprofiler's annotateTraces sets
-# protein_mw = mass(Da)/1000 via a merge on protein_id == input_id, but any protein the fetch did not
-# return is left NA -> the assembly state then reads as ~0% monomer. Re-attach it deterministically
-# using CCprofiler's OWN formula (the same values annotateTraces intends), keyed protein_id == input_id,
-# so the downstream mass distribution is correct regardless of any fetch/merge quirk.
-.mw_kda <- setNames(as.numeric(gsub(",", "", as.character(traceAnnotation$Mass))) / 1000,
-                    as.character(traceAnnotation$input_id))
-for (.s in names(pepTraces_raw)) {
-  .pid <- as.character(pepTraces_raw[[.s]]$trace_annotation$protein_id)
-  pepTraces_raw[[.s]]$trace_annotation[, protein_mw := unname(.mw_kda[.pid])]
-}
-.mw_ok <- mean(!is.na(pepTraces_raw[[1]]$trace_annotation$protein_mw))
-message(sprintf("protein_mw populated for %.1f%% of traces (kDa, from UniProt mass).", 100 * .mw_ok))
-
 summary(pepTraces_raw)
 ```
 
@@ -1079,6 +1065,23 @@ protein_traces_list <- suppressWarnings(proteinQuantification_sibPepCorrFix.trac
 ```{r}
 
 # evaluate protein mass distribution
+
+# Attach protein monomer mass (kDa) to the PROTEIN traces from the fresh UniProt fetch. This must
+# happen HERE, not at peptide level: pepTracesNormalized / proteinFeatures are reloaded from cache and
+# still carry the old (NA) protein_mw, so proteinQuantification builds protein_traces_list from that
+# stale annotation. Re-attaching at the protein level with CCprofiler's OWN formula (mass(Da)/1000 kDa,
+# keyed protein_id == input_id) guarantees a correct monomer mass regardless of any upstream cache or
+# fetch/merge quirk, so the assembly split below is meaningful.
+.mw_kda <- setNames(as.numeric(gsub(",", "", as.character(traceAnnotation$Mass))) / 1000,
+                    as.character(traceAnnotation$input_id))
+for (.s in names(protein_traces_list)) {
+  .ta  <- protein_traces_list[[.s]]$trace_annotation
+  .key <- if ("protein_id" %in% names(.ta)) as.character(.ta$protein_id) else as.character(.ta$id)
+  protein_traces_list[[.s]]$trace_annotation[, protein_mw := unname(.mw_kda[.key])]
+}
+message(sprintf("protein_mw attached to protein traces for %.1f%% of proteins (kDa, from UniProt mass).",
+                100 * mean(!is.na(protein_traces_list[[1]]$trace_annotation$protein_mw))))
+
 # Backstop before the assembly split: annotateMassDistribution uses assembly_boundary = 2*protein_mw,
 # so if protein_mw did not attach (missing/NA UniProt mass, or a mass-format parse miss upstream) the
 # result reads as ~0% monomer for every protein. Refuse to compute a meaningless QC.
