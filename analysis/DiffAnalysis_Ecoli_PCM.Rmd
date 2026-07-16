@@ -677,29 +677,9 @@ as.data.table()
 #       transient UniProt throttling can reset.
 .uniprot_file   <- file.path(out_dir, "rdata", "uniprot.RData")             # this metabolite's subset
 .uniprot_shared <- here::here("output", "uniprot_annotation_shared.RData")  # accumulates across metabolites
-# Split the columns: fetch the LIGHT essentials (incl. mass) reliably, and the HEAVY annotation
-# (sequence + GO + xrefs) best-effort. UniProt returns NA for the whole ~2000-protein query when all
-# 17 columns - especially the full `sequence` - are requested at once, but the small light query always
-# comes back, so the assembly-critical mass no longer depends on the heavy fields. `sequence` is fetched
-# but not used anywhere downstream; go_*/ft_*/cc_cofactor feed GO enrichment + the DiffExpr join, which
-# degrade gracefully to "no annotation" if that best-effort fetch fails.
-.uniprot_light <- c("protein_name", "length", "mass", "gene_names", "organism_name")
-.uniprot_heavy <- c("sequence", "xref_geneid", "xref_string", "go_f", "go_p", "go_c",
-                    "cc_interaction", "ft_act_site", "ft_binding", "cc_cofactor",
-                    "cc_catalytic_activity", "xref_pdb")
-.fetch_annotated <- function(ids) {
-  light <- tryCatch(data.table::as.data.table(fetch_uniprot(ids, columns = .uniprot_light, batchsize = 100)),
-                    error = function(e) { message("  light fetch errored: ", conditionMessage(e)); NULL })
-  if (is.null(light) || !nrow(light) || !"input_id" %in% names(light)) return(NULL)
-  heavy <- tryCatch(data.table::as.data.table(fetch_uniprot(ids, columns = .uniprot_heavy, batchsize = 50)),
-                    error = function(e) { message("  heavy (GO/xref) fetch errored: ", conditionMessage(e)); NULL })
-  if (!is.null(heavy) && nrow(heavy) && "input_id" %in% names(heavy)) {
-    hcols <- c("input_id", intersect(.uniprot_heavy, names(heavy)))
-    light <- merge(light, heavy[, ..hcols], by = "input_id", all.x = TRUE)
-  }
-  for (.col in .uniprot_heavy) if (!.col %in% names(light)) light[, (.col) := NA_character_]   # keep downstream select() safe (all heavy cols are character)
-  light[]
-}
+.uniprot_cols   <- c("protein_name", "length", "sequence", "mass", "gene_names","organism_name","xref_geneid",
+    "xref_string", "go_f", "go_p", "go_c", "cc_interaction", "ft_act_site", "ft_binding",
+    "cc_cofactor", "cc_catalytic_activity", "xref_pdb")
 .want <- unique(as.character(data_filter_ccp_mod$protein_id))
 
 # ids in a table that already have a real (non-NA) mass
@@ -720,8 +700,10 @@ if (length(.need)) {
   for (.try in 1:4) {
     .todo <- setdiff(.need, .have_mass(.uniprot_all))
     if (!length(.todo)) break
+    .before <- length(.have_mass(.uniprot_all))
     if (.try > 1) { message("  retry ", .try, ": ", length(.todo), " protein(s) still without mass - backing off ..."); Sys.sleep(5 * (.try - 1)) }
-    .batch <- .fetch_annotated(.todo)
+    .batch <- tryCatch(data.table::as.data.table(fetch_uniprot(.todo, columns = .uniprot_cols, batchsize = 50)),
+                       error = function(e) { message("  fetch attempt ", .try, " errored: ", conditionMessage(e)); NULL })
     if (!is.null(.batch) && nrow(.batch) && "input_id" %in% names(.batch)) {
       # fresh rows supersede any prior NA-mass rows for those ids
       if (nrow(.uniprot_all) && "input_id" %in% names(.uniprot_all)) {
@@ -731,6 +713,12 @@ if (length(.need)) {
       } else {
         .uniprot_all <- .batch
       }
+    }
+    # Stop retrying the moment an attempt returns NO new masses: that means UniProt is hard-blocking
+    # (rate limit), and hammering it further only extends the block. Wait ~1h and re-run instead.
+    if (length(.have_mass(.uniprot_all)) <= .before) {
+      message("  no new masses returned - UniProt is likely rate-limiting. Stopping; wait ~1h and re-run.")
+      break
     }
   }
   dir.create(dirname(.uniprot_shared), recursive = TRUE, showWarnings = FALSE)
