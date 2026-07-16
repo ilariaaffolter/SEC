@@ -61,6 +61,8 @@ clear_caches <- function(metabolites = NULL,
   rel     <- unlist(cache_files[caches], use.names = FALSE)
   targets <- unlist(lapply(metabolites, function(m)
     file.path(here("output", paste0("PCM_ctrl_vs_", m)), rel)))
+  # the UniProt fetch also has a project-level SHARED cache (one file, reused by every metabolite)
+  if ("uniprot" %in% caches) targets <- c(targets, here("output", "uniprot_annotation_shared.RData"))
   present <- targets[file.exists(targets)]
 
   message("Metabolites: ", paste(metabolites, collapse = ", "),
