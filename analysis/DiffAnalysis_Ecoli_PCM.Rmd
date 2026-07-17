@@ -2614,6 +2614,25 @@ if (exists("protein_DiffExprProtein")) {
       print(.g_cmp)
       ggsave(file.path(out_dir, "figures", "crosscorrelation_vs_stat.pdf"), .g_cmp, width = 7, height = 5.5)
     }
+
+    # Set-overlap view of the two hit sets: elution-shifted (CCF) vs abundance-significant (stat).
+    # Two sets, so an UpSet (consistent with the cross-metabolite overlap scripts) - the bars are
+    # shift-only / stat-only / both, i.e. the Venn regions.
+    .sets <- data.frame(
+      protein_id       = merged$protein_id,
+      shifted          = as.integer(!is.na(merged$shifted)  & merged$shifted),
+      stat_significant = as.integer(!is.na(merged$stat_sig) & merged$stat_sig))
+    if (requireNamespace("UpSetR", quietly = TRUE) && (sum(.sets$shifted) > 0 || sum(.sets$stat_significant) > 0)) {
+      print(UpSetR::upset(.sets, sets = c("shifted", "stat_significant"), order.by = "freq",
+                          mainbar.y.label = "proteins in intersection", sets.x.label = "flagged proteins"))
+      grDevices::pdf(file.path(out_dir, "figures", "crosscorrelation_vs_stat_upset.pdf"), width = 6, height = 4)
+      print(UpSetR::upset(.sets, sets = c("shifted", "stat_significant"), order.by = "freq",
+                          mainbar.y.label = "proteins in intersection", sets.x.label = "flagged proteins"))
+      grDevices::dev.off()
+      message("Saved crosscorrelation_vs_stat_upset.pdf (overlap of shifted vs stat-significant proteins).")
+    } else {
+      message("UpSetR not installed (or no hits) - the scatter + 2x2 table already show the overlap.")
+    }
   } else {
     message("protein_DiffExprProtein present but no recognised p-value/id column - ",
             "join ccf_results to it manually.")

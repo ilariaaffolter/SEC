@@ -138,7 +138,7 @@ investigate_fraction1_effect <- function(metabolites = NULL,
     summary_rows[[m]] <- data.table(metabolite = m, n_proteins = n,
                                     median_abs_shift = round(med_abs, 4), max_abs_shift = round(max_abs, 4),
                                     pct_moved_gt5 = round(100 * p_gt05, 1), pct_moved_gt10 = round(100 * p_gt10, 1))
-    message(sprintf("[%s] %d proteins | median |Δmonomer| = %.1f%% | %.1f%% move >5%% | %.1f%% move >10%% (max %.1f%%)",
+    message(sprintf("[%s] %d proteins | median |monomer shift| = %.1f%% | %.1f%% move >5%% | %.1f%% move >10%% (max %.1f%%)",
                     m, n, 100 * med_abs, 100 * p_gt05, 100 * p_gt10, 100 * max_abs))
 
     # plots: scatter (with vs without) + histogram of the shift
@@ -151,7 +151,7 @@ investigate_fraction1_effect <- function(metabolites = NULL,
     g2 <- ggplot(cmp, aes(shift)) +
       geom_histogram(bins = 60, fill = "steelblue", colour = "white") +
       geom_vline(xintercept = 0, colour = "grey40") +
-      labs(title = "shift in monomer fraction (without - with)", x = "Δ monomer fraction", y = "proteins") + theme_bw()
+      labs(title = "shift in monomer fraction (without - with)", x = "monomer-fraction shift (without - with)", y = "proteins") + theme_bw()
     grDevices::pdf(file.path(out, paste0(m, "_monomer_shift.pdf")), width = 6, height = 8)
     print(g1); print(g2); grDevices::dev.off()
 
