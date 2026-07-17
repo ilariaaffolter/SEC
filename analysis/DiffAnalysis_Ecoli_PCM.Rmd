@@ -2587,6 +2587,33 @@ if (exists("protein_DiffExprProtein")) {
     print(table(shifted = merged$shifted, stat_significant = merged$stat_sig, useNA = "ifany"))
     message("Saved crosscorrelation_vs_stat.txt; 'shifted' (cross-correlation) vs ",
             "'stat_significant' (", pcol, " < 0.05), matched on ", idcol, ". Table above.")
+
+    # Visualise the complement: elution shift (cross-correlation) vs abundance change (stat test).
+    # Each point is a protein; the two dashed lines are the shift / significance cut-offs, so the four
+    # quadrants ARE the 2x2 table above. Proteins OUTSIDE the horizontal band but LEFT of the vertical
+    # line are the ones the abundance test misses and cross-correlation uniquely flags (elution
+    # rearrangement with no significant total-abundance change) - the point of this complement view.
+    .plt <- merged[!is.na(best_lag) & !is.na(stat_p)]
+    if (nrow(.plt)) {
+      .plt[, neglog_p := -log10(pmax(stat_p, .Machine$double.xmin))]
+      .plt[, category := data.table::fcase(
+        shifted & stat_sig,  "shift + abundance",
+        shifted & !stat_sig, "shift only (CCF)",
+        !shifted & stat_sig, "abundance only",
+        default =            "neither")]
+      .g_cmp <- ggplot(.plt, aes(neglog_p, best_lag, colour = category)) +
+        geom_hline(yintercept = c(-ccf_shift_threshold, ccf_shift_threshold), linetype = 2, colour = "grey65") +
+        geom_vline(xintercept = -log10(0.05), linetype = 2, colour = "grey65") +
+        geom_point(alpha = 0.6, size = 1.1) +
+        labs(title    = paste0("Elution shift vs abundance change - ", comparison_id),
+             subtitle = "outside the band = elution shifted; right of the line = abundance-significant",
+             x = "-log10(BH-adjusted p)  -  statistical abundance change",
+             y = "best lag (fraction shift)  -  cross-correlation",
+             colour = NULL) +
+        theme_bw() + theme(legend.position = "bottom")
+      print(.g_cmp)
+      ggsave(file.path(out_dir, "figures", "crosscorrelation_vs_stat.pdf"), .g_cmp, width = 7, height = 5.5)
+    }
   } else {
     message("protein_DiffExprProtein present but no recognised p-value/id column - ",
             "join ccf_results to it manually.")
