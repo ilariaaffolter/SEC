@@ -2561,25 +2561,38 @@ write.table(
   sep       = "\t", quote = FALSE, row.names = FALSE
 )
 
-# If the statistical protein-level differential results exist, cross-tabulate
-# which proteins each approach flags (the "complement" view). Adjust the p-value /
-# log2FC column names to match your stats table if they differ.
-if (exists("protein_DiffExprProtein_list")) {
-  stat_dt <- data.table::rbindlist(protein_DiffExprProtein_list, fill = TRUE)
-  pcol <- intersect(c("pBHadj", "qVal", "pVal", "global_pBHadj"), names(stat_dt))[1]
-  if (!is.na(pcol) && "protein_id" %in% names(stat_dt)) {
-    stat_best <- stat_dt[, .(stat_p = min(get(pcol), na.rm = TRUE)), by = protein_id]
-    merged    <- merge(ccf_results, stat_best, by = "protein_id", all = TRUE)
+# Cross-tabulate which proteins each approach flags (the "complement" view): the cross-correlation
+# "shifted" set vs the statistical protein-level differential set.
+# FLAG (bug fix): the original checked a non-existent `protein_DiffExprProtein_list` (the same "_list"
+# naming slip fixed in the save chunk) and treated it as a LIST via rbindlist - so it ALWAYS reported
+# "not in memory". The real stats are in protein_DiffExprProtein: a single data.table from section 6,
+# already cached in protein_DiffExpr_all.RData, whose protein id column is `feature_id`. Corrected the
+# object name, the single-table handling and the id/merge key. Also self-load the cache if the stats
+# aren't already in memory, so this chunk works even when run on its own.
+.diff_cache <- file.path(out_dir, "rdata", "protein_DiffExpr_all.RData")
+if (!exists("protein_DiffExprProtein") && file.exists(.diff_cache)) {
+  load(.diff_cache)   # restores protein_DiffExprProtein (+ the other diff objects) from section 6
+  message("Loaded protein_DiffExprProtein from ", .diff_cache, " for the complement comparison.")
+}
+if (exists("protein_DiffExprProtein")) {
+  stat_dt <- data.table::as.data.table(protein_DiffExprProtein)
+  pcol  <- intersect(c("pBHadj", "qVal", "pVal", "global_pBHadj"), names(stat_dt))[1]
+  idcol <- intersect(c("protein_id", "feature_id"), names(stat_dt))[1]
+  if (!is.na(pcol) && !is.na(idcol)) {
+    stat_best <- stat_dt[, .(stat_p = min(get(pcol), na.rm = TRUE)), by = c(idcol)]
+    data.table::setnames(stat_best, idcol, "protein_id")            # match ccf_results' key
+    merged <- merge(ccf_results, stat_best, by = "protein_id", all = TRUE)
     merged[, stat_sig := !is.na(stat_p) & stat_p < 0.05]
+    data.table::fwrite(merged, file.path(out_dir, "tables", "crosscorrelation_vs_stat.txt"), sep = "\t")
     print(table(shifted = merged$shifted, stat_significant = merged$stat_sig, useNA = "ifany"))
-    message("Saved comparison-ready table; 'shifted' (cross-correlation) vs ",
-            "'stat_significant' (", pcol, " < 0.05) shown above.")
+    message("Saved crosscorrelation_vs_stat.txt; 'shifted' (cross-correlation) vs ",
+            "'stat_significant' (", pcol, " < 0.05), matched on ", idcol, ". Table above.")
   } else {
-    message("Found protein_DiffExprProtein_list but no recognised p-value/protein_id ",
-            "column - join ccf_results to it manually on protein_id.")
+    message("protein_DiffExprProtein present but no recognised p-value/id column - ",
+            "join ccf_results to it manually.")
   }
 } else {
-  message("Statistical protein-level results not in memory; run section 6's ",
-          "differential test, then re-run this chunk to compare the two approaches.")
+  message("Statistical protein-level results not in memory and no ", basename(.diff_cache),
+          " cache found; run section 6's differential test, then re-run this chunk.")
 }
 ```
