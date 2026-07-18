@@ -114,6 +114,17 @@ plot_protein_traces <- function(protein_id,
     if (is.null(md) || !nrow(md)) {
       message("[", m, "] protein ", .pid, " not found in the traces; skipping."); next
     }
+    # Map each trace's group (condition; or sample when aggregate="replicate") to treatment vs control,
+    # so the plot puts the metabolite on top and its matching ctrl below. Control = the condition named
+    # like ctrl/control/ref, else the first factor level of design_matrix$Condition (CCprofiler convention).
+    .dm    <- as.data.table(e$design_matrix)
+    .conds <- as.character(unique(.dm$Condition))
+    .ctrl  <- .conds[grepl("ctrl|control|ref", .conds, ignore.case = TRUE)][1]
+    if (is.na(.ctrl)) .ctrl <- if (is.factor(.dm$Condition)) as.character(levels(.dm$Condition))[1] else .conds[1]
+    .g2c   <- c(setNames(as.character(.dm$Condition), as.character(.dm$Condition)),      # condition -> itself
+                setNames(as.character(.dm$Condition), as.character(.dm$Sample_name)))    # sample    -> its condition
+    md[, condition_type := ifelse(.g2c[as.character(group)] == .ctrl, "control", "treatment")]
+
     # attach apparent MW (kDa) if requested and available
     if (x_axis == "mw") {
       mwmap <- .fraction_mw_map(prot_tl[[1]])
@@ -134,18 +145,20 @@ plot_protein_traces <- function(protein_id,
     dat[, xval := fraction]; xlab <- "fraction"
   }
 
-  dat[, level := factor(level, levels = c("protein", "peptides"))]
+  dat[, condition_type := factor(condition_type, levels = c("treatment", "control"))]   # metabolite on top, ctrl below
   npep <- length(unique(dat[level == "peptides"]$id))
 
-  p <- ggplot(dat, aes(x = xval, y = intensity, colour = group, group = interaction(id, group))) +
-    geom_line(alpha = 0.85, linewidth = 0.5) +
-    facet_grid(level ~ metabolite, scales = "free_y") +
+  # rows = condition (metabolite / ctrl), columns = metabolite; peptides grey, protein trace bold red on top
+  p <- ggplot(mapping = aes(x = xval, y = intensity, group = interaction(id, group))) +
+    geom_line(data = dat[level == "peptides"], colour = "grey55",    linewidth = 0.35, alpha = 0.7) +
+    geom_line(data = dat[level == "protein"],  colour = "firebrick", linewidth = 1.1) +
+    facet_grid(condition_type ~ metabolite, scales = "free_y") +
     labs(title    = paste0("SEC traces: ", .pid),
-         subtitle = paste0(if (aggregate == "condition") "replicates aggregated per condition"
-                           else "one line per replicate",
-                           "  |  ", npep, " peptide(s)  |  colour = condition"),
-         x = xlab, y = "intensity", colour = NULL) +
-    theme_bw() + theme(legend.position = "bottom")
+         subtitle = paste0("top = metabolite (treatment), bottom = ctrl  |  ",
+                           if (aggregate == "condition") "replicates aggregated per condition" else "one line per replicate",
+                           "  |  ", npep, " peptide(s); grey = peptides, red = protein trace"),
+         x = xlab, y = "intensity") +
+    theme_bw()
 
   outdir <- here("output", out_subdir)
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
