@@ -54,7 +54,9 @@ plot_protein_traces <- function(protein_id,
                                 metabolites = NULL,
                                 x_axis      = c("fraction", "mw"),
                                 aggregate   = c("condition", "replicate"),
-                                out_subdir  = "trace_plots") {
+                                out_subdir  = "trace_plots",
+                                save_pdf    = TRUE,
+                                print_plot  = TRUE) {
   x_axis    <- match.arg(x_axis)
   aggregate <- match.arg(aggregate)
   stopifnot(length(protein_id) == 1L)
@@ -160,11 +162,13 @@ plot_protein_traces <- function(protein_id,
          x = xlab, y = "intensity") +
     theme_bw()
 
-  outdir <- here("output", out_subdir)
-  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  fn <- file.path(outdir, paste0(.pid, "__", paste(metabolites, collapse = "-"), ".pdf"))
-  ggsave(fn, p, width = 3 + 2.4 * length(unique(dat$metabolite)), height = 6, limitsize = FALSE)
-  message("Wrote ", fn)
-  print(p)
-  invisible(dat)
+  if (save_pdf) {
+    outdir <- here("output", out_subdir)
+    dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+    fn <- file.path(outdir, paste0(.pid, "__", paste(metabolites, collapse = "-"), ".pdf"))
+    ggsave(fn, p, width = 3 + 2.4 * length(unique(dat$metabolite)), height = 6, limitsize = FALSE)
+    message("Wrote ", fn)
+  }
+  if (print_plot) print(p)
+  invisible(p)   # return the ggplot so callers (e.g. plot_ccf_vs_stat_hits.R) can compose multi-page PDFs
 }

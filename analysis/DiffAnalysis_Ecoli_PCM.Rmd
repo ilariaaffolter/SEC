@@ -2583,6 +2583,11 @@ if (exists("protein_DiffExprProtein")) {
     data.table::setnames(stat_best, idcol, "protein_id")            # match ccf_results' key
     merged <- merge(ccf_results, stat_best, by = "protein_id", all = TRUE)
     merged[, stat_sig := !is.na(stat_p) & stat_p < 0.05]
+    merged[, category := data.table::fcase(                       # self-describing label for downstream filtering
+      shifted %in% TRUE &   stat_sig %in% TRUE,  "mixed (CCF+stat)",
+      shifted %in% TRUE & !(stat_sig %in% TRUE), "shift only (CCF)",
+      !(shifted %in% TRUE) & stat_sig %in% TRUE, "stat only",
+      default =                                  "neither")]
     data.table::fwrite(merged, file.path(out_dir, "tables", "crosscorrelation_vs_stat.txt"), sep = "\t")
     print(table(shifted = merged$shifted, stat_significant = merged$stat_sig, useNA = "ifany"))
     message("Saved crosscorrelation_vs_stat.txt; 'shifted' (cross-correlation) vs ",
