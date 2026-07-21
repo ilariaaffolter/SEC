@@ -12,12 +12,17 @@
 #                elution profiles (same argmax-lag as the report's CCF, computed here per group).
 #   null       = permute the condition labels across the individual replicate profiles (all label
 #                splits, or a random sample if there are many), recompute |best_lag| for each split.
-#   p-value    = fraction of the POOLED permutation null (across proteins x splits) that is >= observed.
-#                Pooling gives usable p-value resolution despite few replicates - it assumes the null
-#                shift is exchangeable across the tested (sufficiently-abundant) proteins, which is the
-#                standard SAM-style trade-off. With very few replicates the test is necessarily
-#                conservative; treat it as a calibrated screen, still cross-checked with the trace viewer.
-#   q-value    = Benjamini-Hochberg over the tested proteins. Hit = q < fdr AND |best_lag| >= threshold.
+#   p-value    = fraction of the permutation null (>= observed |lag|). The null is POOLED across proteins
+#                to get usable resolution from few replicates, but STRATIFIED: proteins are binned by
+#                abundance (int_ctrl + int_treat) and each protein is scored against the null built from
+#                its OWN bin. Pooling assumes the null shift is exchangeable across proteins; that breaks
+#                when noisy low-signal proteins have heavier-tailed null shifts than clean ones, so binning
+#                only requires exchangeability WITHIN a bin. min_intensity removes the noisiest proteins up
+#                front; n_bins calibrates the rest (set n_bins = 1 for a single SAM-style pooled null). A
+#                bin too thin to give a stable null (< min_null_per_bin values) falls back to the pooled
+#                null. With very few replicates the test is still conservative - a calibrated screen,
+#                cross-checked with the trace viewer.
+#   q-value    = Benjamini-Hochberg over ALL tested proteins. Hit = q < fdr AND |best_lag| >= threshold.
 #
 # INPUT : each metabolite's *_for_plotting.RData (protein_traces_list per replicate + design_matrix +
 #         protein_DiffExprProtein), written by the report.
@@ -26,10 +31,12 @@
 #   source(here::here("scripts", "ccf_differential_test.R"))
 #   ccf_differential_test()                       # all metabolites
 #   ccf_differential_test("PEP")                  # one
-#   ccf_differential_test("PEP", fdr = 0.1, shift_threshold = 1, min_intensity = 1e6)
+#   ccf_differential_test("PEP", fdr = 0.1, shift_threshold = 1, min_intensity = 300)
+#   ccf_differential_test("PEP", min_intensity = 300, n_bins = 4)  # drop noise + stratified null
+#   ccf_differential_test("PEP", n_bins = 1)                       # single pooled null (SAM-style)
 #
 # OUTPUT (per metabolite):
-#   tables/ccf_fdr_results.txt          per-protein best_lag, pval, qval, ccf_hit
+#   tables/ccf_fdr_results.txt          per-protein best_lag, abundance bin, pval, qval, ccf_hit
 #   tables/ccf_fdr_vs_stat_overlap.txt  per-protein CCF-FDR vs statistical hit + category
 #   figures/ccf_fdr_vs_stat_upset.pdf   overlap of the two hit sets
 #   figures/ccf_fdr_vs_stat_scatter.pdf -log10(stat p) vs -log10(CCF q), coloured by category
@@ -59,11 +66,22 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 .best_lag_rows <- function(A, B, lag_max) vapply(seq_len(nrow(A)),
   function(i) .best_lag(A[i, ], B[i, ], lag_max), numeric(1))
 
+# integer abundance-bin labels (1..k) by quantiles of x; collapses to 1 bin if k<=1 or x can't be split
+# (e.g. too many ties at the quantile edges). Quantile bins are invariant to monotone rescaling of x.
+.make_bins <- function(x, k) {
+  if (k <= 1L) return(rep(1L, length(x)))
+  br <- unique(stats::quantile(x, probs = seq(0, 1, length.out = k + 1L), na.rm = TRUE))
+  if (length(br) < 3L) return(rep(1L, length(x)))                 # need >= 2 usable bins
+  as.integer(cut(x, breaks = br, include.lowest = TRUE, labels = FALSE))
+}
+
 ccf_differential_test <- function(metabolites   = NULL,
                                   lag_max        = 5L,
                                   shift_threshold = 1L,   # a hit needs |best_lag| >= this AND q < fdr
                                   fdr            = 0.05,
                                   min_intensity  = 0,     # require > this summed intensity in BOTH conditions
+                                  n_bins         = 4L,    # abundance strata for the permutation null (1 = pooled)
+                                  min_null_per_bin = 100L,# a thinner bin falls back to the pooled null
                                   n_perm_max     = 2000L, # cap random label permutations if replicates are many
                                   seed           = 1L) {
   set.seed(seed)
@@ -107,29 +125,58 @@ ccf_differential_test <- function(metabolites   = NULL,
     keep <- is.finite(obs_lag) & int_ctrl > min_intensity & int_treat > min_intensity
     if (!any(keep)) { message("[", m, "] no proteins pass the intensity/validity filter; skipping."); next }
 
-    # permutation null (exclude the observed label split), pooled across proteins x splits
+    # permutation null (exclude the observed label split)
     n <- length(samples); nt <- sum(is_treat)
     all_splits <- combn(n, nt)
     obs_col    <- apply(all_splits, 2, function(col) setequal(col, which(is_treat)))
     splits     <- all_splits[, !obs_col, drop = FALSE]
     if (ncol(splits) > n_perm_max) splits <- splits[, sample(ncol(splits), n_perm_max), drop = FALSE]
-    message("[", m, "] permutation CCF test: ", sum(keep), " proteins x ", ncol(splits), " label permutations ...")
-    null_vec <- unlist(lapply(seq_len(ncol(splits)), function(k) {
-      ti <- splits[, k]; ci <- setdiff(seq_len(n), ti)
-      abs(.best_lag_rows(grp_mean(ci), grp_mean(ti), lag_max))[keep]
-    }))
-    null_vec <- null_vec[is.finite(null_vec)]
 
-    # p-value per kept protein: fraction of pooled null >= observed |lag| (|lag| is integer 0..lag_max,
-    # so precompute the tail probability once per level, then look up).
+    # |best_lag| under every label permutation, for the kept proteins (rows) x splits (cols)
+    kept_idx <- which(keep)
+    message("[", m, "] permutation CCF test: ", length(kept_idx), " proteins x ", ncol(splits), " label permutations ...")
+    null_mat <- vapply(seq_len(ncol(splits)), function(k) {
+      ti <- splits[, k]; ci <- setdiff(seq_len(n), ti)
+      abs(.best_lag_rows(grp_mean(ci), grp_mean(ti), lag_max))[kept_idx]
+    }, numeric(length(kept_idx)))
+    if (is.null(dim(null_mat))) null_mat <- matrix(null_mat, nrow = length(kept_idx))   # 1-split guard
+
+    # STRATIFIED null: bin the kept proteins by total signal (int_ctrl + int_treat) and build a SEPARATE
+    # permutation null per bin, so each protein is judged against proteins of similar abundance. Pooling
+    # everything assumes the null |best_lag| is exchangeable across ALL proteins; that fails when noisy
+    # low-signal proteins have heavier-tailed null shifts than clean ones (making clean proteins look
+    # conservative and noisy ones anti-conservative). Binning only needs exchangeability WITHIN a bin.
+    # min_intensity has already dropped the noisiest proteins; a bin too thin for a stable null falls back
+    # to the pooled null. |lag| is integer 0..lag_max, so we precompute a tail probability per level per bin.
     lev       <- 0:lag_max
-    tail_prob <- vapply(lev, function(v) (1 + sum(null_vec >= v)) / (1 + length(null_vec)), numeric(1))
-    names(tail_prob) <- as.character(lev)
-    pval <- rep(NA_real_, length(obs_lag)); pval[keep] <- tail_prob[as.character(obs_abs[keep])]
-    qval <- rep(NA_real_, length(obs_lag)); qval[keep] <- p.adjust(pval[keep], method = "BH")
+    bin_stat  <- (int_ctrl + int_treat)[kept_idx]
+    bin_kept  <- .make_bins(bin_stat, n_bins)
+    nbin      <- max(bin_kept)
+    null_all  <- null_mat[is.finite(null_mat)]                     # pooled fallback for thin bins
+    obs_abs_kept <- obs_abs[kept_idx]
+    pval_kept <- rep(NA_real_, length(kept_idx))
+    bin_info  <- vector("list", nbin)
+    for (b in seq_len(nbin)) {
+      rows <- which(bin_kept == b)
+      nb   <- as.vector(null_mat[rows, , drop = FALSE]); nb <- nb[is.finite(nb)]
+      use_pool <- length(nb) < min_null_per_bin
+      nvec  <- if (use_pool) null_all else nb
+      tprob <- vapply(lev, function(v) (1 + sum(nvec >= v)) / (1 + length(nvec)), numeric(1))
+      names(tprob) <- as.character(lev)
+      pval_kept[rows] <- tprob[as.character(obs_abs_kept[rows])]
+      bin_info[[b]] <- data.table(bin = b, n_proteins = length(rows),
+                                  min_signal = round(min(bin_stat[rows]), 1),
+                                  max_signal = round(max(bin_stat[rows]), 1),
+                                  null_n = length(nvec), pooled_fallback = use_pool)
+    }
+    if (nbin > 1L) { message("[", m, "] stratified null across ", nbin, " abundance bin(s):"); print(rbindlist(bin_info)) }
+
+    pval    <- rep(NA_real_,    length(obs_lag)); pval[kept_idx]    <- pval_kept
+    qval    <- rep(NA_real_,    length(obs_lag)); qval[kept_idx]    <- p.adjust(pval_kept, method = "BH")
+    bin_col <- rep(NA_integer_, length(obs_lag)); bin_col[kept_idx] <- bin_kept
 
     res <- data.table(protein_id = common, best_lag = obs_lag, abs_lag = obs_abs,
-                      int_ctrl = int_ctrl, int_treat = int_treat, pval = pval, qval = qval)
+                      int_ctrl = int_ctrl, int_treat = int_treat, bin = bin_col, pval = pval, qval = qval)
     res[, ccf_hit := !is.na(qval) & qval < fdr & abs_lag >= shift_threshold]
     tab_dir <- here("output", paste0("PCM_ctrl_vs_", m), "tables")
     fig_dir <- here("output", paste0("PCM_ctrl_vs_", m), "figures")
