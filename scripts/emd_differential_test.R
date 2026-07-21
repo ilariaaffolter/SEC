@@ -242,14 +242,20 @@ emd_differential_test <- function(metabolites   = NULL,
                     sum(mg$emd_hit & mg$ccf_hit & mg$stat_hit)))
     print(table(mg$category))
 
-    # UpSet of the three hit sets
-    if (requireNamespace("UpSetR", quietly = TRUE) && (nE + nC + nS > 0)) {
-      sets_df <- data.frame(protein_id = mg$protein_id,
-                            EMD = as.integer(mg$emd_hit), CCF = as.integer(mg$ccf_hit), stat = as.integer(mg$stat_hit))
+    # UpSet of the three hit sets. UpSetR errors ("undefined columns selected") on an all-empty set, so
+    # pass only the non-empty ones and plot only when >= 2 remain (an intersection needs >= 2 populated sets).
+    sets_df  <- data.frame(protein_id = mg$protein_id,
+                           EMD = as.integer(mg$emd_hit), CCF = as.integer(mg$ccf_hit), stat = as.integer(mg$stat_hit))
+    nonempty <- c("EMD", "CCF", "stat")[c(nE > 0, nC > 0, nS > 0)]
+    if (requireNamespace("UpSetR", quietly = TRUE) && length(nonempty) >= 2) {
       grDevices::pdf(file.path(fig_dir, "emd_three_way_upset.pdf"), width = 6.5, height = 4.5)
-      print(UpSetR::upset(sets_df, sets = c("EMD", "CCF", "stat"), order.by = "freq",
-                          mainbar.y.label = "proteins", sets.x.label = "flagged proteins"))
+      tryCatch(print(UpSetR::upset(sets_df, sets = nonempty, order.by = "freq",
+                                   mainbar.y.label = "proteins", sets.x.label = "flagged proteins")),
+               error = function(err) message("[", m, "] UpSet skipped: ", conditionMessage(err)))
       grDevices::dev.off()
+    } else {
+      message("[", m, "] UpSet skipped - need >= 2 non-empty hit sets (have ", length(nonempty),
+              "); see the overlap table and scatters instead.")
     }
 
     # scatter: EMD vs |best_lag| - the high-EMD / low-lag corner is exactly what the continuous EMD adds

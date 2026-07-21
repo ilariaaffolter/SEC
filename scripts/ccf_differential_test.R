@@ -209,14 +209,21 @@ ccf_differential_test <- function(metabolites   = NULL,
             " protein(s) the stat test misses; ", sum(mg$category == "both"), " shared, ",
             sum(mg$category == "stat only"), " stat-only.")
 
-    # UpSet of the two hit sets
-    sets_df <- data.frame(protein_id = mg$protein_id,
-                          CCF_FDR = as.integer(mg$ccf_hit), stat = as.integer(mg$stat_hit))
-    if (requireNamespace("UpSetR", quietly = TRUE) && (sum(sets_df$CCF_FDR) + sum(sets_df$stat) > 0)) {
+    # UpSet of the two hit sets. UpSetR errors ("undefined columns selected") on an all-empty set, so
+    # pass only the non-empty ones and plot only when >= 2 remain - an intersection plot needs at least
+    # two populated sets (e.g. 0 CCF-FDR hits + some stat hits -> nothing to intersect, skip cleanly).
+    sets_df  <- data.frame(protein_id = mg$protein_id,
+                           CCF_FDR = as.integer(mg$ccf_hit), stat = as.integer(mg$stat_hit))
+    nonempty <- c("CCF_FDR", "stat")[c(sum(sets_df$CCF_FDR) > 0, sum(sets_df$stat) > 0)]
+    if (requireNamespace("UpSetR", quietly = TRUE) && length(nonempty) >= 2) {
       grDevices::pdf(file.path(fig_dir, "ccf_fdr_vs_stat_upset.pdf"), width = 6, height = 4)
-      print(UpSetR::upset(sets_df, sets = c("CCF_FDR", "stat"), order.by = "freq",
-                          mainbar.y.label = "proteins", sets.x.label = "flagged proteins"))
+      tryCatch(print(UpSetR::upset(sets_df, sets = nonempty, order.by = "freq",
+                                   mainbar.y.label = "proteins", sets.x.label = "flagged proteins")),
+               error = function(err) message("[", m, "] UpSet skipped: ", conditionMessage(err)))
       grDevices::dev.off()
+    } else {
+      message("[", m, "] UpSet skipped - need >= 2 non-empty hit sets (have ", length(nonempty),
+              "); see the overlap table and scatter instead.")
     }
     # scatter: statistical significance (x) vs CCF-FDR significance (y)
     plt <- mg[!is.na(stat_p) & !is.na(qval)]
