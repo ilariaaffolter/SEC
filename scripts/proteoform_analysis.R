@@ -20,9 +20,12 @@
 # which peptide carries which value; positions fixed). BH over the tested proteins -> q. Treat it as a
 # RANKED SCREEN (sort by q / score, eyeball with plot_proteoform), same posture as the CCF/EMD tests.
 #
-# This file covers the mapping + Mode B. Mode A (domain-level beta-regression on load-normalised domain
-# shares + the Lon-style per-domain chromatogram / fractional-share plots) builds on the SAME mapping and
-# is added next, once you have confirmed the mapping rate on your data.
+# Mode A (domain-level, targeted - your Lon case) uses ANNOTATED domain boundaries (UniProt ft_domain, or
+# a manual override table for cases UniProt lacks). It assigns each peptide to a domain, expresses each
+# domain as its LOAD-NORMALISED share of the total protein signal per fraction, draws the per-domain
+# chromatogram (ctrl vs treatment, mean +/- SD) and the fractional-share barplot over chosen fraction
+# windows, and tests domain shares between conditions by BETA REGRESSION (the right model for a bounded
+# proportion - the same family as CCprofiler's assembly test - falling back to a logit t-test).
 #
 # INPUT (per metabolite):
 #   output/PCM_ctrl_vs_<m>/RData_for_further_plotting_and_analysis/*_for_plotting.RData
@@ -36,11 +39,20 @@
 #   proteoform_scan("NAD")                          # Mode B screen -> tables/proteoform_scan.txt
 #   proteoform_scan("NAD", statistic = "lag", min_intensity = 300)
 #   plot_proteoform("P09372", "NAD")                # peptide traces coloured by residue position
+#   # Mode A (targeted, domain-resolved). E. coli Lon = P0A9M0 (784 aa):
+#   domain_analysis("P0A9M0", "aKG")                                       # domains from UniProt ft_domain
+#   domain_analysis("P0A9M0", "aKG", windows = list(F14_16 = 14:16, F22 = 22))   # + fractional-share barplot & test
+#   lon <- data.frame(protein_id = "P0A9M0", domain = c("NTD","AAA+","Protease"),
+#                     start = c(1,246,588), end = c(245,587,784))          # manual boundaries (Lon)
+#   domain_analysis("P0A9M0", "aKG", domains = lon, windows = list(F14_16 = 14:16, F22 = 22))
 #
 # OUTPUT (per metabolite):
 #   tables/proteoform_peptide_map.txt   peptide -> protein, residue start/end/midpoint, mapped flag
 #   tables/proteoform_scan.txt          per-protein B1/B2 scores, permutation p, BH q, breakpoint residue
 #   figures/proteoform/<protein>.pdf    (plot_proteoform) peptide traces coloured by residue position
+#   figures/domains/<protein>_<m>_chromatogram.pdf   (domain_analysis) per-domain load-normalised traces
+#   figures/domains/<protein>_<m>_shares.pdf         (domain_analysis) fractional-share barplot over windows
+#   tables/domains/<protein>_<m>_domain_test.txt     (domain_analysis) per-domain(/window) beta-reg/t test
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
@@ -333,4 +345,226 @@ plot_proteoform <- function(protein_id, metabolites, out_subdir = "proteoform", 
   }
   if (print_plot) print(p)
   invisible(p)
+}
+
+# ===================================================================================================
+# Mode A: domain-resolved, load-normalised elution (the targeted / Lon analysis)
+# ===================================================================================================
+
+# parse a UniProt ft_domain feature string -> data.table(domain, start, end). Handles the standard
+# "DOMAIN 246..587; /note=\"AAA+\"; DOMAIN 588..784; /note=\"Peptidase S16\"" format (and <>-uncertain
+# coordinates, whose numeric part is taken). Returns NULL if nothing parses.
+.parse_ft_domain <- function(s) {
+  if (is.na(s) || !nzchar(s)) return(NULL)
+  chunks <- strsplit(s, "(?=DOMAIN )", perl = TRUE)[[1]]
+  chunks <- chunks[grepl("^DOMAIN", chunks)]
+  d <- rbindlist(lapply(chunks, function(ch) {
+    coord <- regmatches(ch, regexpr("[0-9]+\\.\\.[0-9]+", ch))
+    if (!length(coord)) return(NULL)
+    se   <- as.integer(strsplit(coord, "\\.\\.")[[1]])
+    note <- regmatches(ch, regexpr('/note="[^"]*"', ch))
+    nm   <- if (length(note)) sub('/note="([^"]*)"', "\\1", note) else "domain"
+    data.table(domain = nm, start = se[1], end = se[2])
+  }), use.names = TRUE)
+  if (!nrow(d)) return(NULL)
+  d[order(start)]
+}
+
+# protein_id -> ft_domain string (per-metabolite uniprot.RData, else the shared cache)
+.protein_domains <- function(m) {
+  grab <- function(obj) {
+    d <- tryCatch(as.data.table(obj), error = function(e) NULL)
+    if (is.null(d) || !all(c("input_id", "ft_domain") %in% names(d))) return(NULL)
+    d <- d[!is.na(ft_domain) & nzchar(ft_domain)]
+    if (!nrow(d)) return(NULL)
+    setNames(as.character(d$ft_domain), as.character(d$input_id))
+  }
+  uf <- here("output", paste0("PCM_ctrl_vs_", m), "rdata", "uniprot.RData")
+  if (file.exists(uf)) { e <- new.env(); load(uf, envir = e); if ("uniprot" %in% ls(e)) { s <- grab(e$uniprot); if (length(s)) return(s) } }
+  sf <- here("output", "uniprot_annotation_shared.RData")
+  if (file.exists(sf)) { e <- new.env(); load(sf, envir = e); if (".uniprot_all" %in% ls(e)) { s <- grab(e$.uniprot_all); if (length(s)) return(s) } }
+  character(0)
+}
+
+# resolve domains for one protein: manual override (data.frame/CSV path with protein_id,domain,start,end)
+# wins; else UniProt ft_domain. Returns data.table(domain,start,end) ordered by start, or NULL.
+.get_domains <- function(pid, m, override) {
+  if (!is.null(override)) {
+    ov <- if (is.character(override) && length(override) == 1L && file.exists(override)) fread(override) else as.data.table(override)
+    if (all(c("protein_id", "domain", "start", "end") %in% names(ov))) {
+      d <- ov[as.character(protein_id) == pid, .(domain = as.character(domain), start = as.integer(start), end = as.integer(end))]
+      if (nrow(d)) return(d[order(start)])
+    }
+  }
+  s <- .protein_domains(m)[pid]
+  if (length(s) != 1 || is.na(s) || !nzchar(s)) return(NULL)
+  .parse_ft_domain(s)
+}
+
+# per-sample peptide matrices + condition labels
+.pep_samples <- function(e) {
+  tl <- e$pepTracesList_filtered; samples <- names(tl)
+  mats <- lapply(samples, function(s) .get_mat(tl[[s]]))
+  common <- Reduce(intersect, lapply(mats, rownames))
+  if (length(common) < 2) return(NULL)
+  mats <- lapply(mats, function(M) { M <- M[common, , drop = FALSE]; M[is.na(M)] <- 0; M })
+  dm   <- as.data.table(e$design_matrix)
+  cond <- as.character(dm$Condition[match(samples, as.character(dm$Sample_name))])
+  conds <- unique(cond)
+  ctrl  <- conds[grepl("ctrl|control|ref", conds, ignore.case = TRUE)][1]
+  if (is.na(ctrl)) ctrl <- if (is.factor(dm$Condition)) as.character(levels(dm$Condition))[1] else conds[1]
+  list(mats = mats, samples = samples, cond = cond, fracs = as.numeric(colnames(mats[[1]])),
+       ann = as.data.table(tl[[1]]$trace_annotation), ctrl_name = ctrl)
+}
+
+# test a bounded share (in [0,1]) between two conditions: beta regression LRT (mirrors CCprofiler's
+# assembly test on a proportion), falling back to a logit t-test. Returns p + method used.
+.share_test <- function(share, cond) {
+  cond <- factor(cond)
+  if (nlevels(cond) != 2 || length(share) < 4) return(list(p = NA_real_, method = "n/a"))
+  eps <- 1e-6; y <- pmin(pmax(share, eps), 1 - eps)
+  if (requireNamespace("betareg", quietly = TRUE)) {
+    r <- tryCatch({
+      m1 <- betareg::betareg(y ~ cond); m0 <- betareg::betareg(y ~ 1)
+      lr <- 2 * (as.numeric(stats::logLik(m1)) - as.numeric(stats::logLik(m0)))
+      list(p = stats::pchisq(lr, df = 1, lower.tail = FALSE), method = "betareg-LRT")
+    }, error = function(e) NULL)
+    if (!is.null(r) && is.finite(r$p)) return(r)
+  }
+  tryCatch({ tt <- stats::t.test(stats::qlogis(y) ~ cond); list(p = tt$p.value, method = "logit-t") },
+           error = function(e) list(p = NA_real_, method = "failed"))
+}
+
+domain_analysis <- function(protein_id,
+                            metabolites,
+                            domains     = NULL,     # NULL = UniProt ft_domain; else data.frame/CSV (protein_id,domain,start,end)
+                            windows     = NULL,     # named list of fraction sets, e.g. list(F14_16 = 14:16, F22 = 22)
+                            min_intensity = 0,
+                            out_subdir  = "domains",
+                            save_pdf    = TRUE,
+                            print_plot  = TRUE) {
+  stopifnot(length(protein_id) == 1L)
+  pid <- as.character(protein_id)
+  last <- NULL
+  for (m in metabolites) {
+    e <- .load_plotting(m); if (is.null(e)) { message("[", m, "] no *_for_plotting.RData; skipping."); next }
+    ps <- .pep_samples(e);  if (is.null(ps)) { message("[", m, "] could not build peptide matrices; skipping."); next }
+    seqs <- .protein_seqs(m); prot <- seqs[pid]
+    if (is.na(prot) || !nzchar(prot)) { message("[", m, "] no UniProt sequence for ", pid, " (re-render with the updated Rmd); skipping."); next }
+    doms <- .get_domains(pid, m, domains)
+    if (is.null(doms) || !nrow(doms)) {
+      message("[", m, "] no domains for ", pid, " (UniProt ft_domain empty / not fetched, and no override). ",
+              "Re-render so ft_domain is fetched, or pass domains = <table>; skipping."); next
+    }
+    lk  <- .pep_seq_lookup(e)
+    peps <- unique(ps$ann[as.character(protein_id) == pid & as.character(id) %in% rownames(ps$mats[[1]])]$id)
+    if (!length(peps)) { message("[", m, "] no peptide traces for ", pid, "; skipping."); next }
+
+    # assign each peptide to a domain by residue midpoint (else "unassigned"); computed once
+    pdmap <- rbindlist(lapply(peps, function(pep) {
+      pseq <- .seq_of(pep, lk); mid <- NA_real_
+      if (nzchar(pseq)) { st <- as.integer(regexpr(pseq, prot, fixed = TRUE)); if (st > 0) mid <- st + (nchar(pseq) - 1) / 2 }
+      dd <- if (is.finite(mid)) { hit <- doms[start <= mid & end >= mid]; if (nrow(hit)) hit$domain[1] else "unassigned" } else "unassigned"
+      data.table(peptide_id = as.character(pep), domain = dd)
+    }), use.names = TRUE)
+
+    # per sample: domain share of total protein signal, per fraction (load-normalised)
+    shares <- rbindlist(lapply(seq_along(ps$mats), function(si) {
+      mat  <- ps$mats[[si]]; here_p <- intersect(pdmap$peptide_id, rownames(mat))
+      if (!length(here_p)) return(NULL)
+      sub  <- mat[here_p, , drop = FALSE]; total <- sum(sub)
+      if (total <= min_intensity || total <= 0) return(NULL)
+      dmp  <- pdmap[peptide_id %in% here_p]
+      rbindlist(lapply(unique(dmp$domain), function(dd) {
+        pep_d <- dmp[domain == dd]$peptide_id
+        v <- colSums(sub[pep_d, , drop = FALSE])
+        data.table(sample = ps$samples[si], condition = ps$cond[si], domain = dd,
+                   fraction = ps$fracs, share = as.numeric(v) / total)
+      }), use.names = TRUE)
+    }), use.names = TRUE)
+    if (is.null(shares) || !nrow(shares)) { message("[", m, "] ", pid, " has no signal above min_intensity; skipping."); next }
+
+    dom_levels <- c(doms$domain, "unassigned")
+    shares[, domain    := factor(domain, levels = dom_levels[dom_levels %in% unique(domain)])]
+    shares[, condition := factor(condition, levels = c(setdiff(unique(condition), ps$ctrl_name), ps$ctrl_name))]  # treatment first
+
+    tab_dir <- here("output", paste0("PCM_ctrl_vs_", m), "tables", out_subdir)
+    fig_dir <- here("output", paste0("PCM_ctrl_vs_", m), "figures", out_subdir)
+    dir.create(tab_dir, recursive = TRUE, showWarnings = FALSE); dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+    # ---- plot 1: per-domain load-normalised chromatogram (mean +/- SD across replicates) ----
+    agg <- shares[, .(mean = mean(share), sd = stats::sd(share)), by = .(domain, condition, fraction)]
+    agg[is.na(sd), sd := 0]
+    g1 <- ggplot(agg, aes(fraction, mean, colour = condition, fill = condition)) +
+      geom_ribbon(aes(ymin = pmax(mean - sd, 0), ymax = mean + sd), alpha = 0.18, colour = NA) +
+      geom_line(linewidth = 0.7) +
+      facet_wrap(~ domain, scales = "free_y") +
+      labs(title = paste0("Per-domain chromatogram: ", pid, " (", m, ")"),
+           subtitle = "load-normalised (share of total protein signal), mean +/- SD across replicates",
+           x = "fraction", y = "share of total protein signal", colour = NULL, fill = NULL) +
+      theme_bw() + theme(legend.position = "top")
+
+    # ---- domain-level test + optional windows ----
+    test_rows <- list()
+    # whole-profile: center of mass per sample x domain, t-test between conditions
+    com <- shares[, .(com = if (sum(share) > 0) sum(fraction * share) / sum(share) else NA_real_), by = .(sample, condition, domain)]
+    for (dd in levels(shares$domain)) {
+      cc <- com[domain == dd & is.finite(com)]
+      if (length(unique(cc$condition)) == 2 && nrow(cc) >= 4) {
+        tt <- tryCatch(stats::t.test(com ~ condition, data = cc), error = function(e) NULL)
+        if (!is.null(tt)) test_rows[[paste0(dd, "_profile")]] <-
+          data.table(domain = dd, window = "profile(center-of-mass)", method = "t-test",
+                     p = tt$p.value, effect = diff(rev(tapply(cc$com, cc$condition, mean))))
+      }
+    }
+    # windows: fractional share summed over each window, beta-regression / logit-t per domain x window
+    win_long <- NULL
+    if (!is.null(windows) && length(windows)) {
+      win_long <- rbindlist(lapply(names(windows), function(wn) {
+        fr <- as.numeric(windows[[wn]])
+        shares[fraction %in% fr, .(share = sum(share)), by = .(sample, condition, domain)][, window := wn]
+      }), use.names = TRUE)
+      win_long[, window := factor(window, levels = names(windows))]
+      for (dd in levels(shares$domain)) for (wn in names(windows)) {
+        sw <- win_long[domain == dd & window == wn]
+        if (nrow(sw) >= 4 && length(unique(sw$condition)) == 2) {
+          tr <- .share_test(sw$share, sw$condition)
+          mn <- tapply(sw$share, sw$condition, mean)
+          test_rows[[paste0(dd, "_", wn)]] <- data.table(domain = dd, window = wn, method = tr$method,
+                                                          p = tr$p, effect = as.numeric(diff(rev(mn))))
+        }
+      }
+    }
+    tests <- rbindlist(test_rows, use.names = TRUE)
+    if (nrow(tests)) { tests[, p_BHadj := p.adjust(p, method = "BH")]; fwrite(tests[order(p)], file.path(tab_dir, paste0(pid, "_", m, "_domain_test.txt")), sep = "\t") }
+
+    # ---- plot 2: fractional-share barplot over windows (mean +/- SD + replicate points) ----
+    g2 <- NULL
+    if (!is.null(win_long) && nrow(win_long)) {
+      aggw <- win_long[, .(mean = mean(share), sd = stats::sd(share)), by = .(domain, window, condition)]
+      aggw[is.na(sd), sd := 0]
+      dodge <- position_dodge(width = 0.8)
+      g2 <- ggplot(aggw, aes(window, mean, fill = condition)) +
+        geom_col(position = dodge, width = 0.7, colour = "grey30", linewidth = 0.2) +
+        geom_errorbar(aes(ymin = pmax(mean - sd, 0), ymax = mean + sd), position = dodge, width = 0.2) +
+        geom_point(data = win_long, aes(window, share, group = condition), position = position_dodge(width = 0.8),
+                   shape = 21, colour = "grey20", fill = "white", size = 1.6) +
+        facet_wrap(~ domain, scales = "free_y") +
+        labs(title = paste0("Fractional share over windows: ", pid, " (", m, ")"),
+             subtitle = "load-normalised share of total protein signal; points = replicates",
+             x = NULL, y = "share of total protein signal", fill = NULL) +
+        theme_bw() + theme(legend.position = "top")
+    }
+
+    if (save_pdf) {
+      f1 <- file.path(fig_dir, paste0(pid, "_", m, "_chromatogram.pdf"))
+      ggsave(f1, g1, width = 3 + 2.2 * length(unique(shares$domain)), height = 5, limitsize = FALSE); message("Wrote ", f1)
+      if (!is.null(g2)) { f2 <- file.path(fig_dir, paste0(pid, "_", m, "_shares.pdf"))
+        ggsave(f2, g2, width = 3 + 2.2 * length(unique(shares$domain)), height = 5, limitsize = FALSE); message("Wrote ", f2) }
+    }
+    if (print_plot) { print(g1); if (!is.null(g2)) print(g2) }
+    if (nrow(tests)) { message("[", m, "] ", pid, " domain test (", nrow(tests), " row(s)) -> ", file.path(tab_dir, paste0(pid, "_", m, "_domain_test.txt"))); print(tests[order(p)]) }
+    last <- list(shares = shares, tests = tests, chromatogram = g1, barplot = g2)
+  }
+  invisible(last)
 }
