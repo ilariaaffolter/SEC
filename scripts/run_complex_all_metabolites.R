@@ -31,7 +31,7 @@ suppressPackageStartupMessages({
 rmd <- here("analysis", "DiffAnalysis_Ecoli_PCM.Rmd")
 
 # Keep this list in sync with scripts/run_all_metabolites.R.
-metabolites <- c("ATP", "PEP", "ADP", "aKG", "NAD", "PGP")
+metabolites <- c("PEP", "ADP", "aKG", "NAD", "PGP", "ATP")
 
 for (m in metabolites) {
   cmp <- paste0("PCM_ctrl_vs_", m)
