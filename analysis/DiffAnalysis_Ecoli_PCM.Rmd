@@ -150,6 +150,7 @@ load_proteinFeatures.RData <- T
 load_normalized.RData <- T   # skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData). Set F to force fresh after changing upstream data/filtering.
 load_protein_DiffExprPep_and_Protein <- T
 load_uniprot.RData <- T   # cache the UniProt annotation fetch (rdata/uniprot.RData) so every render reuses ONE identical, reproducible fetch instead of re-hitting UniProt each time. fetch_uniprot is non-deterministic: a bad fetch drops/NAs the `mass` column, which silently makes the assembly state read as ~0% monomer. Set F (or delete the file) to force a fresh fetch.
+load_complexFeatures.RData <- T   # cache the (slow) complex feature finding (rdata/complexFeatures.RData) so re-renders of the COMPLEX section skip findComplexFeatures. Set F (or delete the file) to force a fresh run after changing the complex hypotheses or corr_cutoff. Only used when run_complex_analysis = TRUE.
 ################### ordering the samples?
 
 sample_sort_by_number <- T # if need to reorder samples e.g. based on treatment concentration
@@ -2077,16 +2078,36 @@ plotSummarizedMScoverage(hypotheses = complexHypotheses_minimal,
 
 
 #' ## Complex feature finding
-complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
-                                        complex_hypothesis = complexTargetsPlusDecoys,
-                                        corr_cutoff = 0.9,
-                                        window_size = 7,
-                                        parallelized = F,
-                                        n_cores = 1,
-                                        collapse_method = "apex_network",
-                                        perturb_cutoff = "5%",
-                                        rt_height = 1,
-                                        smoothing_length = 7)
+# findComplexFeatures parallelises over complex hypotheses via a snow/doSNOW cluster and sets its own
+# RNG stream internally (clusterSetRNGStream(cl, 123)), so a parallel run is reproducible and equivalent
+# to the serial one - exactly like findProteinFeatures, which this report already runs with
+# parallelized = T. It was previously forced serial (parallelized = F, n_cores = 1), which is THE slow
+# step of the complex section. Run it on up to 12 cores; each worker copies the traces, so the cap keeps
+# a laptop from oversubscribing. (If your machine lacks snow/doSNOW, set parallelized = F, n_cores = 1.)
+.cf_cores <- parallel::detectCores()
+.cf_cores <- if (is.na(.cf_cores) || .cf_cores < 2L) 1L else min(.cf_cores - 1L, 12L)
+
+# Cache the (slow) complex feature finding the same way as proteinFeatures: skip it when
+# complexFeatures.RData already exists AND load_complexFeatures.RData is TRUE in SETUP.
+.cf_file <- file.path(out_dir, "rdata", "complexFeatures.RData")
+if (load_complexFeatures.RData && file.exists(.cf_file)) {
+  load(.cf_file)   # restores `complexFeatures` from the previous run
+  message("Loaded cached complexFeatures from ", .cf_file, " (skipped findComplexFeatures).")
+} else {
+  complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
+                                          complex_hypothesis = complexTargetsPlusDecoys,
+                                          corr_cutoff = 0.9,
+                                          window_size = 7,
+                                          parallelized = T,
+                                          n_cores = .cf_cores,
+                                          collapse_method = "apex_network",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1,
+                                          smoothing_length = 7)
+  dir.create(dirname(.cf_file), recursive = TRUE, showWarnings = FALSE)
+  save(complexFeatures, file = .cf_file)
+  message("Saved complexFeatures to ", .cf_file, " (re-runs with load_complexFeatures.RData = T skip findComplexFeatures).")
+}
 ```
 
 ## - filter Complex features
