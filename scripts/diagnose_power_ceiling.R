@@ -26,6 +26,8 @@
 #   diagnose_power_ceiling()                       # all metabolites, all tests found
 #   diagnose_power_ceiling("NAD")                  # one metabolite
 #   diagnose_power_ceiling("NAD", fdr = 0.1)       # judge the ceiling against a different fdr
+#   venn_top_candidates("NAD")                     # Venn of the top-10 candidates from CCF / EMD / CCprofiler
+#   venn_top_candidates("NAD", n_top = 20)         # top-20 instead
 #   plot_top_q("NAD", test = "emd")                # top 5 EMD proteins by q
 #   plot_top_q("NAD", test = "ccf", n_top = 10)    # top 10 |best_lag| proteins by q
 #   plot_top_q("NAD", test = "stat")               # top 5 CCprofiler proteins by adjusted p
@@ -48,7 +50,8 @@ suppressPackageStartupMessages({ library(here); library(data.table) })
 .summ_row <- function(m, test, pval, qval, fdr, is_perm = TRUE) {
   q <- qval[is.finite(qval)]; n <- length(q)
   if (!n) return(data.table(metabolite = m, test = test, n_tested = 0L, n_distinct_p = NA_integer_,
-                            min_p = NA_real_, min_q = NA_real_, n_hits_q = 0L, n_needed_at_floor = NA_integer_))
+                            min_p = NA_real_, min_q = NA_real_, n_hits_q = 0L,
+                            n_at_floor = NA_integer_, n_needed_at_floor = NA_integer_))
   p    <- pval[is.finite(pval)]
   minp <- min(p); minq <- min(q)
   data.table(metabolite = m, test = test, n_tested = n,
@@ -56,6 +59,9 @@ suppressPackageStartupMessages({ library(here); library(data.table) })
              min_p             = if (is_perm) signif(minp, 3) else NA_real_,   # raw permutation p (n/a for CCprofiler)
              min_q             = signif(minq, 3),
              n_hits_q          = sum(q < fdr),
+             # proteins tied at the smallest p; this is what makes min_q differ between tests even when
+             # min_p is identical, because min_q ~ min_p * n_tested / n_at_floor.
+             n_at_floor        = if (is_perm) sum(p <= minp * (1 + 1e-9)) else NA_integer_,
              n_needed_at_floor = if (is_perm) as.integer(ceiling(minp * n / fdr)) else NA_integer_)
 }
 
@@ -87,12 +93,115 @@ diagnose_power_ceiling <- function(metabolites = NULL, fdr = 0.05) {
   print(S)
   cat("\nHow to read it:\n",
       " - min_q is the best (smallest) q any protein reached. If min_q > your fdr, nothing is / can be a hit.\n",
-      " - n_distinct_p: a discrete statistic (CCF: <= lag_max+1 values) forces ties that BH cannot separate;\n",
-      "   EMD is continuous (~n_tested distinct p) so BH can rank proteins - that is the power difference.\n",
-      " - n_needed_at_floor: how many proteins must reach the null floor before BH rejects ANY. A large\n",
-      "   number (e.g. hundreds for CCF) means 0 hits is structural, not a signal problem.\n",
+      " - min_p is the permutation floor 1/(1+N): a DESIGN property (N = proteins-per-bin x label\n",
+      "   permutations), so CCF and EMD share it whenever both have a protein maxing out the null - not a bug.\n",
+      " - n_distinct_p: a discrete statistic (CCF: <= lag_max+1 values per bin) forces ties that BH cannot\n",
+      "   separate; EMD is continuous (~n_tested distinct p) so BH can rank proteins - that is the power difference.\n",
+      " - n_at_floor vs n_needed_at_floor: a hit exists only if n_at_floor >= n_needed_at_floor. n_at_floor is\n",
+      "   how many proteins actually reached the smallest p (it sets min_q ~ min_p*n_tested/n_at_floor);\n",
+      "   n_needed_at_floor is how many are REQUIRED. n_at_floor << n_needed_at_floor means 0 hits is structural.\n",
       " - CCprofiler row: pBHadj is already adjusted; the floor columns are NA (not a permutation test).\n", sep = "")
   invisible(S)
+}
+
+# draw a Venn of up to 3 id sets into pdf_file, using whichever Venn package is installed
+# (ggVennDiagram -> VennDiagram -> eulerr). Returns TRUE if a figure was written. The overlap itself is
+# always written as a CSV by the caller, so a missing Venn package only costs the picture.
+.draw_venn <- function(sets, pdf_file, main) {
+  sets <- sets[lengths(sets) > 0]
+  if (length(sets) < 2) return(FALSE)
+  if (requireNamespace("ggVennDiagram", quietly = TRUE)) {
+    ok <- tryCatch({
+      p <- ggVennDiagram::ggVennDiagram(sets, label = "count") + ggplot2::labs(title = main) +
+           ggplot2::theme(legend.position = "none")
+      ggplot2::ggsave(pdf_file, p, width = 6, height = 5.5); TRUE
+    }, error = function(e) FALSE)
+    if (ok) return(TRUE)
+  }
+  if (requireNamespace("VennDiagram", quietly = TRUE)) {
+    ok <- tryCatch({
+      cols <- c("#4E79A7", "#E15759", "#59A14F")[seq_along(sets)]
+      g <- VennDiagram::venn.diagram(x = sets, filename = NULL, main = main, fill = cols, alpha = 0.4,
+                                     disable.logging = TRUE, margin = 0.08, cex = 1.3, cat.cex = 1.1)
+      grDevices::pdf(pdf_file, width = 6, height = 6); grid::grid.newpage(); grid::grid.draw(g); grDevices::dev.off(); TRUE
+    }, error = function(e) FALSE)
+    if (ok) return(TRUE)
+  }
+  if (requireNamespace("eulerr", quietly = TRUE)) {
+    ok <- tryCatch({
+      grDevices::pdf(pdf_file, width = 6, height = 6)
+      print(plot(eulerr::euler(sets), quantities = TRUE, main = main)); grDevices::dev.off(); TRUE
+    }, error = function(e) FALSE)
+    if (ok) return(TRUE)
+  }
+  FALSE
+}
+
+# ---------------------------------------------------------------------------------------------
+# Venn of the TOP-N candidate proteins (smallest q) from each of the three methods, per metabolite.
+# "Candidates", not "hits": with 0 FDR hits this still shows whether the methods AGREE on their best
+# proteins. Writes the Venn PDF (if a Venn package is present) and always the membership CSV.
+#
+#   venn_top_candidates("NAD")               # top 10 from CCF / EMD / CCprofiler
+#   venn_top_candidates("NAD", n_top = 20)
+# OUTPUT: output/PCM_ctrl_vs_<m>/figures/top<N>_candidate_venn.pdf
+#         output/PCM_ctrl_vs_<m>/tables/top<N>_candidate_overlap.csv
+# ---------------------------------------------------------------------------------------------
+venn_top_candidates <- function(metabolites = NULL, n_top = 10) {
+  if (is.null(metabolites)) metabolites <- .discover_metabolites()
+  if (!length(metabolites)) stop("No PCM_ctrl_vs_* output folders found.")
+
+  # top-n protein ids of a results file, ordered by q asc then effect size desc
+  .top_ids <- function(path, qcol, scol, n) {
+    if (!file.exists(path)) return(character(0))
+    d <- data.table::fread(path)
+    if (!all(c("protein_id", qcol) %in% names(d))) return(character(0))
+    d <- d[is.finite(get(qcol))]
+    if (!nrow(d)) return(character(0))
+    ord <- if (!is.na(scol) && scol %in% names(d)) order(d[[qcol]], -d[[scol]]) else order(d[[qcol]])
+    unique(as.character(head(d[ord]$protein_id, n)))
+  }
+
+  for (m in metabolites) {
+    tab_dir <- here("output", paste0("PCM_ctrl_vs_", m), "tables")
+    fig_dir <- here("output", paste0("PCM_ctrl_vs_", m), "figures")
+    ov_file <- file.path(tab_dir, "emd_vs_ccf_vs_stat_overlap.txt")
+    if (!file.exists(ov_file)) ov_file <- file.path(tab_dir, "ccf_fdr_vs_stat_overlap.txt")
+
+    sets <- list(
+      CCF        = .top_ids(file.path(tab_dir, "ccf_fdr_results.txt"), "qval",   "abs_lag", n_top),
+      EMD        = .top_ids(file.path(tab_dir, "emd_fdr_results.txt"), "qval",   "emd",     n_top),
+      CCprofiler = .top_ids(ov_file,                                   "stat_p", NA,        n_top))
+    have <- names(sets)[lengths(sets) > 0]
+    if (length(have) < 2) {
+      message("[", m, "] fewer than 2 methods have results (", paste(have, collapse = ", "),
+              ") - run the tests first; skipping."); next
+    }
+
+    # membership CSV (always) + printed overlap counts
+    allids <- sort(unique(unlist(sets)))
+    memb   <- data.table(protein_id = allids)
+    for (nm in names(sets)) memb[[nm]] <- allids %in% sets[[nm]]
+    memb[, n_methods := rowSums(as.matrix(memb[, names(sets), with = FALSE]))]
+    dir.create(tab_dir, recursive = TRUE, showWarnings = FALSE)
+    fwrite(memb[order(-n_methods, protein_id)], file.path(tab_dir, paste0("top", n_top, "_candidate_overlap.csv")))
+
+    message("[", m, "] top-", n_top, " candidate overlap:")
+    message("   sizes: ", paste(sprintf("%s=%d", names(sets), lengths(sets)), collapse = "  "))
+    if (all(c("CCF", "EMD") %in% have))        message("   CCF n EMD:        ", length(intersect(sets$CCF, sets$EMD)))
+    if (all(c("CCF", "CCprofiler") %in% have)) message("   CCF n CCprofiler: ", length(intersect(sets$CCF, sets$CCprofiler)))
+    if (all(c("EMD", "CCprofiler") %in% have)) message("   EMD n CCprofiler: ", length(intersect(sets$EMD, sets$CCprofiler)))
+    if (length(have) == 3) message("   all three:        ", length(Reduce(intersect, sets)))
+
+    dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+    pdf_file <- file.path(fig_dir, paste0("top", n_top, "_candidate_venn.pdf"))
+    if (.draw_venn(sets, pdf_file, paste0("Top ", n_top, " candidates - PCM_ctrl_vs_", m)))
+      message("   Venn -> ", pdf_file)
+    else
+      message("   (no Venn package found - install one of ggVennDiagram / VennDiagram / eulerr for the figure; ",
+              "overlap is in top", n_top, "_candidate_overlap.csv)")
+  }
+  invisible(NULL)
 }
 
 # ---------------------------------------------------------------------------------------------
