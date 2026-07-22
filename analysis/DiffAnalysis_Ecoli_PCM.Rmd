@@ -678,9 +678,9 @@ as.data.table()
 #       transient UniProt throttling can reset.
 .uniprot_file   <- file.path(out_dir, "rdata", "uniprot.RData")             # this metabolite's subset
 .uniprot_shared <- here::here("output", "uniprot_annotation_shared.RData")  # accumulates across metabolites
-.uniprot_cols   <- c("protein_name", "length", "sequence", "mass", "gene_names","organism_name","xref_geneid",
+.uniprot_cols   <- c("protein_name", "length", "sequence", "ft_domain", "mass", "gene_names","organism_name","xref_geneid",
     "xref_string", "go_f", "go_p", "go_c", "cc_interaction", "ft_act_site", "ft_binding",
-    "cc_cofactor", "cc_catalytic_activity", "xref_pdb")
+    "cc_cofactor", "cc_catalytic_activity", "xref_pdb")   # ft_domain added for scripts/proteoform_analysis.R (domain boundaries)
 .want <- unique(as.character(data_filter_ccp_mod$protein_id))
 
 # ids in a table that already have a real (non-NA) mass
@@ -691,6 +691,14 @@ as.data.table()
 .uniprot_all <- NULL
 if (file.exists(.uniprot_shared)) load(.uniprot_shared)   # -> .uniprot_all
 if (!data.table::is.data.table(.uniprot_all)) .uniprot_all <- data.table::data.table()
+# if the shared cache predates a newly-requested column (e.g. ft_domain for the proteoform analysis),
+# rebuild it so every protein is re-fetched WITH that column instead of silently carrying it as all-NA.
+if (nrow(.uniprot_all) && !all(.uniprot_cols %in% names(.uniprot_all))) {
+  message("Shared UniProt cache is missing requested column(s) (",
+          paste(setdiff(.uniprot_cols, names(.uniprot_all)), collapse = ", "),
+          ") - rebuilding it so they are fetched.")
+  .uniprot_all <- data.table::data.table()
+}
 if (!isTRUE(load_uniprot.RData) && nrow(.uniprot_all))
   .uniprot_all <- .uniprot_all[!(as.character(input_id) %in% .want)]   # drop this metabolite's rows -> re-fetch fresh
 
@@ -2406,7 +2414,13 @@ dev.off()
 # which are never created - the ORIGINAL report (ORIGINAL_*.Rmd) has the identical broken save. The
 # real objects are protein_DiffExprPep / protein_DiffExprProtein (the "_list" is only a FILENAME
 # convention; see the per-object saves above). Corrected the two names so the save works; nothing else.
-save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep,protein_DiffExprProtein, design_matrix,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))  # design_matrix added so scripts/plot_protein_traces.R can label conditions
+# peptide_id -> stripped amino-acid sequence, for the proteoform/domain analysis (scripts/proteoform_analysis.R).
+# data_filter keeps both the grouping key (used as the peptide_id / trace id downstream) and the stripped
+# sequence; the trace id alone is not guaranteed to be a clean AA sequence, so we persist the map here.
+pep_seq_map <- unique(data.table::as.data.table(data_filter)[, .(peptide_id = as.character(pep_grouping_key),
+                                                                 stripped_sequence = as.character(pep_stripped_sequence))])
+
+save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep,protein_DiffExprProtein, design_matrix, pep_seq_map,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))  # design_matrix -> scripts/plot_protein_traces.R labels conditions; pep_seq_map -> scripts/proteoform_analysis.R maps peptides to residues
 
 ```
 
