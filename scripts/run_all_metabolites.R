@@ -17,7 +17,7 @@ rmd <- here("analysis", "DiffAnalysis_Ecoli_PCM.Rmd")  # rename per branch if yo
 # Metabolites to run (must match names in `metabolite_files` in the .Rmd).
 # These are the 6 currently uncommented there. If your "8" includes pyr and Phe,
 # uncomment them in metabolite_files (lines ~95-96) and add "pyr", "Phe" here.
-metabolites <- c("ATP", "ADP", "PEP")
+metabolites <- c("PGP","NAD","aKG","ATP", "ADP", "PEP")
 
 for (m in metabolites) {
   cmp <- paste0("PCM_ctrl_vs_", m)
