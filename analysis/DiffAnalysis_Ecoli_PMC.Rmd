@@ -1,0 +1,2684 @@
+---
+title: "IA002 - PMC - analysis of metabolites treatments of native Ecoli lysate - normalized"
+author: "Ilaria"
+date: "`r Sys.Date()`"
+output:
+  # pdf_document:
+  #   latex_engine: xelatex
+  #   toc: yes
+  html_document:
+    toc_depth: 3
+    number_sections: yes
+    theme: united
+    toc: yes
+    code_folding: hide
+    keep_md: true #enable to save all plots in a folder when knitting to html 
+fontsize: 11pt
+params:
+  metabolite: "ATP"   # default; overridden by scripts/run_all_metabolites.R
+  run_complex_analysis: false   # default off; scripts/run_complex_all_metabolites.R sets this TRUE
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=tex}
+letoldShadedShaded
+letendoldShadedendShaded
+renewenvironment{Shaded}{footnotesizeoldShaded}{endoldShaded}
+letoldverbatimverbatim
+letendoldverbatimendverbatim
+renewenvironment{verbatim}{footnotesizeoldverbatim}{endoldverbatim}
+```
+
+<!-- =========================================================================
+ CLEANED MAIN PIPELINE (QTL strain31 vs strain83).
+ Reorganised from the original on 2026-06-19. What changed vs the original:
+   * Inline "fix" functions removed -> sourced from R/ccprofiler_fixes.R.
+   * Package chunk uses library() only (installation is handled by setup.R/renv);
+     library(CCprofilerDiffAnna) -> library(CCprofiler).
+   * Paths use here::here(); inputs read from data/raw/, outputs go to output/.
+   * Exploratory / other-project / one-off code moved to analysis/experiments.Rmd.
+ The original is preserved verbatim as ORIGINAL_DiffAnalysis_Norm_QTL_31_83_2026.Rmd.
+ PROTEIN QUANTIFICATION: the step that builds `protein_traces_list` (missing from
+ the original) is now in place in "6. Protein quantification" - it uses the lab
+ sibling/replicate peptide-correlation fix (Option A). The report still needs your
+ input files in data/raw/ to knit end-to-end.
+============================================================================ -->
+
+# Introduction
+
+Ecoli were grown and harvested at OD 0.8, 3 biological replicates each. Lysated natively, treated 10 min at RT with the respective metabolite, then SEC at RT, comparison with ctrl (no metabolite in the buffer).
+
+## CHECKLIST script:
+
+-   [x] give inputfiles path, filename pattern, set conditions names in
+    "setup"
+
+-   [x] go through and change accordingly in "analysis SETUP"
+
+-   [x] do you want to rerun protein feature-finding? if yes, delete
+    Rdata file from folder.
+
+-   [x] are there outlier fraction? define and select how to handle in
+    "analysis SETUP"
+
+-   [ ] check if fraction annotation file chunck is ok
+
+-   [ ] do you want to filter out proteins with less then x precursors?
+
+# 1. SETUP
+
+```{r setup, include=TRUE}
+
+knitr::opts_chunk$set(echo = TRUE)
+## language settings
+Sys.setenv(LANG="en")
+
+# ==========================================================================
+# Ecoli_PCM - metabolite comparisons (reference is ALWAYS ctrl)
+# Each metabolite has its own Spectronaut .tsv (that metabolite vs its own ctrl),
+# so each binary comparison still has separate raw data.
+# To run ONE comparison: set `metabolite` below (or render with params$metabolite).
+# To run ALL metabolites in one pass WITHOUT re-knitting by hand, run:
+#     source(here::here("scripts", "run_all_metabolites.R"))
+# which renders this report once per metabolite. A later cross-metabolite chunk
+# can then load the per-metabolite outputs from output/PCM_ctrl_vs_<metabolite>/.
+# ==========================================================================
+metabolite_files <- list(
+  # TODO: one entry per metabolite -> its Spectronaut .tsv (metabolite vs ctrl).
+  ATP = "20251127_PCM20_ATP_directDIA_Anna_SEC_Report.tsv",
+  PEP = "20251126_PCM17_PEP_114514_20251021_AP_scheme_qvalue_rawquant_Report.tsv",
+  ADP = "250708_asimonic_PCM16_ADP_Report_AP_scheme_qvalue (Normal).tsv", 
+  aKG = "20251202_PCM18_aKG_AP_qvalue_rawquant.tsv",
+  NAD = "20260108_PCM19_NAD_Anna_rawquant_Report.tsv", 
+  PGP = "20251215_PCM21_PGP_pg_ibaq_Anna_rawquant_Report.tsv"#,
+  #pyr = "20250217_PCM13_pyr_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv",
+  #Phe = "20250217_PCM12_Phe_research_IAA_Report_AP_scheme_qvalue_rawquant (Normal).tsv"
+)
+ref_condition_name <- "ctrl"   # reference condition for every comparison
+
+# `metabolite` may be supplied by a parameterized render (params$metabolite);
+# otherwise the default below is used (interactive / single knit).
+metabolite <- if (exists("params") && !is.null(params$metabolite)) params$metabolite else "ATP"
+
+## ---- everything below is derived (no need to edit) ----
+stopifnot(metabolite %in% names(metabolite_files))
+comparison_id        <- paste0("PCM_ctrl_vs_", metabolite)
+experiment_name      <- comparison_id
+data_location        <- metabolite_files[[metabolite]]
+condition1           <- ref_condition_name   # ctrl (reference)
+condition2           <- metabolite            # treatment / test
+calibration_location <- "PCM17_calibration_table.xlsx"   # different for all the branches
+complex_portal_file  <- "Complex_portal_83333.tsv"              # E. coli K-12 (taxid 83333)
+trypsin_id           <- "CON_P00761"   # digestion-control protein for the trypsin QC plot
+                                   # (yeast DBs: "P00761"; contaminant-prefixed DBs e.g. E. coli: "CON_P00761")
+# (file_name_pattern removed: the raw MS run names are parsed by token in section 2b —
+#  biolrep<N>, f<NN>, and the ctrl/<metabolite> condition word — which works across every
+#  metabolite's naming layout, so no per-file filename prefix is needed here.)
+
+# colours: reference vs treatment
+color_scheme_treatment <- setNames(c("#caf0f0", "#f6acca"), c(condition1, condition2))
+condition_levels       <- c(condition1, condition2)
+
+```
+
+## 1a. Parameters
+
+```{r}
+run_qcs_wProtti <- T
+
+# for the feature finding section, work on peptide level, not precursor level (Ilaria s mistake):
+peptide_id_col <- "pep_stripped_sequence"
+
+# Section 7 (cross-correlation differential analysis) is optional. Set to F to skip it —
+# each knit / metabolite render (run_all_metabolites.R) then stops after Section 6.
+# Default T = run it, as before.
+run_cross_correlation <- T
+run_complex_analysis  <- if (exists("params") && !is.null(params$run_complex_analysis)) isTRUE(params$run_complex_analysis) else F   # gated COMPLEX section; default OFF (not needed for the protein-level overlap). scripts/run_complex_all_metabolites.R renders with params$run_complex_analysis=TRUE; or set T here to run it interactively.
+
+# The assembly section draws ONE trace/assembly plot PER protein - the loops in "look-up traces
+# of proteins with assembly changes" and the per-protein plotting inside getMassAssemblyChange().
+# That is hundreds of plots per metabolite (chunk 1084 has no p-value filter at all) and is the
+# single biggest reason that section is slow. Default F skips them (recommended for batch runs via
+# run_all_metabolites.R); set T when you want to eyeball individual proteins interactively.
+plot_individual_traces <- F
+
+perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
+
+load_proteinFeatures.RData <- T
+load_normalized.RData <- T   # skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData). Set F to force fresh after changing upstream data/filtering.
+load_protein_DiffExprPep_and_Protein <- T
+load_uniprot.RData <- T   # cache the UniProt annotation fetch (rdata/uniprot.RData) so every render reuses ONE identical, reproducible fetch instead of re-hitting UniProt each time. fetch_uniprot is non-deterministic: a bad fetch drops/NAs the `mass` column, which silently makes the assembly state read as ~0% monomer. Set F (or delete the file) to force a fresh fetch.
+load_complexFeatures.RData <- T   # cache the (slow) complex feature finding (rdata/complexFeatures.RData) so re-renders of the COMPLEX section skip findComplexFeatures. Set F (or delete the file) to force a fresh run after changing the complex hypotheses or corr_cutoff. Only used when run_complex_analysis = TRUE.
+################### ordering the samples?
+
+sample_sort_by_number <- T # if need to reorder samples e.g. based on treatment concentration
+
+################### removing lowest MW in MW calibration curve
+
+remove_lowest_MW <- T
+
+################### defining ref and treatment conditions
+
+ref_condition <- condition1
+
+treatment_conditions <- c(condition2) #,condition3,condition4)
+
+################### aggregate replicate when plotting?
+
+aggregate_rep <- T # choose T if more then 1 rep per condition, F if only 1 rep
+
+################### what to do with the problematic fractions?
+
+run_annotateOutlierFractions <- T # don't want to run this, I'm annotating it manually
+
+problematic_fractions <- c() #c("P2_36", "P2_47", "P2_48") # to annotate manually
+
+
+################### GRID-SEARCH
+
+perform_prot_grid_search <- T
+
+# With ibmt pval < 5e-3 in the control-control comparison experiment - TODO refine the way we look at this, but good enough for now!
+#proteins_to_exclude <- c("P04816", "P07003", "P07118", "P07822", "P08839", "P08997", "P09126", "P0A6C1", "P0A6C5", "P0A6F3", "P0A6H5", "P0A6T5", "P0A6U3", "P0A6W0", "P0A6W9", "P0A725", "P0A759", "P0A780", "P0A7B3", "P0A7G2", "P0A817", "P0A862", "P0A8I1", "P0A8P3", "P0A8V0", "P0A951", "P0A9H1", "P0A9P9", "P0AA16", "P0AAN5", "P0AAR3", "P0AAZ7", "P0AB14", "P0AB43", "P0AB46", "P0AB61", "P0AB65", "P0AB80", "P0ABE2", "P0ABH0", "P0AD53", "P0ADA1", "P0ADE6", "P0ADU5", "P0ADW8", "P0AE08", "P0AE48", "P0AE60", "P0AE63", "P0AEM4", "P0AES6", "P0AES9", "P0AFF6", "P0AFG0", "P0AFH0", "P0AFI7", "P0AFL3", "P0AFM4", "P0AFW0", "P0AFW8", "P0AGG4", "P0C0L9", "P10346", "P10442", "P16700", "P21151", "P21177", "P21889", "P23538", "P23843", "P23878", "P25524", "P26602", "P27278", "P27303", "P28248", "P30176", "P32141", "P32685", "P33219", "P33355", "P36659", "P36979", "P37613", "P37665", "P37691", "P39274", "P39408", "P40191", "P42616", "P45470", "P52119", "P64490", "P64506", "P64519", "P64559", "P68206", "P69222", "P69795", "P69822", "P76141", "P76243", "P76422", "P76423", "P76569", "P77695", "Q2M7X4", "Q46798")
+
+#Additional proteins to keep that upon manual inspection show an opposite effect than what occurs just by time
+proteins_to_keep <- c()
+
+
+
+```
+
+## 1b. create folders
+
+```{r}
+
+# All outputs for this comparison go under output/<comparison_id>/
+out_dir <- here::here("output", comparison_id)
+
+output_files_location <- file.path(out_dir, "output_files")
+RData_for_further_plotting_and_analysis_location <- file.path(out_dir, "RData_for_further_plotting_and_analysis")
+DistinctAssembly_hits_location <- file.path(out_dir, "DistinctAssembly_hits")
+DistinctAssembly_hits_nolog2FC_location <- file.path(out_dir, "DistinctAssembly_hits_nolog2FC")
+
+# Create the comparison's output folders (incl. figures/tables/rdata) if missing
+for (d in c(out_dir,
+            file.path(out_dir, c("figures", "tables", "rdata")),
+            output_files_location,
+            RData_for_further_plotting_and_analysis_location,
+            DistinctAssembly_hits_location,
+            DistinctAssembly_hits_nolog2FC_location)) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+cat("Outputs for this run go to: ", out_dir)
+
+# Also save every figure this report draws as a standalone PDF (not only embedded in the knit
+# document), into output/<comparison_id>/figures/ - so each metabolite's plots (Protti QC,
+# GO-enrichment global-vs-local, assembly-state, volcanoes, ...) are available as separate files.
+# Filenames are <chunk-label>-<n>.pdf; the plot titles inside identify the content.
+knitr::opts_chunk$set(dev = c("png", "pdf"),
+                      fig.path = file.path(out_dir, "figures", ""))
+
+```
+
+
+## 1c. Loading packages and libraries
+
+
+Bugs on the CCprofiler functions are fixed in CCprofilerDiffAnna, in the PPlabFunctions.R file. 
+There the IBMT test, gaussian fitting sliding_window functions and are also saved.
+
+meaning that essential for this analysis are the packages:
+** CCprofilerDiffAnna
+** PrInCE
+
+```{r, message=FALSE, warning=FALSE, cache=FALSE}
+#' # Load CCprofiler package and set working directory
+#library(devtools)
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(betareg)
+library(lmtest)
+library(ggrepel)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("preprocessCore")
+# 
+# install_github("CCprofiler/CCprofiler", ref = "differential")
+###### if the upper part does not work -> use the following: I've downloaded the repository in my downloads folder
+#devtools::install_local("/Volumes/biol_bc_picotti_1/Anna/PROJECTS/SEC_metabolites/CCprofiler/CCprofiler-differential", force = TRUE)
+#devtools::install_local("W:/PMC_project/CCprofiler/CCprofiler-differential", force = TRUE)
+#library(CCprofiler)
+
+
+#devtools::install_github("AnnaPagotto/CCprofilerDiffAnna", dependencies = TRUE)
+#devtools::install_local("W:/PMC_project/CCprofiler/CCprofilerDiffAnna-differential", force = TRUE)
+library(CCprofiler)   # was CCprofilerDiffAnna (lab fork); fixes now loaded from R/ccprofiler_fixes.R
+
+library(scales)
+
+########## my usuals
+
+library(protti)
+library(tidyverse)
+library(DT)
+
+library(readxl) #to read Excel files like .xlsx with the function read_excel()
+library(writexl) # to write Excel files
+
+# for overlap plot
+#install.packages("UpSetR")
+library(UpSetR)
+
+#For Gaussian fitting and probably new complex identification
+
+# if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+# BiocManager::install("PrInCE")
+library(PrInCE)
+
+library(MSnbase)
+library(methods)
+library(progress)
+library(rlist)
+library(data.table)
+library(ggpmisc)
+library(limma)
+
+### additional packages required
+
+# NOTE: package installation is handled once by setup.R / renv (see README.md).
+# (The original had install.packages(parallel/foreach/doParallel/igraph) here,
+#  which also errored because the package names were unquoted.)
+
+library(parallel)
+library(foreach)
+library(doParallel)
+library(igraph)  # For network-based proteoform detection
+
+```
+
+'here' settings
+
+```{r}
+#devtools::install_local("C:/Users/apagotto/Downloads/rprojroot-main/rprojroot-main", dependencies = TRUE)
+# install.packages("here")
+library(here)
+#install.packages("fs")
+library(fs)
+
+
+# List all files and directories recursively
+
+#dir_tree(path = here() , recurse = TRUE)
+
+here()
+```
+
+
+## 1d. Load the CCprofiler fixes
+
+The lab fixes that used to be pasted inline here now live in
+`R/ccprofiler_fixes.R` (see that file's header for full provenance). They are
+sourced **on top of** the official CCprofiler package, so the corrected versions
+take precedence when called from this document.
+
+```{r load-fixes, message=FALSE, warning=FALSE}
+source(here::here("R", "ccprofiler_fixes.R"), local = TRUE)  # local=TRUE: define the fixes in the report env so they see design_matrix etc. under rmarkdown::render (new.env)
+```
+
+# 2. DATA preparation
+
+## 2a. Import data
+
+```{r, eval=TRUE}
+
+
+if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
+  load(file.path(out_dir, "rdata", "data_input.RData"))
+} else {
+  # Prefer data/raw/<comparison_id>/<file> (the per-comparison subfolder); fall back to a flat
+  # data/raw/<file> if the .tsv was dropped straight into data/raw instead of a subfolder.
+  data_path <- here("data", "raw", comparison_id, data_location)
+  if (!file.exists(data_path)) data_path <- here("data", "raw", data_location)
+  data <- read_protti(data_path)
+  save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
+}
+
+# --- standardize the peptide/precursor id column -------------------------------------------
+# The rest of this report refers to `pep_grouping_key`; in the original workflow that column WAS
+# the precursor id (see the `pg_precursor_id` rename hint in section 2d). Different Spectronaut
+# export schemes name that unit differently, and these metabolites were processed on different
+# days, so the column can vary per file. If `pep_grouping_key` is absent, alias the best available
+# id here (precursor-level first) so the downstream code runs unchanged for every file. To force a
+# specific column, set `peptide_id_col <- "<name>"` in the SETUP chunk (section 1).
+if (!exists("peptide_id_col")) peptide_id_col <- NA_character_
+if (!"pep_grouping_key" %in% names(data)) {
+  .cand <- if (!is.na(peptide_id_col)) peptide_id_col else
+           c("eg_precursor_id", "eg_modified_sequence", "pep_stripped_sequence")
+  .use  <- .cand[.cand %in% names(data)][1]
+  if (is.na(.use)) {
+    stop("No peptide/precursor id column found (looked for 'pep_grouping_key', ",
+         paste(.cand, collapse = ", "), "). Columns present: ",
+         paste(names(data), collapse = ", "))
+  }
+  message("Note: 'pep_grouping_key' not in this export -> using '", .use,
+          "' as the peptide/precursor id (peptide_id in the CCprofiler traces will be ",
+          .use, "-level).")
+  data$pep_grouping_key <- data[[.use]]
+}
+
+head(data, n = 10)
+```
+
+## 2b. Fraction annotation table To import the data into the *CCprofiler*
+container format, an annotation table mapping the biochemical fraction
+numbers to the respective file name is required. It is important that
+the fractions start at 1 and consecutively increase by 1 unit until
+reaching the total number of fractions. An example annotation file is
+available as `exampleFractionAnnotation`.
+
+filename fraction_number heuselm_J130729_001 1
+
+```{r, eval=TRUE}
+
+#unique(data$r_file_name)
+
+# Parse fraction / replicate / condition from the raw MS run name (r_file_name) BY TOKEN,
+# not by underscore position. The metabolites were acquired on different days with different
+# naming layouts (e.g. ATP has 8 underscore-fields, PEP has 12), so a fixed field position — or
+# a fixed filename prefix — cannot serve all of them. These three tokens are shared by every file:
+#   fraction  = lowercase 'f' + digits   (case-sensitive, so a plate position like 'F5' is NOT read as a fraction)
+#   replicate = 'biolrep' + digits
+#   condition = the reference/treatment word (condition1 / condition2, i.e. ctrl / <metabolite>)
+# r_file_name is kept in full and used as-is as the join key (data_filter keeps it in full too),
+# so no prefix stripping is needed.
+fraction_annotation <- data %>%
+  dplyr::select(r_file_name) %>%
+  distinct() %>%
+  mutate(
+    fraction_number  = str_match(r_file_name, "(?:^|_)f([0-9]+)(?:_|$)")[, 2],
+    replicate_number = str_match(r_file_name, "(?:^|_)biolrep([0-9]+)(?:_|$)")[, 2],
+    condition        = str_match(r_file_name, paste0("(?:^|_)(", condition1, "|", condition2, ")(?:_|$)"))[, 2]
+  )
+
+# Fail fast (like the design-matrix guard downstream) if any run name didn't yield all three
+# tokens, instead of letting NA fraction/condition cascade into the q-value / histogram steps.
+unparsed_runs <- fraction_annotation %>%
+  dplyr::filter(is.na(fraction_number) | is.na(replicate_number) | is.na(condition))
+if (nrow(unparsed_runs) > 0) {
+  stop("Could not parse fraction/replicate/condition from ", nrow(unparsed_runs),
+       " run name(s). Expected tokens f<NN>, biolrep<N>, and condition '",
+       condition1, "'/'", condition2, "'. First few:\n  ",
+       paste(utils::head(unparsed_runs$r_file_name, 8), collapse = "\n  "))
+}
+  
+
+head(fraction_annotation, n = 20)
+```
+
+## 2c. MW calibration In some co-fractionation techniques, such as
+size-exclusion chromatography, a log-linear relationship between the
+fraction dimension and molecular weight (MW) can be assumed. In such
+cases a MW calibration is possible by leveraging the elution information
+of standard proteins with known MWs run separately on the fractionation
+device. The inferred apparent molecular weight can then be used to judge
+a protein’s likely assembly state given its monomeric molecular weight
+and observed elution fraction (~ apparent molecular weight). Monomer
+weights can be added to the data by the annotation functions (see
+below).
+
+```{r, eval=TRUE, fig.show='hold'}
+
+calibrationTable <- read_excel(here("data", "raw", calibration_location)) %>%
+  as.data.table() 
+
+if(remove_lowest_MW == T) {calibrationTable <- calibrationTable %>%
+  filter(std_weights_kDa != 0.244)}
+
+
+calibration = calibrateMW(calibrationTable)
+```
+
+## 2d. FILTER data
+
+Filtering for intensity > 64 (log2(I)>6)
+
+```{r}
+data_filter <- data %>%
+  filter(pep_is_proteotypic == T) %>% # remove non proteotypic peptides
+   mutate(fg_quantity_log2 = log2(fg_quantity)) %>% 
+  filter(fg_quantity >= 50) %>% # only include intensities above log2 value of 6 (= fg_quantity of 64). Lower intensities are likely false assignments. This is for the Astral: we are being less stringent than with the other instruments, where we use a cutoff of fg_quantity_log2>10 
+  filter(pg_protein_accessions != "iRT-Kit_WR_fusion") %>%
+  dplyr::select(r_file_name, pg_protein_accessions, pep_grouping_key, fg_quantity, pep_stripped_sequence, pep_nr_of_missed_cleavages)
+  # r_file_name kept in full (no prefix strip): section 2b parses fraction/condition/replicate by
+  # token, and data_filter shares this same full r_file_name key with fraction_annotation for the join.
+  #rename(pg_precursor_id = pep_grouping_key)
+  
+```
+
+# 3. QCs with Protti
+
+```{r}
+if(run_qcs_wProtti == T){
+  qc <- data_filter %>%
+  left_join(fraction_annotation)
+}
+```
+
+## 3a. Intensity distribution before filtering 
+
+```{r qc_intensity_distribution}
+data %>%
+  mutate(fg_quantity_log2 = log2(fg_quantity)) %>%
+  qc_intensity_distribution(
+    grouping = pep_grouping_key,
+    intensity_log2 = fg_quantity_log2,
+    plot_style = "histogram"
+  ) +
+  geom_vline(xintercept = 5.64, color = "red", linewidth = 0.3) + #log2(50) = 5.643856
+  labs(subtitle = "Red line = cutoff for removal of low intensities") 
+```
+
+
+
+## 3b. IDs
+
+```{r ids_per_frac, fig.height=7, fig.width=15, dev='pdf'}
+if(run_qcs_wProtti == T){
+
+###### Pep (precursor) Ids
+  
+  for (i in unique(qc$condition)) {
+    
+      plot <- qc%>%
+        filter(condition==i) %>%
+        qc_ids(, 
+             sample = r_file_name,
+             grouping = pep_grouping_key,
+             intensity = fg_quantity, # precursor lvl
+             condition = condition,
+             title = paste0("Number of peptide IDs per sample_", i),
+             interactive = FALSE) +
+        theme(legend.position = "bottom") +
+        ggplot2::scale_fill_manual(values = color_scheme_treatment) 
+      
+      print(plot)
+    }
+
+pep_ids <- qc_ids(qc, 
+       sample = r_file_name,
+       grouping = pep_grouping_key,
+       intensity = fg_quantity, # precursor lvl
+       condition = condition,
+       plot = FALSE)
+
+head(pep_ids)
+
+
+###### Prot ids
+
+    for (i in unique(qc$condition)) {
+        
+        plot <- qc%>%
+          filter(condition==i) %>%
+          qc_ids(
+             sample = r_file_name,
+             grouping = pg_protein_accessions,
+             intensity = fg_quantity,
+             condition = condition,
+             title = paste0("Number of protein IDs per sample_", i),
+             interactive = FALSE) +
+        theme(legend.position = "bottom") +
+        ggplot2::scale_fill_manual(values = color_scheme_treatment)
+        
+        print(plot)
+    }
+
+prot_ids <- qc_ids(qc, 
+       sample = r_file_name,
+       grouping = pg_protein_accessions,
+       intensity = fg_quantity,
+       condition = condition,
+       plot = FALSE)
+
+head(prot_ids)
+}
+```
+
+```{r total_prot_IDs}
+if(run_qcs_wProtti == T){
+
+###### Protein Ids
+
+      plot <- qc%>%
+        qc_ids( 
+             sample = condition,
+             grouping = pg_protein_accessions,
+             intensity = fg_quantity, # precursor lvl
+             condition = condition,
+             title = "Number of protein IDs per condition",
+             interactive = FALSE) +
+        theme(legend.position = "bottom") +
+        ggplot2::scale_fill_manual(values = color_scheme_treatment) 
+      
+      print(plot)
+      
+      prot_ids_all <- qc_ids(qc, 
+       sample = condition,
+       grouping = pg_protein_accessions,
+       intensity = fg_quantity,
+       condition = condition,
+       plot = FALSE)
+      
+      prot_ids_all
+    }
+```
+
+## 3c. missed cleavages
+
+```{r qc_missed_cleavages, fig.height=7, fig.width=15, dev='pdf'}
+
+if(run_qcs_wProtti == T){
+  
+  for (i in unique(qc$condition)) {
+    
+    plot <- qc%>%
+          filter(condition==i) %>%
+      qc_missed_cleavages(
+        sample = r_file_name,
+        grouping = pep_stripped_sequence,
+        missed_cleavages = pep_nr_of_missed_cleavages,
+        intensity = fg_quantity,
+        method = "intensity",
+        plot = T
+      ) +
+      labs(subtitle = i)
+    
+    print(plot)}
+}
+```
+
+# 4. CC PROFILER differential analysis workflow
+
+## 4a. create DESIGN MATRIX (w/ fraction_annotation)
+
+```{r design_matrix}
+
+#fix colnames and as.data.table
+
+fraction_annotation_table <- fraction_annotation %>%
+  dplyr::rename("filename" = "r_file_name") %>%
+  mutate(fraction_number = as.numeric(fraction_number)) %>%
+as.data.table() %>%
+  arrange(fraction_number) %>% ################################# it is important to reorder the fraction_annotation file because otehrwise it gives you an error when running the importPCPdata() function
+  dplyr::rename("condition_id" = "condition") %>%
+  dplyr::rename("replicate_id" = "replicate_number") %>% ##just to have the same names as Isabell...
+  mutate(sample= paste0(condition_id, "_", replicate_id)) 
+ 
+  
+
+fraction_annotation_sub <- fraction_annotation_table %>%
+  dplyr::select(c(filename,fraction_number,sample)) %>%
+  distinct()
+  
+
+ 
+## create design matrx
+  
+design_matrix <- unique(subset(fraction_annotation_table, select=c("condition_id","replicate_id","sample")))
+
+setnames(design_matrix, c("condition_id","replicate_id","sample"), c("Condition","Replicate","Sample_name"))
+
+design_matrix$Condition <- factor(design_matrix$Condition, levels= condition_levels)
+
+# Safety net: factor() above turns Condition into NA if the registry ref/treat
+# don't match the labels parsed from the data. Fail fast with a clear message
+# instead (this mismatch is what previously cascaded into the q-value / hist
+# errors much further downstream).
+if (anyNA(design_matrix$Condition)) {
+  stop("design_matrix$Condition has NA: the comparison's ref/treat (",
+       paste(condition_levels, collapse = ", "),
+       ") do not match the condition labels in the data. Labels found: ",
+       paste(sort(unique(as.character(fraction_annotation_table$condition_id))), collapse = ", "),
+       ". Edit ref/treat in the SETUP comparison registry to match.")
+}
+
+
+```
+
+## 4b. fix data_filter for CCprofiler
+
+```{r data_filter_ccp_mod}
+
+data_filter_ccp_mod <- data_filter %>%
+  filter(!grepl("CON_", pg_protein_accessions) | pg_protein_accessions == trypsin_id) %>% #remove contaminants, except for trypsin (trypsin_id in SETUP)
+dplyr::rename ("filename" = "r_file_name", "protein_id" = "pg_protein_accessions", "peptide_id"="pep_grouping_key", "intensity"="fg_quantity") %>%
+ left_join(fraction_annotation_table) %>%
+  group_by(filename, protein_id) %>% ### FILTER OUT ALL THE PROTEIN WITH LESS THAN 3 eg_precursor_id?
+add_count(protein_id, name = "n_precursors") %>%# get the n precursors per protein per sample
+   dplyr::select(protein_id, peptide_id, filename, intensity)%>%
+as.data.table()
+
+```
+
+## 4c. create TRACE ANNOTATION table
+
+```{r Fetch_uniprot for traceAnnotation df}
+# UniProt annotation fetch - made reliable and SHARED across metabolites.
+# fetch_uniprot is a live network call. Fetching it fresh for every metabolite hammers UniProt, and a
+# throttled/flaky response comes back with the protein rows PRESENT but `mass` = NA - which silently
+# makes the assembly state read as ~0% monomer (this is what stopped 5/6 metabolites in a batch run).
+# Two safeguards, neither of which changes WHICH proteins/columns are requested or the mass values:
+#   (1) a SHARED accumulator cache (output/uniprot_annotation_shared.RData): any protein fetched for
+#       ANY metabolite is reused, so across a full run the proteome is fetched ~once, not six times;
+#   (2) a retry that re-queries proteins still MISSING *or with NA mass*, backing off between tries so
+#       transient UniProt throttling can reset.
+.uniprot_file   <- file.path(out_dir, "rdata", "uniprot.RData")             # this metabolite's subset
+.uniprot_shared <- here::here("output", "uniprot_annotation_shared.RData")  # accumulates across metabolites
+.uniprot_cols   <- c("protein_name", "length", "sequence", "ft_domain", "mass", "gene_names","organism_name","xref_geneid",
+    "xref_string", "go_f", "go_p", "go_c", "cc_interaction", "ft_act_site", "ft_binding",
+    "cc_cofactor", "cc_catalytic_activity", "xref_pdb")   # ft_domain added for scripts/proteoform_analysis.R (domain boundaries)
+.want <- unique(as.character(data_filter_ccp_mod$protein_id))
+
+# ids in a table that already have a real (non-NA) mass
+.have_mass <- function(dt) if (data.table::is.data.table(dt) && nrow(dt) && all(c("input_id","mass") %in% names(dt)))
+  as.character(dt[!is.na(mass)]$input_id) else character(0)
+
+# always load the shared cache (so other metabolites' proteins are never lost); flag F = force refresh
+.uniprot_all <- NULL
+if (file.exists(.uniprot_shared)) load(.uniprot_shared)   # -> .uniprot_all
+if (!data.table::is.data.table(.uniprot_all)) .uniprot_all <- data.table::data.table()
+# if the shared cache predates a newly-requested column (e.g. ft_domain for the proteoform analysis),
+# rebuild it so every protein is re-fetched WITH that column instead of silently carrying it as all-NA.
+if (nrow(.uniprot_all) && !all(.uniprot_cols %in% names(.uniprot_all))) {
+  message("Shared UniProt cache is missing requested column(s) (",
+          paste(setdiff(.uniprot_cols, names(.uniprot_all)), collapse = ", "),
+          ") - rebuilding it so they are fetched.")
+  .uniprot_all <- data.table::data.table()
+}
+if (!isTRUE(load_uniprot.RData) && nrow(.uniprot_all))
+  .uniprot_all <- .uniprot_all[!(as.character(input_id) %in% .want)]   # drop this metabolite's rows -> re-fetch fresh
+
+.need <- setdiff(.want, .have_mass(.uniprot_all))
+if (length(.need)) {
+  message("UniProt: ", length(.want) - length(.need), "/", length(.want),
+          " proteins reused from shared cache; fetching ", length(.need), " new one(s).")
+  for (.try in 1:4) {
+    .todo <- setdiff(.need, .have_mass(.uniprot_all))
+    if (!length(.todo)) break
+    .before <- length(.have_mass(.uniprot_all))
+    if (.try > 1) { message("  retry ", .try, ": ", length(.todo), " protein(s) still without mass - backing off ..."); Sys.sleep(5 * (.try - 1)) }
+    .batch <- tryCatch(data.table::as.data.table(fetch_uniprot(.todo, columns = .uniprot_cols, batchsize = 50)),
+                       error = function(e) { message("  fetch attempt ", .try, " errored: ", conditionMessage(e)); NULL })
+    if (!is.null(.batch) && nrow(.batch) && "input_id" %in% names(.batch)) {
+      # fresh rows supersede any prior NA-mass rows for those ids
+      if (nrow(.uniprot_all) && "input_id" %in% names(.uniprot_all)) {
+        .uniprot_all <- data.table::rbindlist(
+          list(.uniprot_all[!(as.character(input_id) %in% as.character(.batch$input_id))], .batch),
+          use.names = TRUE, fill = TRUE)
+      } else {
+        .uniprot_all <- .batch
+      }
+    }
+    # Stop retrying the moment an attempt returns NO new masses: that means UniProt is hard-blocking
+    # (rate limit), and hammering it further only extends the block. Wait ~1h and re-run instead.
+    if (length(.have_mass(.uniprot_all)) <= .before) {
+      message("  no new masses returned - UniProt is likely rate-limiting. Stopping; wait ~1h and re-run.")
+      break
+    }
+  }
+  dir.create(dirname(.uniprot_shared), recursive = TRUE, showWarnings = FALSE)
+  if (nrow(.uniprot_all)) save(.uniprot_all, file = .uniprot_shared)
+}
+
+uniprot <- if (nrow(.uniprot_all) && "input_id" %in% names(.uniprot_all)) .uniprot_all[as.character(input_id) %in% .want] else data.table::data.table()
+.cov <- if (length(.want)) mean(.want %in% .have_mass(uniprot)) else 0
+message(sprintf("UniProt annotation ready: %.1f%% of %d proteins have a monomer mass.", 100 * .cov, length(.want)))
+uniprot <- tibble::as_tibble(uniprot)   # restore fetch_uniprot's original tibble type for the downstream dplyr select()/left_join()
+save(uniprot, file = .uniprot_file)
+```
+
+```{r traceAnnotation_table}
+## Trace annotation table
+
+## information from uniprot
+# Guard the mass column before renaming. If fetch_uniprot returned no `mass` column, the rename below
+# crashes; if it returned an all-NA mass, protein_mw ends up NA and CCprofiler reads every protein as
+# ~100% assembled (0% monomer). Fail loudly here instead of producing a silently-meaningless QC.
+if (!"mass" %in% names(uniprot)) {
+  stop("fetch_uniprot returned no 'mass' column for this run - the UniProt fetch was incomplete. ",
+       "Run clear_caches(caches = \"uniprot\") and re-run to re-fetch (UniProt was likely throttling; ",
+       "the shared cache + retry usually clears it). Without monomer mass the assembly state is ",
+       "meaningless (every protein reads as 0% monomer).")
+}
+traceAnnotation <- as.data.table(uniprot) %>%
+  dplyr::rename("Mass" ="mass") # there is a bug in the annotateTraces function, it doesn't add the protein_mw column if the mass column is "mass" and not "Mass". Tried to fix the function but not fully managed: it does add the column, but put NAs as values....
+
+# Sanity-check the monomer mass just loaded: mostly-NA mass => the assembly state would be garbage.
+.na_mass_frac <- mean(is.na(traceAnnotation$Mass))
+if (.na_mass_frac > 0.9) {
+  stop(sprintf(paste0("UniProt mass is NA for %.0f%% of proteins - the fetch effectively returned no ",
+                      "monomer mass, so the assembly state would be meaningless (0%% monomer). Run ",
+                      "clear_caches(caches = \"uniprot\") and re-run to re-fetch."), 100 * .na_mass_frac))
+} else if (.na_mass_frac > 0.5) {
+  warning(sprintf(paste0("UniProt mass is NA for %.0f%% of proteins - the assembly state may be ",
+                         "unreliable. Consider clear_caches(caches = \"uniprot\") + re-run."), 100 * .na_mass_frac))
+}
+
+head(traceAnnotation, n = 2)
+```
+
+## 4d. Get traces list
+
+```{r pepTraces_raw}
+
+samples <- unique(fraction_annotation_table$sample)
+
+
+# to order by number in the string
+if(sample_sort_by_number == T) {
+samples <- str_sort(samples, numeric = TRUE)}
+
+
+traces_list <- lapply(samples,function(x){
+  message(x)
+  ann <- subset(fraction_annotation_sub, sample==x) 
+  ann <- subset(ann, filename %in% data_filter_ccp_mod$filename) 
+  ann <- subset(ann, select = c("filename","fraction_number")) 
+  setkey(ann,fraction_number) 
+  data_sub_select <- subset(data_filter_ccp_mod,filename %in% ann$filename) 
+  data_sub_select <- merge(data_sub_select,ann, by=c("filename")) 
+  setkey(data_sub_select,fraction_number) 
+  data_sub_select[,fraction_number:=NULL] 
+  traces <- importPCPdata(input_data=data_sub_select,fraction_annotation=ann)
+  return(traces)
+})
+
+
+names(traces_list) = samples
+class(traces_list) <- "tracesList"
+
+
+#' # Annotate traces with information from uniprot
+ 
+pepTraces_raw <- annotateTraces(traces= traces_list,
+                            trace_annotation= traceAnnotation,
+                            traces_id_column = "protein_id",
+                            trace_annotation_id_column = "input_id",
+                            #trace_annotation_mass_column = "Mass",
+                            uniprot_mass_format = TRUE,
+                            replace_whitespace = TRUE)
+
+#' # Annotate traces with molecular weight calibration
+pepTraces_raw <- annotateMolecularWeight(pepTraces_raw,
+                                     calibration)
+
+summary(pepTraces_raw)
+```
+
+
+# 5. QC with CCprofiler
+
+## 5a. alignment
+
+```{r align across all samples}
+
+#' # Assess how well SEC traces align across all samples
+alignTraces(pepTraces_raw, min_lag = -3, max_lag = 3, plot = T, PDF=F) #to save as PDF, set PDF=T
+#' # Assess total intensity as a proxi for extraction efficiency across samples
+plotGlobalIntensities(pepTraces_raw, plot = T, PDF=F)
+```
+
+## 5b. annotateOutlierFractions & impute
+
+```{r}
+if(run_annotateOutlierFractions == T) {
+pepTracesOutlFrac <- annotateOutlierFractions(traces=pepTraces_raw,
+                                              excludeBoarder = T,
+                                              plot = F)
+
+annotateOutlierFractions(traces=pepTraces_raw,
+                         excludeBoarder = T,
+                         plot = TRUE,
+                         PDF = FALSE,
+                         name = "OutlierFractions")
+}
+```
+
+```{r}
+
+if(run_annotateOutlierFractions == F) {
+pepTracesOutlFrac <- lapply(pepTraces_raw, function(lst) {
+  # Add the isOutlier column to the fraction_annotation data frame
+    # Check if 'filename' is in problematic_fractions and create the isOutlier column
+  lst$fraction_annotation$isOutlier <- lst$fraction_annotation$filename %in% problematic_fractions
+  
+  return(lst)
+})
+
+# Reassign the class to "tracesList"
+class(pepTracesOutlFrac) <- class(pepTraces_raw)
+
+# Check the class of the output
+class(pepTracesOutlFrac)
+}
+  
+```
+
+```{r}
+### NB NB NB, use mean, not spline, mean is much better, Benni said :) But there is a bug in the code -> even if you set 'mean', it will go for spline anyway -> fix the bug (Benni already did...)
+
+pepTracesOutlFracImp <- imputeOutlierFractions( traces = pepTracesOutlFrac,
+                                                bound_left = 2,
+                                                bound_right = 2,
+                                                consider_borders = TRUE,
+                                                method = "spline" # mean is also an option
+)
+```
+
+## 5c. general imputation
+
+```{r Find missing values}
+
+  
+#' Find missing values
+#' (defined as having identifications in left and right neigbouring fractions):
+pepTracesMV <- findMissingValues(pepTracesOutlFracImp,
+                                 bound_left = 1,
+                                 bound_right = 1,
+                                 consider_borders = TRUE)
+
+#' Impute NA values by fitting a spline:
+pepTracesImp <- imputeMissingVals(pepTracesMV, method = "spline")
+
+#' Plot imputation summary:
+plotImputationSummary(pepTracesMV, pepTracesImp, PDF = F,
+                      plot_traces = T, max_n_traces = 2)
+
+```
+
+
+
+## 5d. normalization
+
+```{r Normalize intensity values across samples}
+
+if(perform_normalization_cyclicloess==T) {
+# Cache the (~30min) cyclic-loess normalization, same idea as proteinFeatures.RData: if
+# load_normalized.RData is TRUE in SETUP and a previous run saved pepTracesNormalized.RData,
+# load it and skip normalizeByCyclicLoess. Set the flag to F (or delete the file) to force a
+# fresh normalization after changing anything upstream (imputation, filtering, the input data).
+.norm_file <- file.path(out_dir, "rdata", "pepTracesNormalized.RData")
+if (load_normalized.RData && file.exists(.norm_file)) {
+  load(.norm_file)   # restores `pepTracesNormalized` from the previous run
+  message("Loaded cached pepTracesNormalized from ", .norm_file, " (skipped normalizeByCyclicLoess).")
+} else {
+  # Normalize intensity values across samples
+  pepTracesNormalized <- normalizeByCyclicLoess(pepTracesImp, window = 3, step = 1, plot = F)
+  # NOTE: a second, identical normalizeByCyclicLoess() call used to run here purely to "draw a plot"
+  # (plot=T). But the `plot`/`PDF` arguments are ignored inside the function, and the call above
+  # already writes the prior/post-normalization PDFs. That duplicate ran the full (expensive)
+  # normalization a second time for zero extra output, doubling this chunk's runtime — removed.
+  save(pepTracesNormalized, file = .norm_file)
+  message("Saved pepTracesNormalized to ", .norm_file, " (re-runs with load_normalized.RData=T skip normalization).")
+}
+
+#' # Assess total intensity after normalization
+plotGlobalIntensities(pepTracesNormalized, plot = T, PDF=F ) #, name = "IntensitySummary_postNormalization")
+}
+
+
+if(perform_normalization_cyclicloess==F) { pepTracesNormalized <- pepTracesImp}
+
+```
+
+### -Trypsin plot for QC before  and after normalization
+```{r}
+# Trypsin (digestion control) ID differs per dataset (set as trypsin_id in SETUP).
+# Resolve robustly (try trypsin_id, then its CON_/non-CON_ variant) and skip with a
+# message if absent, instead of crashing on an empty traces subset.
+.tryp_ids <- unique(unlist(lapply(pepTraces_raw, function(t) t$trace_annotation$protein_id)))
+.tryp <- intersect(c(trypsin_id, sub("^CON_", "", trypsin_id), paste0("CON_", trypsin_id)), .tryp_ids)
+if (length(.tryp) == 0) {
+  message("Trypsin control '", trypsin_id, "' not found - skipping the trypsin QC plot.")
+} else {
+  .tryp <- .tryp[1]
+  plot(subset(pepTraces_raw,       trace_subset_ids = .tryp, trace_subset_type = "protein_id"),
+       legend = F, design_matrix = design_matrix, name = "Trypsin non-normalized")
+  plot(subset(pepTracesNormalized, trace_subset_ids = .tryp, trace_subset_type = "protein_id"),
+       legend = F, design_matrix = design_matrix, name = "Trypsin normalized")
+}
+```
+
+
+> **Moved:** the exploratory *trypsin-ratio normalization* that was here has been
+> moved to `analysis/experiments.Rmd`. It was an alternative to the normalization
+> above and is **not** used by the main pipeline, which continues from
+> `pepTracesNormalized`.
+
+## - Pep-lvl filtering
+
+```{r}
+#' # Filter by consecutive IDs --> comment out: and peptide correlation--> work with pepTracesConsIds instead of pepTracesSPC
+#'
+# (CCprofiler + fixes are already loaded in section 1; no need to reload here)
+
+# Combine all traces for filtering:
+
+traces_combined <- combineTracesMutiCond(pepTracesNormalized)
+# Filter by consecutive IDs:
+pepTracesConsIds <- filterConsecutiveIdStretches(traces_combined,
+                                                 min_stretch_length = 3,
+                                                 remove_empty = T)
+
+# Filter by maximum correlation for outlier removal:
+pepTracesMaxCorr <- filterByMaxCorr(pepTracesConsIds,
+                                cutoff = 0.8,
+                                plot = T, PDF = F)
+
+# Filter by consecutive SPC:
+# pepTracesSPC <- filterBySibPepCorr(pepTracesMaxCorr,
+#                                    absolute_spcCutoff = 0.6,
+#                                    plot = T, PDF = F)
+```
+
+```{r}
+#' # Subset pepTracesNormalized to valid peptides selected 
+#' by consecutive filtering and SPC cutoff
+validPeps <- unique(pepTracesMaxCorr$trace_annotation$id)
+pepTracesList_filtered <- lapply(pepTracesNormalized, function(x){
+  sub_trace <- subset(x, trace_subset_ids=validPeps)
+  sub_trace$trace_annotation <- sub_trace$trace_annotation# %>% #left_join(select(pepTracesMaxCorr$trace_annotation, id #SibPepCorr), by=join_by(id)) # Inserts the sibling peptide correlation data
+ sub_trace
+})
+class(pepTracesList_filtered) <- "tracesList"
+
+#' Update traces with additional metrics for each fraction:
+pepTracesList_filtered <- updateTraces(pepTracesList_filtered)
+
+#' Inspect traces list:
+summary(pepTracesList_filtered)
+
+```
+
+
+
+## - Global stats
+
+```{r}
+#' # Global stats
+traces_names <- c(
+  "pepTraces_raw",
+  "pepTracesList_filtered"
+)
+
+countDT <- data.table(evidence=character(), sample=character(), count=integer(), traces=character())
+
+for (traces in traces_names) {
+  #traces <- readRDS(paste0(traces_name,".rda"))
+  traces_name <- traces
+  traces <- eval(as.name(traces))
+
+  getIDs <- lapply(traces, function(x){
+    peptides <- unique(x$trace_annotation[grep("DECOY",protein_id, invert = T)]$id)
+    proteins <- unique(x$trace_annotation[grep("DECOY",protein_id, invert = T)]$protein_id)
+    list(peptides=length(peptides),proteins=length(proteins))
+  })
+
+  count_dt <- as.data.table(getIDs)
+  count_dt[, evidence := c("peptides", "proteins")]
+  count_dt <- melt(count_dt, id.vars = "evidence", variable.name = "sample", value.name = "count")
+  count_dt[,traces:=traces_name]
+  count_dt[, count := unlist(count)]
+  countDT <- rbind(countDT,count_dt)
+}
+
+traces_names_dt <- data.table(
+  traces=c("pepTraces_raw",
+           "pepTracesList_filtered"),
+  traces_name=c("raw",
+                "filtered")
+)
+
+countDT <- merge(countDT, traces_names_dt, by="traces")
+
+countDT$traces_name <- factor(countDT$traces_name, levels=traces_names_dt$traces_name)
+
+# write.table(countDT, "traces_stat_counts.txt", sep="t",quote = F, col.names = T, row.names = F)
+# 
+# pdf("traces_stat_counts.pdf",height=9,width=12)
+
+g <- ggplot(countDT,aes(x=traces_name,y=count,fill=evidence, group=sample)) +
+  geom_bar(stat="identity") +
+     geom_label(label = countDT$count) +
+  facet_wrap(sample ~ evidence, scales="free",nrow=3) +
+  scale_fill_manual(values=c("#E69F00", "#56B4E9"))+
+  theme_classic() +
+  theme(legend.position="bottom") + theme(legend.title = element_blank()) +
+  labs(y = "count") +
+  theme(axis.title.x=element_blank()) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) 
+
+print(g)
+
+
+```
+
+
+# 6. Protein quantification
+
+> **Protein quantification.** Builds the protein-level `tracesList` from the
+> filtered peptide traces using the lab "sibling/replicate peptide-correlation"
+> fix (`proteinQuantification_sibPepCorrFix.tracesList`, in
+> `R/ccprofiler_fixes.R`). This is the step that was missing from the original
+> `.Rmd`; **Option A** is the confirmed one, **Option B** is a stock-CCprofiler
+> alternative kept commented for reference.
+
+```{r protein-quantification, message=FALSE, warning=FALSE}
+# Option A (used): lab sibling/replicate peptide-correlation fix
+# (defined in R/ccprofiler_fixes.R). It already returns an object of class "tracesList".
+# NOTE: CCprofiler prints one BENIGN warning per protein that has >1 annotation row
+# ("multiple entries for protein_id ...: . Picking the first") - it only affects
+# which metadata row is kept, not the quantification. suppressWarnings() keeps it
+# from flooding the console/report.
+protein_traces_list <- suppressWarnings(proteinQuantification_sibPepCorrFix.tracesList(
+  pepTracesList_filtered,
+  topN       = 2,
+  keep_less  = FALSE,
+  rm_decoys  = TRUE,
+  quantLevel = "protein_id"
+))
+
+# Option B (alternative): stock CCprofiler protein quantification. Uncomment to use.
+# protein_traces_list <- proteinQuantification(pepTracesList_filtered, topN = 2)
+# class(protein_traces_list) <- "tracesList"
+```
+
+# GLOBAL assembly state
+
+## - Protein Mass distribution
+
+```{r}
+
+# evaluate protein mass distribution
+
+# Attach protein monomer mass (kDa) to the PROTEIN traces from the fresh UniProt fetch. This must
+# happen HERE, not at peptide level: pepTracesNormalized / proteinFeatures are reloaded from cache and
+# still carry the old (NA) protein_mw, so proteinQuantification builds protein_traces_list from that
+# stale annotation. Re-attaching at the protein level with CCprofiler's OWN formula (mass(Da)/1000 kDa,
+# keyed protein_id == input_id) guarantees a correct monomer mass regardless of any upstream cache or
+# fetch/merge quirk, so the assembly split below is meaningful.
+.mw_kda <- setNames(as.numeric(gsub(",", "", as.character(traceAnnotation$Mass))) / 1000,
+                    as.character(traceAnnotation$input_id))
+for (.s in names(protein_traces_list)) {
+  .ta  <- protein_traces_list[[.s]]$trace_annotation
+  .key <- if ("protein_id" %in% names(.ta)) as.character(.ta$protein_id) else as.character(.ta$id)
+  protein_traces_list[[.s]]$trace_annotation[, protein_mw := unname(.mw_kda[.key])]
+}
+message(sprintf("protein_mw attached to protein traces for %.1f%% of proteins (kDa, from UniProt mass).",
+                100 * mean(!is.na(protein_traces_list[[1]]$trace_annotation$protein_mw))))
+
+# Backstop before the assembly split: annotateMassDistribution uses assembly_boundary = 2*protein_mw,
+# so if protein_mw did not attach (missing/NA UniProt mass, or a mass-format parse miss upstream) the
+# result reads as ~0% monomer for every protein. Refuse to compute a meaningless QC.
+.mw_vals    <- unlist(lapply(protein_traces_list, function(t) t$trace_annotation$protein_mw), use.names = FALSE)
+.na_mw_frac <- if (length(.mw_vals)) mean(is.na(.mw_vals)) else 1
+if (.na_mw_frac > 0.9) {
+  stop(sprintf(paste0("protein_mw is NA/absent for %.0f%% of proteins - monomer mass did not attach, so the ",
+                      "assembly state would be meaningless (0%% monomer). Re-fetch UniProt (delete the cached ",
+                      "rdata/uniprot.RData) and re-run; if it persists, check the 'Mass' column and ",
+                      "uniprot_mass_format in the annotateTraces call."), 100 * .na_mw_frac))
+} else if (.na_mw_frac > 0.5) {
+  warning(sprintf("protein_mw is NA for %.0f%% of proteins - the assembly state may be unreliable.", 100 * .na_mw_frac))
+}
+
+protTraces_assembly <- annotateMassDistribution(protein_traces_list)
+
+
+uniqueProteins <- Reduce(intersect, lapply(protTraces_assembly, function(x){x$trace_annotation$id}))
+
+protTraces_assembly <- subset(protTraces_assembly, trace_subset_ids = uniqueProteins)
+
+lapply(names(protTraces_assembly), function(x){
+  summarizeMassDistribution(protTraces_assembly[[x]], 
+                            PDF=F) #,
+                            #name=paste0(here("output_files/massDistribution_",x)))
+  })
+
+```
+
+## - Get assembly changes
+
+```{r}
+n_conditions <- length(unique(design_matrix$Condition))
+
+#create a list of vectors to save the all_proteins_independentOfAssemblyState; proteins_noAssemblyChanges; more_assembled_proteins; less_assembled_proteins; proteins_withAssemblyChanges
+
+all_proteins_independentOfAssemblyState_list <- list()
+proteins_noAssemblyChange_list <- list()
+more_assembled_proteins_list <- list()
+less_assembled_proteins_list <- list()
+proteins_withAssemblyChanges_list <- list()
+  
+
+# compare the treatmets to the ref (the list is specified in the vectors treatment_conditions and ref_condition in the Analysis SETUP section)
+
+# Cache the (slow) assembly test - getMassAssemblyChange runs betareg per protein, so cache it the
+# same way as proteinFeatures/diff: when diffAssemblyState.RData exists and load_proteinFeatures.RData
+# is TRUE, load it and skip the recompute; otherwise compute + save. The categorisation below always
+# re-runs on diffAssemblyState, so the cutoffs stay adjustable without recomputing betareg. Set
+# load_proteinFeatures.RData <- F (or delete the file) to force a fresh assembly test.
+.assembly_file <- file.path(out_dir, "rdata", "diffAssemblyState.RData")
+if (load_proteinFeatures.RData && file.exists(.assembly_file)) {
+  load(.assembly_file)   # restores diffAssemblyState from a previous run
+  message("Loaded cached diffAssemblyState from ", .assembly_file, " (skipped getMassAssemblyChange).")
+} else {
+diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assembly,
+                                             design_matrix= design_matrix,
+                                             compare_between = "Condition",
+                                             quantLevel = "protein_id",
+                                             plot=plot_individual_traces,   # was T; per-protein plots dominate this chunk's runtime
+                                             PDF=F #,
+                                             #name = paste0("beta_pvalue_histogram_"ref_condition,"_",i)
+                                             )
+  save(diffAssemblyState, file = .assembly_file)
+  message("Saved diffAssemblyState to ", .assembly_file, " (re-runs with load_proteinFeatures.RData=T skip getMassAssemblyChange).")
+}
+
+# ---- categorize proteins by assembly change (treatment vs reference) ----
+# FIX: more_assembled_proteins_list / less_assembled_proteins_list were declared
+# above but never populated (that is why they were empty). Populate them here.
+# meanDiff follows $testOrder, and the within-protein sample order can vary, so
+# convert it to a fixed treatment-minus-reference difference => unambiguous sign.
+.treat <- treatment_conditions[1]
+diffAssemblyState[, treat_minus_ref := ifelse(
+  testOrder == paste0(.treat, ".vs.", ref_condition),  meanDiff,
+  ifelse(testOrder == paste0(ref_condition, ".vs.", .treat), -meanDiff, NA_real_))]
+
+assembly_padj_cutoff   <- 0.05   # set to 1 to ignore significance (use effect size only)
+assembly_effect_cutoff <- 0.1    # minimum |change| in assembled-mass fraction
+
+sig_assembly <- diffAssemblyState[!is.na(treat_minus_ref) &
+                                  betaPval_BHadj < assembly_padj_cutoff &
+                                  abs(treat_minus_ref) > assembly_effect_cutoff]
+
+more_assembled_proteins_list      <- sig_assembly[treat_minus_ref > 0]$protein_id  # more assembled in treatment
+less_assembled_proteins_list      <- sig_assembly[treat_minus_ref < 0]$protein_id  # less assembled in treatment
+proteins_withAssemblyChanges_list <- sig_assembly$protein_id
+
+message("Assembly changes (padj < ", assembly_padj_cutoff, ", |delta| > ", assembly_effect_cutoff,
+        "): ", length(more_assembled_proteins_list), " more-assembled, ",
+        length(less_assembled_proteins_list), " less-assembled in ", .treat, " vs ", ref_condition,
+        ". (If both are 0, relax assembly_padj_cutoff/assembly_effect_cutoff above.)")
+
+# Persist the assembly hit-sets so the later cross-metabolite overlap step
+# (scripts/overlap_between_metabolites.R) can load them for every metabolite.
+saveRDS(list(more_assembled = more_assembled_proteins_list,
+             less_assembled = less_assembled_proteins_list,
+             changed        = proteins_withAssemblyChanges_list),
+        file.path(out_dir, "rdata", "assembly_hits.rds"))
+
+```
+
+## - look-up traces of proteins WITH global assembly changes
+
+LET'S have a look at these proteins that change in assembly in at least
+one of the treatments:
+
+```{r, eval=plot_individual_traces}
+ # lookup all the proteins_withAssembly Changes in any of the treatment conditions
+
+
+for(i in filter(diffAssemblyState, betaPval_BHadj < 0.05 & abs(meanDiff) > 0.1)$protein_id){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i)
+} #not saved in the nas
+
+```
+
+```{r filter not by pval, but by the strength of the difference, eval=plot_individual_traces}
+for(i in filter(diffAssemblyState, abs(meanDiff) > 0.1)$protein_id){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i)
+}
+```
+
+
+actually, the other way around => fix this by inverting the factor
+order for ATP and ctrl. Proteins that are LESS assembled
+
+```{r, eval=plot_individual_traces}
+
+#get all the proteins in the list
+all_elements_less_assembled_proteinslist <- unique(unlist(less_assembled_proteins_list))
+
+# lookup all the proteins_withAssembly Changes in any of the treatment conditions
+
+for(i in all_elements_less_assembled_proteinslist){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i) #not saved in the nas
+}
+
+```
+
+Proteins that are MORE assembled
+
+```{r, eval=plot_individual_traces}
+
+#get all the proteins in the list
+all_elements_more_assembled_proteinslist <- unique(unlist(more_assembled_proteins_list))
+
+# lookup all the proteins_withAssembly Changes in any of the treatment conditions
+
+for(i in all_elements_more_assembled_proteinslist){
+  pepTest <- subset(pepTracesList_filtered, trace_subset_ids = i, trace_subset_type = "protein_id")
+  plot(pepTest, design_matrix = design_matrix, log = FALSE, legend = F, PDF=F, name = i) #not saved in the nas
+}
+
+```
+
+`
+
+# DISTINCT assembly state ~ PROTEIN level analysis
+
+### - filter for prot with min N pep
+
+```{r}
+## subset to keep only the proteins with at least 5 precursors 
+pepTracesList_filtered_minN <- subset(pepTracesList_filtered, trace_subset_ids = uniqueProteins, trace_subset_type = "protein_id")
+```
+
+## - performProteinGridSearch
+
+```{r perform_prot_grid_search}
+
+# Reuse a cached grid search if one exists and caching is on (mirrors load_proteinFeatures.RData):
+# performProteinGridSearch is the slow step, and its result (ProtGridSearch.RData) is per-comparison
+# and deterministic (set.seed below), so re-runs of the same metabolite LOAD it instead of recomputing
+# an identical search. Set load_proteinFeatures.RData <- F (or delete the file) to force a fresh search.
+.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")
+.grid_reuse      <- load_proteinFeatures.RData && file.exists(.gridsearch_file)
+if (.grid_reuse) message("Reusing cached grid search from ", .gridsearch_file, " (skipped performProteinGridSearch).")
+
+if(perform_prot_grid_search == T && !.grid_reuse) {
+# NOTE (faithful fix): the original sampled from `pepTracesList_filtered_minN$ctrl_1` and then set
+# `grid_peptideTraces <- grid_peptideTraces$ctrl_1`. This design has NO condition named "ctrl_1"
+# (conditions are strainBY/strainRM/strain31/strain83), so both returned NULL and the search could
+# not run. The real findProteinFeatures call below runs on traces INTEGRATED across all conditions,
+# so the parameter search should use the same kind of object. performProteinGridSearch() wants a
+# single `traces` object (not a tracesList), so: sample 10% of proteins, integrate that subset the
+# same way as the real run, then search on that single integrated object.
+
+# protein universe is identical across list elements; use the first (robust to condition naming)
+.grid_prot_ids <- unique(pepTracesList_filtered_minN[[1]]$trace_annotation$protein_id)
+
+# ---- SPEED CONTROLS -------------------------------------------------------------------------------
+# The grid search is THE slow step: it runs findProteinFeatures once per parameter combination, so
+# cost ~= (#corrs * #windows * #smoothing * #rt_heights) full feature-finding runs, split over cores.
+# The original FULL grid was 3*4*3*3 = 108 runs (~45 min on ~5 cores). Three levers make it faster:
+#   (1) fewer combinations  - biggest effect. The reduced grid below brackets the same ranges and
+#       still INCLUDES the lab's preferred values (corr 0.9, window 7, smoothing 7, rt_height 1),
+#       so the search can still land on them.
+#   (2) more cores          - n_cores below (faster up to #combinations).
+#   (3) smaller subset      - lower grid_subset_fraction (faster but noisier q-values).
+# It also only needs to run ONCE per dataset: afterwards set perform_prot_grid_search <- F to reuse
+# the saved ProtGridSearch.RData instead of recomputing.
+# FLAG: the reduced grid is a handover change, NOT in the original. To restore the exhaustive search,
+# comment the "reduced" block and uncomment the "FULL (original)" block below.
+grid_subset_fraction <- 0.10   # 0.10 = 10% of proteins; try 0.05 to roughly halve the time
+
+# reduced grid (default): 3 * 2 * 2 * 2 = 24 runs
+grid_corrs      <- c(0.75, 0.9, 0.95)   # corr_cutoff - kept at 3 levels (most influential parameter)
+grid_windows    <- c(7, 12)             # window_size      (full grid was 5, 7, 10, 12)
+grid_smoothing  <- c(7, 11)             # smoothing_length (full grid was 7, 9, 11)
+grid_rt_heights <- c(1, 4)              # rt_height        (full grid was 1, 4, 5)
+# FULL (original) grid: 3 * 4 * 3 * 3 = 108 runs - uncomment to restore the exhaustive search:
+# grid_corrs      <- c(0.75, 0.9, 0.95)
+# grid_windows    <- c(5, 7, 10, 12)
+# grid_smoothing  <- c(7, 9, 11)
+# grid_rt_heights <- c(1, 4, 5)
+
+# random subset (seed added for reproducibility - flag: NOT in the original, remove if unwanted)
+set.seed(123)
+num_ids    <- ceiling(length(.grid_prot_ids) * grid_subset_fraction)
+subset_ids <- sample(.grid_prot_ids, num_ids)
+
+grid_subset <- subset(pepTracesList_filtered_minN,
+                        trace_subset_ids = subset_ids,
+                        trace_subset_type = "protein_id")
+
+# integrate the subset across conditions -> single `traces` object (same call as pepTracesIntegrated_sum)
+grid_peptideTraces <- integrateTraceIntensities(grid_subset,
+                                                 design_matrix   = NULL,
+                                                 integrate_within = NULL,
+                                                 aggr_fun        = "sum")
+
+# performProteinGridSearch parallelises over the parameter combinations (n_cores); use up to 8.
+.grid_cores <- parallel::detectCores()
+.grid_cores <- if (is.na(.grid_cores) || .grid_cores < 2L) 1L else min(.grid_cores - 1L, 8L)
+.grid_ncomb <- length(grid_corrs) * length(grid_windows) * length(grid_smoothing) * length(grid_rt_heights)
+message("Grid search: ", .grid_ncomb, " parameter combinations x ", num_ids,
+        " proteins on ", .grid_cores, " core(s). Runs once; then set perform_prot_grid_search <- F to reuse.")
+
+# Wrapped in tryCatch: performProteinGridSearch uses a parallel cluster (snow), and if ANY single
+# parameter combination errors inside CCprofiler (e.g. the "object 'merged' not found" edge case),
+# the whole call aborts. Rather than killing the knit after a long run, fall back to default params.
+proteinFeatures_grid <- tryCatch(
+  performProteinGridSearch(traces     = grid_peptideTraces,
+                           corrs      = grid_corrs,      #corr_cutoff (0.9 for Isabel)
+                           windows    = grid_windows,    #window_size (7 for Isabel)
+                           smoothing  = grid_smoothing,  #smoothing_length (7 for Isabel)
+                           rt_heights = grid_rt_heights, #rt_height (1 for Isabel)
+                           n_cores    = .grid_cores),
+  error = function(e) {
+    message("performProteinGridSearch failed: ", conditionMessage(e))
+    message("  -> skipping parameter tuning; findProteinFeatures below falls back to default params.")
+    message("  -> to pinpoint the offending combination, shrink the grid vectors above or set ",
+            ".grid_cores <- 1L (serial) and re-run this chunk.")
+    NULL
+  }
+)
+
+if (!is.null(proteinFeatures_grid)) lapply(proteinFeatures_grid, head, n = 2) }
+```
+
+```{r proteinFeatures_bestStats}
+# Score the grid, pick the parameter set with the most features at 5% FDR, and expose the winning
+# parameters (best_corr_cutoff / best_window_size / best_smoothing_length / best_rt_height) so the
+# findProteinFeatures call below can USE them. Previously this chunk was eval=FALSE, so its result
+# was never fed forward and the real run used hard-coded parameters regardless of the search.
+
+.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")   # per-comparison (out_dir from SETUP)
+
+if (perform_prot_grid_search == TRUE && exists("proteinFeatures_grid") && !is.null(proteinFeatures_grid)) {
+  # scoring wrapped too: if the grid ran but scoring/q-value estimation fails, don't kill the knit
+  tryCatch({
+    proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
+    proteinFeatures_qvalueData <- lapply(proteinFeatures_scoredData, calculateQvalue, plot = FALSE)
+    proteinFeatures_stats      <- qvaluePositivesPlotGrid(proteinFeatures_qvalueData)
+    proteinFeatures_bestStats  <- getBestQvalueParameters(proteinFeatures_stats, FDR_cutoff = 0.05)
+    print(proteinFeatures_bestStats)
+    save(proteinFeatures_grid, proteinFeatures_bestStats, file = .gridsearch_file)
+  }, error = function(e)
+    message("Grid scoring failed (", conditionMessage(e), "); findProteinFeatures will use defaults."))
+} else if (file.exists(.gridsearch_file)) {
+  load(.gridsearch_file)   # reuse a previous run's saved best parameters
+} else {
+  message("No grid-search results available - findProteinFeatures will fall back to default parameters.")
+}
+# (to reuse a pre-computed search instead, point .gridsearch_file at e.g. ProtGridSearch_fromJP02.RData)
+
+# --- pull the winning parameters out of bestStats, defensively --------------------------------------
+# getBestQvalueParameters() returns a single row; CCprofiler has named these columns slightly
+# differently across versions, so look each one up under its known aliases and fall back to the
+# Isabel/PPlab defaults (= the values previously hard-coded below) if a column or the whole object is
+# missing. This keeps the run alive even if the grid search produced nothing usable.
+.bs <- if (exists("proteinFeatures_bestStats")) proteinFeatures_bestStats else NULL
+
+.gridParam <- function(stats, aliases, default) {
+  if (is.null(stats) || nrow(stats) == 0) return(default)
+  hit <- intersect(aliases, colnames(stats))
+  if (length(hit) == 0) return(default)
+  val <- stats[[hit[1]]][1]
+  if (length(val) == 0 || is.na(val)) default else val
+}
+
+best_corr_cutoff      <- .gridParam(.bs, c("corr", "corr_cutoff"),           0.85)
+best_window_size      <- .gridParam(.bs, c("window", "window_size"),         7)
+best_smoothing_length <- .gridParam(.bs, c("smoothing_length", "smoothing"), 3)
+best_rt_height        <- .gridParam(.bs, c("rt_height", "rt_heights"),       1)
+
+message("findProteinFeatures will use: corr_cutoff = ", best_corr_cutoff,
+        ", window_size = ", best_window_size,
+        ", smoothing_length = ", best_smoothing_length,
+        ", rt_height = ", best_rt_height,
+        if (perform_prot_grid_search) "  (chosen by grid search)" else "  (loaded / default)")
+
+# Persist the chosen parameters to a small human-readable file so they survive after the console
+# scrolls (the message above is console-only). Lands in output/<comparison_id>/output_files/.
+writeLines(c(
+  paste0("findProteinFeatures parameters | comparison_id = ", comparison_id),
+  paste0("source           = ", if (perform_prot_grid_search) "grid search" else "loaded / default"),
+  paste0("corr_cutoff      = ", best_corr_cutoff),
+  paste0("window_size      = ", best_window_size),
+  paste0("smoothing_length = ", best_smoothing_length),
+  paste0("rt_height        = ", best_rt_height),
+  paste0("written          = ", format(Sys.time()))
+), file.path(output_files_location, "grid_best_params.txt"))
+
+```
+
+## - findProteinFeatures
+
+```{r}
+#' # Integrate peptide traces across conditions 
+# per each oe 
+pepTracesIntegrated_sum <- integrateTraceIntensities(pepTracesList_filtered_minN,
+                                                     design_matrix = NULL,
+                                                     integrate_within = NULL,
+                                                     aggr_fun = "sum")
+
+#' # Perform protein-centric analysis
+# Suppress messages for clarity
+
+# Guard: if the grid-search chunks above were skipped entirely, set best_* to the original defaults
+# so this call still runs (normally best_* come from the proteinFeatures_bestStats chunk).
+if (!exists("best_corr_cutoff"))      best_corr_cutoff      <- 0.85
+if (!exists("best_window_size"))      best_window_size      <- 7
+if (!exists("best_smoothing_length")) best_smoothing_length <- 3
+if (!exists("best_rt_height"))        best_rt_height        <- 1
+
+# findProteinFeatures is already parallelised; use up to 6 cores but never oversubscribe a smaller
+# machine (each worker copies the traces, so too many cores on a laptop causes memory thrash and can
+# be SLOWER, not faster). Raise the cap below if you are on a big-memory workstation.
+.pf_cores <- parallel::detectCores()
+.pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 12L)
+
+# Skip the (slow ~1h) findProteinFeatures if a previous run already saved proteinFeatures.RData
+# AND load_proteinFeatures.RData is TRUE in the SETUP chunk. Set it back to F to force a fresh run.
+.pf_file <- file.path(out_dir, "rdata", "proteinFeatures.RData")
+if (load_proteinFeatures.RData && file.exists(.pf_file)) {
+  load(.pf_file)   # restores `proteinFeatures` from the previous run
+  message("Loaded cached proteinFeatures from ", .pf_file, " (skipped findProteinFeatures).")
+} else {
+suppressMessages(
+  proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
+                                          corr_cutoff      = best_corr_cutoff,      # grid search (default 0.85)
+                                          window_size      = best_window_size,      # grid search (default 7)
+                                          parallelized     = T,
+                                          n_cores          = .pf_cores,
+                                          collapse_method  = "apex_only",
+                                          perturb_cutoff   = "5%",
+                                          rt_height        = best_rt_height,        # grid search (default 1)
+                                          smoothing_length = best_smoothing_length  # grid search (default 3)
+
+)
+)
+}
+
+# --- OPTIONAL: alternative-parameter exploration runs (DISABLED by default) -----------------------
+# The three findProteinFeatures calls below re-run feature finding at lower corr_cutoff (0.7 / 0.5 /
+# 0.4). They are NOT used anywhere downstream (parameter-exploration leftovers), and the low cutoffs
+# make them VERY slow - the 0.4/0.5 runs dominate runtime and are what made this chunk run overnight.
+# Set explore_alt_params <- TRUE only if you specifically want to inspect these alternatives.
+explore_alt_params <- FALSE
+if (explore_alt_params) {
+
+suppressMessages(
+  proteinFeatures_0p7_corr_cutoff <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
+                                          corr_cutoff = 0.7, # 0.9,
+                                          window_size = 7,# 7,
+                                          parallelized = T,
+                                          n_cores = 6,
+                                          collapse_method = "apex_only",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1, #1,
+                                          smoothing_length = 3 #7)
+
+)
+)
+
+suppressMessages(
+  proteinFeatures_0p5_corr_cutoff_winsize5 <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
+                                          corr_cutoff = 0.5, # 0.9,
+                                          window_size = 5,# 7,
+                                          parallelized = T,
+                                          n_cores = 6,
+                                          collapse_method = "apex_only",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1, #1,
+                                          smoothing_length = 3 #7)
+
+)
+)
+
+suppressMessages(
+  proteinFeatures_0p4_corr_cutoff_winsize5 <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
+                                          corr_cutoff = 0.4, # 0.9,
+                                          window_size = 5,# 7,
+                                          parallelized = T,
+                                          n_cores = 6,
+                                          collapse_method = "apex_only",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1, #1,
+                                          smoothing_length = 3 #7)
+
+)
+)
+
+
+} # end if (explore_alt_params) -- alt-parameter comparison runs, off by default
+
+save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
+
+#' Score protein features and filter for a detection FDR of 5%
+proteinFeaturesFiltered <- scoreFeatures(proteinFeatures, FDR=0.05, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
+
+#' Evaluate protein feature stats
+summarizeFeatures(proteinFeaturesFiltered,
+                  plot=TRUE,
+                  PDF = F)
+                  # PDF=TRUE,
+                  # name="output_files/feature_summary_proteinFeaturesFiltered")
+
+#' ## Extract feature values
+proteinFeaturesFiltered_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
+                                             features = proteinFeaturesFiltered,
+                                             design_matrix = design_matrix,
+                                             extract = "subunits_detected",
+                                             imputeZero = T,
+                                             verbose = F)
+
+
+#' ## Fill feature values
+proteinFeaturesFiltered_featureValsFilled <- fillFeatureVals(featureVals = proteinFeaturesFiltered_featureVals,
+                                                tracesList = pepTracesList_filtered_minN,
+                                                design_matrix = design_matrix)
+
+proteinFeaturesFiltered_0p15featurefdr <- scoreFeatures(proteinFeatures, FDR=0.15, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
+
+#' Evaluate protein feature stats
+summarizeFeatures(proteinFeaturesFiltered_0p15featurefdr,
+                  plot=TRUE,
+                  PDF = F)
+                  # PDF=TRUE,
+                  # name="output_files/feature_summary_proteinFeaturesFiltered")
+
+#' ## Extract feature values
+proteinFeaturesFiltered_featureVals_0p15featurefdr <- extractFeatureVals(traces = pepTracesList_filtered_minN,
+                                             features = proteinFeaturesFiltered_0p15featurefdr,
+                                             design_matrix = design_matrix,
+                                             extract = "subunits_detected",
+                                             imputeZero = T,
+                                             verbose = F)
+
+
+#' ## Fill feature values
+proteinFeaturesFiltered_featureValsFilled_0p15featurefdr <- fillFeatureVals(featureVals = proteinFeaturesFiltered_featureVals_0p15featurefdr,
+                                                tracesList = pepTracesList_filtered_minN,
+                                                design_matrix = design_matrix)
+
+# save(proteinFeaturesFiltered_featureVals, proteinFeaturesFiltered_featureValsFilled, file = "Anna_proteinFeaturesFiltered_featureValsFilled.RData")
+
+
+```
+
+## - differential analysis
+
+2 conditions, pairwise. NOTE: this is **not** a 1-replicate-only test -
+testDifferentialExpression_beniFix() adapts to the number of replicates in
+design_matrix: with >= 2 replicates it runs a Welch two-sample t-test across
+replicates; with only 1 replicate it falls back to a fraction-wise t-test within
+each feature. The chunk below prints which path is taken. (R/ccprofiler_fixes.R, Section D.)
+
+" Differential analysis is performed in 5 steps: (i)
+Peptide-levelintensities are computed for each protein feature and
+sample.Missing values in single fractions, replicates, or conditions
+areimputed by uniformly sampling values between zero and theminimum
+detected signal of a peptide. The peptide intensity ofone feature is
+then calculated by summing the intensities of allfractions across the
+corresponding protein feature range. (ii)The mean intensity across all
+replicates within a condition(specified by the design matrix) is
+calculated. (iii) The log2-fold-change between conditions is calculated
+based on themean feature intensities. (iv) If replicates are available,
+p-values are estimated by comparing the summed intensities across
+conditions by a non paired t test. If no replicates are
+available,p-values are estimated by comparing each fraction within a
+feature by a paired t test across the conditions. (v) To subsequently
+derive protein-level information, the peptide-level tests are aggregated
+as follows: (1) protein log2-fold-changesare derived from the median
+log-2-fold change across alldetected peptides of the protein, and (2)
+protein p-values are estimated by determining the fold-change adjusted
+median p-value and applying a beta distribution as described by Teo
+etal.43 and Suomi et al.44 (for details see the methods section). (vi)
+Multiple testing correction is performed by Benjamini-Hochberg
+adjustment of the protein-level p-values
+
+```{r diff}
+
+# Report which differential test will run: the function branches on the replicate count in
+# design_matrix (the same check it uses internally), so this prints the actual path taken.
+.n_rep <- length(unique(design_matrix$Replicate))
+message("Differential test: ", .n_rep, " replicate(s) in design_matrix -> ",
+        if (.n_rep > 1) "Welch two-sample t-test across replicates (replicate-based)."
+        else "fraction-wise t-test within each feature (1-replicate fallback; global p-values = 1).")
+          
+.diff_file <- file.path(out_dir, "rdata", "protein_DiffExpr_all.RData")
+if (load_protein_DiffExprPep_and_Protein && file.exists(.diff_file)) {
+  load(.diff_file)   # restores the four protein_DiffExpr* objects saved by a previous run
+  message("Loaded cached differential-test results from ", .diff_file, " (skipped the diff test; set load_protein_DiffExprPep_and_Protein <- F to recompute).")
+} else {
+            #' ## Perform peptide-level differential expression testing for all features
+          
+            protein_DiffExprPep <- testDifferentialExpression_beniFix(featureVals = proteinFeaturesFiltered_featureValsFilled,
+                                                              compare_between = "Condition",
+                                                              level = "peptide",
+                                                              measuredOnly = FALSE) #also considers the imputed fractions
+            # Append the df to the list
+
+          
+            
+            #' ## Aggregate differential expression results to the protein level
+            protein_DiffExprProtein <- aggregatePeptideTests(protein_DiffExprPep) 
+            
+            protein_DiffExprPep_0p15featurefdr <- testDifferentialExpression_beniFix(featureVals = proteinFeaturesFiltered_featureValsFilled_0p15featurefdr,
+                                                              compare_between = "Condition",
+                                                              level = "peptide",
+                                                              measuredOnly = FALSE) #also considers the imputed fractions
+            # Append the df to the list
+
+          
+            
+            #' ## Aggregate differential expression results to the protein level
+            protein_DiffExprProtein_0p15featurefdr <- aggregatePeptideTests(protein_DiffExprPep_0p15featurefdr) 
+            
+protein_DiffExprProtein <- protein_DiffExprProtein %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
+
+protein_DiffExprProtein_0p15featurefdr <- protein_DiffExprProtein_0p15featurefdr %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
+          
+  save(protein_DiffExprPep, protein_DiffExprProtein, protein_DiffExprPep_0p15featurefdr, protein_DiffExprProtein_0p15featurefdr, file = .diff_file)
+  message("Saved differential-test results to ", .diff_file, " (re-runs with load_protein_DiffExprPep_and_Protein = T skip the diff test).")
+}
+save(protein_DiffExprPep, file = file.path(out_dir, "rdata", "protein_DiffExprPep_list.RData"))
+save(protein_DiffExprProtein, file = file.path(out_dir, "rdata", "protein_DiffExprProtein_list.RData"))
+# save.image(file = file.path(out_dir, "rdata", "workspace_image.RData"))  # DISABLED: redundant full-workspace dump (all key objects are saved individually); large & slow. Uncomment only for a full-session checkpoint.
+
+```
+
+Global differential assessment:
+
+In addition to the feature-specific differential analysis, global
+differential assessment is performed by comparing integrated intensities
+across the entire fractionation dimension, instead of restricting the
+analysis to a feature-specific range. The same strategies as for
+feature-specific estimation of log2-fold-changes and p-values are
+performed. To assess whether the signal within a protein feature is
+changing because of a global change in the protein’s expression or due
+to a rearrangement of the proteins relative distribution across
+different assembly states,an additional analysis step is available in
+CCprofiler. Here, the relative feature-specific mass fraction (FMF) is
+estimated by the fraction of the detected MS signal in the
+feature-specific mass range relative to the total detected signal: FMF =
+sum(intensity features)/sum(intensity global) A change in FMF is
+subsequently estimated by the difference in the mean FMF across
+conditions diffFMF= mean(FMF condA) - mean (FMF condB)
+
+... check the paper for full explanation of the steps
+<https://pubs.acs.org/doi/epdf/10.1021/acs.jproteome.3c00125?ref=article_openPDF>
+
+A significant change in the FMF across conditions indicates that the
+protein’s relative contribution to different distinct assembly states
+has changed across the conditions, thus providing insights into protein
+rewiring, which is not observable by global proteome analyses. In
+contrast to complex-centric analyses, described in the following
+section, protein-centric differential analysis enables the assessment of
+changes in distinct protein assembly states independent of the actual
+knowledge of the protein’s exact interaction partners
+
+## - volcano plots and save lists
+
+```{r volcano plots}
+library(data.table)
+
+#create unique df - keep as data.table
+combined_protein_DiffExprPep_list <- unique(protein_DiffExprPep)
+
+combined_protein_DiffExprProtein_list <- unique(protein_DiffExprProtein)
+
+comparison_level <- unique(combined_protein_DiffExprPep_list$testOrder) 
+
+# create vector list to append to
+diffProteins_list <- list()
+diffProteins_onlypadj_list <- list()
+diffProteins_global_list <- list()
+
+#' # Make volcano plots
+for (i in comparison_level) {
+  
+  # Keep as data.table for plotVolcano compatibility
+  protein_DiffExprPep_i <- combined_protein_DiffExprPep_list[testOrder == i]
+  protein_DiffExprProtein_i <- combined_protein_DiffExprProtein_list[testOrder == i]
+  
+  #' General volcano plots - local
+  plotVolcano(protein_DiffExprPep_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2,  
+              name = file.path(output_files_location, paste0("pep_", i)))
+  plotVolcano(protein_DiffExprProtein_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
+              name = file.path(output_files_location, paste0("prot_", i)))
+  plotVolcano(protein_DiffExprProtein_i, PDF = F, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
+              name = paste0("prot_", i)) #to see here
+  
+  #' global
+  plotVolcano(protein_DiffExprPep_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
+              level = "global", name = file.path(output_files_location, paste0("global_pep_", i)))
+  plotVolcano(protein_DiffExprProtein_i, PDF = T, pBHadj_cutoff = 0.05, FC_cutoff = 2, 
+              level = "global", name = file.path(output_files_location, paste0("global_prot_", i)))
+  
+  #' Get different proteins - using data.table syntax
+  diffProteins_i <- unique(protein_DiffExprProtein_i[pBHadj < 0.05 & abs(medianLog2FC) > 1]$feature_id)
+  
+  diffProteins_i_onlypadj <- unique(protein_DiffExprProtein_i[pBHadj < 0.05]$feature_id)
+  
+  #save data
+  write.table(diffProteins_i, file.path(output_files_location, paste0("diffProteins_", i, ".txt")),
+              sep = "\t", quote = F, row.names = F, col.names = F)
+  write.table(diffProteins_i_onlypadj, file.path(output_files_location, paste0("diffProteins_onlypadj_", i, ".txt")),
+              sep = "\t", quote = F, row.names = F, col.names = F)
+  
+  diffProteins_global_i <- unique(protein_DiffExprProtein_i[global_pBHadj < 0.05 & abs(global_medianLog2FC) > 1]$feature_id)
+  
+  #save data
+  write.table(diffProteins_global_i, file.path(output_files_location, paste0("diffProteins_global_", i, ".txt")),
+              sep = "\t", quote = F, row.names = F, col.names = F)
+  
+  #' Volcano plots highlighting different Proteins          
+  highlight_protein <- diffProteins_i
+  plotVolcano(protein_DiffExprProtein_i, highlight = highlight_protein, 
+              PDF = F, pBHadj_cutoff = 0.05)
+  
+  #append to the list
+  diffProteins_list[[i]] <- diffProteins_i
+  diffProteins_onlypadj_list[[i]] <- diffProteins_i_onlypadj
+  diffProteins_global_list[[i]] <- diffProteins_global_i
+}
+
+```
+
+## - per-replicate view + GO enrichment of the significant hits
+
+Added for the handover. For the significant differential proteins of each comparison this shows
+(1) a **per-replicate** view of feature intensity - one point per biological replicate, i.e. exactly
+the spread the replicate-based t-test uses (ties back to the variance question) - and (2) a **GO
+over-representation** bar plot. The GO test is a plain hypergeometric test on the `go_p`/`go_f`/`go_c`
+annotations already fetched by `fetch_uniprot`, so it needs no extra packages and runs offline.
+
+```{r sig_hits_perReplicate_and_GO, fig.width=9, fig.height=6}
+# ---- controls --------------------------------------------------------------------------------
+sig_source   <- diffProteins_list   # local, padj<0.05 AND |log2FC|>1 (= diffProteins_<cmp>.txt).
+                                     # alternatives: diffProteins_onlypadj_list / diffProteins_global_list
+go_column    <- "go_p"              # GO to test: "go_p" (process) / "go_f" (function) / "go_c" (component)
+go_min_genes <- 2                   # min significant proteins per GO term to report
+go_top_n     <- 15                  # number of top enriched terms to plot
+max_facets   <- 24                  # cap on per-replicate protein panels (most significant first)
+
+.featVals <- as.data.table(proteinFeaturesFiltered_featureValsFilled)
+.protRes  <- as.data.table(protein_DiffExprProtein)
+
+for (cmp in comparison_level) {
+
+  prot_cmp <- .protRes[testOrder == cmp]
+  sig_ids  <- unique(sig_source[[cmp]]); sig_ids <- sig_ids[!is.na(sig_ids)]
+  if (length(sig_ids) == 0) { message("[", cmp, "] no significant hits - skipping."); next }
+  if ("pBHadj" %in% names(prot_cmp))                       # order by significance when available
+    sig_ids <- unique(prot_cmp[feature_id %in% sig_ids][order(pBHadj)]$feature_id)
+  message("[", cmp, "] ", length(sig_ids), " significant proteins.")
+
+  ## (1) per-replicate summed feature intensity (one point = one biological replicate) -----------
+  per_rep <- tryCatch(
+    .featVals[feature_id %in% sig_ids,
+              .(feature_intensity = sum(intensity, na.rm = TRUE)),
+              by = .(feature_id, Condition, Replicate)],
+    error = function(e) { message("  per-replicate table failed: ", conditionMessage(e)); NULL })
+
+  if (!is.null(per_rep) && nrow(per_rep) > 0) {
+    ord <- sig_ids[sig_ids %in% per_rep$feature_id]
+    if (length(ord) > max_facets) {
+      message("  per-replicate: showing the ", max_facets, " most significant of ", length(ord), ".")
+      ord <- ord[seq_len(max_facets)]
+    }
+    pr <- per_rep[feature_id %in% ord]; pr[, feature_id := factor(feature_id, levels = ord)]
+    print(ggplot(pr, aes(Condition, feature_intensity)) +
+            geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+            geom_point(aes(colour = factor(Replicate)),
+                       position = position_jitter(width = 0.12, height = 0), size = 1.6) +
+            scale_y_log10() + facet_wrap(~ feature_id, scales = "free_y") +
+            labs(title = paste0("Per-replicate feature intensity - ", cmp),
+                 y = "summed feature intensity (log10)", colour = "Replicate") +
+            theme_bw() + theme(axis.text.x = element_text(angle = 30, hjust = 1)))
+    per_rep_summary <- per_rep[, .(n_rep = .N,
+                                   mean_intensity = mean(feature_intensity, na.rm = TRUE),
+                                   cv_percent = 100 * sd(feature_intensity, na.rm = TRUE) /
+                                                mean(feature_intensity, na.rm = TRUE)),
+                               by = .(feature_id, Condition)]
+    fwrite(per_rep_summary,
+           file.path(output_files_location, paste0("perReplicate_summary_", cmp, ".txt")), sep = "\t")
+  }
+
+  ## (2) GO over-representation (hypergeometric): significant hits vs all tested proteins ---------
+  go_tbl <- tryCatch({
+    bg <- unique(prot_cmp[, .(feature_id, go = get(go_column))])
+    bg <- bg[!is.na(go) & nzchar(go)]
+    if (nrow(bg) < 5) stop("too few annotated background proteins")
+    pt <- bg[, .(term = trimws(unlist(strsplit(go, ";")))), by = feature_id][nzchar(term)]
+    N  <- length(unique(pt$feature_id))                                  # annotated background
+    n  <- length(unique(pt$feature_id[pt$feature_id %in% sig_ids]))      # annotated foreground
+    if (n < go_min_genes) stop("too few annotated significant proteins")
+    ts <- pt[, .(K = uniqueN(feature_id),
+                 k = uniqueN(feature_id[feature_id %in% sig_ids])), by = term][k >= go_min_genes]
+    if (nrow(ts) == 0) stop("no GO term reaches go_min_genes significant proteins")
+    ts[, pval := phyper(k - 1, K, N - K, n, lower.tail = FALSE)]         # P(overlap >= k)
+    ts[, padj := p.adjust(pval, method = "BH")]
+    ts <- ts[order(padj, -k)][seq_len(min(go_top_n, .N))]
+    fwrite(ts, file.path(output_files_location, paste0("GOenrichment_", go_column, "_", cmp, ".txt")),
+           sep = "\t")
+    ts
+  }, error = function(e) { message("  GO enrichment skipped: ", conditionMessage(e)); NULL })
+
+  if (!is.null(go_tbl) && nrow(go_tbl) > 0) {
+    go_tbl[, term_short := ifelse(nchar(term) > 60, paste0(substr(term, 1, 57), "..."), term)]
+    print(ggplot(go_tbl, aes(reorder(term_short, -padj), -log10(padj), fill = k)) +
+            geom_col() + coord_flip() +
+            geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey50") +
+            labs(title = paste0("GO ", go_column, " enrichment - ", cmp, " (", length(sig_ids), " hits)"),
+                 x = NULL, y = "-log10(BH-adjusted p)", fill = "n hits") +
+            theme_bw())
+  }
+}
+```
+
+```{r compare local vs global}
+
+#### local vs global
+
+# FIX: `Sample_id_treat` was never defined (undefined in the original too), so this chunk errored.
+# It also filtered the sample-level `Sample` column (values like "strain31_1") against `ref_condition`,
+# which is a CONDITION label ("strainBY"), so reference rows never matched. Reconstructed at the
+# CONDITION level: iterate the treatment condition(s) and compare each to the reference condition
+# (testLocalVsGlobal groups by Condition anyway). FLAG: reconstruction of broken original code -
+# tell me if you actually meant a per-sample comparison.
+Sample_id_treat <- treatment_conditions   # condition label(s), e.g. "strain31" (name kept for the loop)
+
+# SPEED NOTE: testLocalVsGlobal is a CCprofiler PACKAGE function, so it can't be parallelised from
+# here. These loops run only ~once (one treatment condition x one comparison), so the multi-hour
+# runtime was entirely inside a single testLocalVsGlobal call with plot = TRUE, which renders ONE plot
+# per feature - that is the whole cost (the test itself is fast) - and the result was never used
+# (everything below was commented). Fix: plot = FALSE, and STORE the result so the chunk is useful.
+local_vs_global_list     <- list()   # raw per-feature local-vs-global test table
+local_vs_global_sig_list <- list()   # significant local-vs-global protein ids
+for(i in Sample_id_treat) {
+            
+          sample_vector <- c(i, ref_condition) 
+          
+          #filter for just 0- and condition x
+          proteinFeaturesFiltered_featureValsFilled_i <- proteinFeaturesFiltered_featureValsFilled %>%
+            filter(Condition %in% sample_vector) %>%
+            mutate(Condition = factor(Condition, levels = sample_vector)) %>%
+            arrange(Condition)
+
+  for(cond in diffProteins_list){
+  
+   testFilled_norm <- proteinFeaturesFiltered_featureValsFilled_i[feature_id %in% cond]
+
+  local_vs_global_test <- testLocalVsGlobal_fix(featureVals = testFilled_norm,
+                                                compare_between = "Condition",
+                                                design_matrix = design_matrix,  # explicit (was a global the pkg fn couldn't see under render)
+                                                plot = FALSE)  # was TRUE: 1 plot/feature was the entire bottleneck
+  local_vs_global_list[[length(local_vs_global_list) + 1L]] <- local_vs_global_test
+  # aggregate to protein level + keep the significant local-vs-global proteins (a feature-specific vs
+  # global change = assembly-state rearrangement). Wrapped: aggregateLocalVsGlobal is a package fn.
+  lvg_sig <- tryCatch(
+    unique(as.data.table(aggregateLocalVsGlobal(local_vs_global_test))[pBHadj < 0.05 & abs(medianDiff) > 0.3]$feature_id),
+    error = function(e) { message("  aggregateLocalVsGlobal skipped: ", conditionMessage(e)); NULL })
+  if (!is.null(lvg_sig)) {
+    local_vs_global_sig_list[[length(local_vs_global_sig_list) + 1L]] <- lvg_sig
+    message("Local-vs-global: ", length(lvg_sig), " proteins with a significant shift.")
+  }
+  
+  # local_vs_global_test_protein <- aggregateLocalVsGlobal(local_vs_global_test)
+  # 
+  # local_vs_global_test_sig <- unique(local_vs_global_test_protein[pBHadj<0.05][abs(medianDiff) > 0.3]$feature_id)
+  # 
+  # 
+  # #plot
+  # for (id in local_vs_global_test_sig) {
+  #   plotFeatures(feature_table = proteinFeaturesFiltered,
+  #                traces = pepTracesList_filtered_minN,
+  #                feature_id = id,
+  #                design_matrix=sub_design_matrix,
+  #                calibration=calibration,
+  #                peak_area = T,
+  #                legend = F,
+  #                onlyBest = F,
+  #                monomer_MW=T,
+  #                aggregateReplicates=F)
+  # }
+  }
+}
+
+saveRDS(local_vs_global_list,     file.path(out_dir, "rdata", "local_vs_global_list.rds"))
+saveRDS(local_vs_global_sig_list, file.path(out_dir, "rdata", "local_vs_global_sig_list.rds"))
+```
+
+## - GO enrichment: assembly-change proteins & local-vs-global hits
+
+GO over-representation (same offline hypergeometric test as the volcano-hits chunk) for two more
+hit sets: the assembly-change proteins (more- / less- / any-assembled) and the significant
+local-vs-global proteins. Uses the go_p/go_f/go_c annotations already fetched by fetch_uniprot;
+background = the relevant tested universe (assembly-tested proteome / differential proteome).
+
+```{r go_assembly_and_localglobal, fig.width=9, fig.height=6}
+go_column    <- "go_p"   # GO to test: "go_p" (process) / "go_f" (function) / "go_c" (component)
+go_min_genes <- 2        # min hit proteins per GO term
+go_top_n     <- 15       # top terms to plot
+
+# reusable, offline GO over-representation (hypergeometric) helper -----------------------------------
+go_enrichment <- function(foreground, background, annotation,
+                          id_col = "accession", go_col = "go_p", min_genes = 2, top_n = 15) {
+  fg <- unique(stats::na.omit(unlist(foreground)))
+  bg <- unique(stats::na.omit(unlist(c(background, fg))))          # foreground must sit inside background
+  if (length(fg) < min_genes || length(bg) < 5) return(NULL)
+  am <- as.data.table(as.data.frame(annotation)[, c(id_col, go_col)])
+  setnames(am, c(id_col, go_col), c("pid", "goann"))
+  am <- unique(am[pid %in% bg & !is.na(goann) & nzchar(goann)])
+  if (nrow(am) == 0) return(NULL)
+  pt <- am[, .(term = trimws(unlist(strsplit(goann, ";")))), by = pid][nzchar(term)]
+  N  <- uniqueN(pt$pid); n <- uniqueN(pt$pid[pt$pid %in% fg])      # annotated background / foreground
+  if (n < min_genes) return(NULL)
+  ts <- pt[, .(K = uniqueN(pid), k = uniqueN(pid[pid %in% fg])), by = term][k >= min_genes]
+  if (nrow(ts) == 0) return(NULL)
+  ts[, pval := phyper(k - 1, K, N - K, n, lower.tail = FALSE)]     # P(overlap >= k)
+  ts[, padj := p.adjust(pval, method = "BH")]
+  ts[order(padj, -k)][seq_len(min(top_n, .N))]
+}
+go_barplot <- function(go_tbl, title) {
+  if (is.null(go_tbl) || nrow(go_tbl) == 0) return(invisible(NULL))
+  gt <- copy(go_tbl); gt[, term_short := ifelse(nchar(term) > 60, paste0(substr(term, 1, 57), "..."), term)]
+  ggplot(gt, aes(reorder(term_short, -padj), -log10(padj), fill = k)) +
+    geom_col() + coord_flip() +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey50") +
+    labs(title = title, x = NULL, y = "-log10(BH-adjusted p)", fill = "n hits") + theme_bw()
+}
+# run + plot + save one hit set
+.run_go <- function(fg, bg, tag) {
+  fg <- unique(stats::na.omit(unlist(fg)))
+  if (length(fg) < go_min_genes) { message("[", tag, "] < ", go_min_genes, " proteins - skipping GO."); return(invisible(NULL)) }
+  gt <- tryCatch(go_enrichment(fg, bg, uniprot, "accession", go_column, go_min_genes, go_top_n),
+                 error = function(e) { message("[", tag, "] GO failed: ", conditionMessage(e)); NULL })
+  if (is.null(gt) || nrow(gt) == 0) { message("[", tag, "] no enriched GO terms."); return(invisible(NULL)) }
+  fwrite(gt, file.path(output_files_location, paste0("GOenrichment_", go_column, "_", tag, ".txt")), sep = "\t")
+  print(go_barplot(gt, paste0("GO ", go_column, " - ", tag, " (", length(fg), " proteins)")))
+}
+
+# ---- assembly-change proteins (background = all assembly-tested proteins) ----
+if (exists("diffAssemblyState")) {
+  .assembly_bg <- unique(as.data.table(diffAssemblyState)$protein_id)
+  if (exists("more_assembled_proteins_list"))      .run_go(more_assembled_proteins_list,      .assembly_bg, "moreAssembled")
+  if (exists("less_assembled_proteins_list"))      .run_go(less_assembled_proteins_list,      .assembly_bg, "lessAssembled")
+  if (exists("proteins_withAssemblyChanges_list")) .run_go(proteins_withAssemblyChanges_list, .assembly_bg, "assemblyChanged")
+} else message("diffAssemblyState not found - skipping assembly GO enrichment.")
+
+# ---- significant local-vs-global proteins (background = full differential proteome) ----
+if (exists("local_vs_global_sig_list") && length(local_vs_global_sig_list) > 0) {
+  .lvg_bg <- unique(as.data.table(protein_DiffExprProtein)$feature_id)
+  .lvg_nms <- names(local_vs_global_sig_list)
+  for (nm in seq_along(local_vs_global_sig_list)) {
+    tag <- paste0("localVsGlobal_", if (!is.null(.lvg_nms)) .lvg_nms[nm] else nm)
+    .run_go(local_vs_global_sig_list[[nm]], .lvg_bg, tag)
+  }
+} else message("local_vs_global_sig_list empty/not found - skipping local-vs-global GO enrichment.")
+```
+
+
+# COMPLEX level analysis
+
+```{r, eval=run_complex_analysis}
+# Complex Portal reference table for this organism. The filename is set once in
+# the SETUP section via `complex_portal_file` (this branch: S. cerevisiae,
+# taxid 559292). Place that file in data/raw/. (Original sep was 't', a stray
+# character; corrected to "\t".)
+complex_portal <- read.csv(here("data", "raw", complex_portal_file), sep = "\t", header = TRUE) %>%
+  janitor::clean_names() 
+```
+
+## - set hypothesis
+
+```{r, eval=run_complex_analysis}
+# set hypothesis
+
+complexHypotheses <- complex_portal %>%
+  dplyr::select(x_complex_ac, recommended_name, aliases_for_complex, description, complex_properties, complex_assembly, expanded_participant_list ) %>% #only keep needed columns 
+separate_rows(expanded_participant_list, sep = "\\|") %>% #separate each partecipant in a different row  (sep is a REGEX -> "\\|" = literal pipe; plain "|" splits on every character)
+separate(expanded_participant_list, c("protein_id", "stoichiometry"), sep = "\\(", convert = TRUE, remove = FALSE) %>% # separate the stoichiometry in a different column  (sep is a REGEX -> "\\(" = literal "("; plain "(" is an invalid regex and errors)
+mutate(stoichiometry = gsub(")", "", stoichiometry, fixed = TRUE)) %>% #remove second bracket from the stoichiometry number  (fixed = TRUE -> literal ")")
+ dplyr::rename("complex_id"="x_complex_ac", "complex_name"="recommended_name") # fix col names
+
+complexHypotheses_minimal <- complexHypotheses %>%
+   dplyr::select(complex_id, complex_name, protein_id ) %>%
+  mutate(complex_id = str_replace(complex_id, "CPX-", "")) %>%
+  as.data.table()
+
+head(complexHypotheses_minimal)
+
+
+binary_hyp <- complexHypotheses_minimal %>%
+  dplyr::select(complex_id, protein_id) %>%
+  mutate(protein_id = gsub("-PRO_.*", "", protein_id))#remove -PRO_
+
+#### plus decoy
+
+pathLength <- calculatePathlength(binary_hyp)
+
+complexTargetsPlusDecoys <- generateComplexDecoys(target_hypotheses=complexHypotheses_minimal,
+                                                dist_info=pathLength,
+                                                min_distance = 3,
+                                                append=TRUE)
+
+
+```
+
+## - get Complex features
+
+```{r, eval=run_complex_analysis}
+#' ## Summarize protein traces across conditions
+protein_traces_sum <- integrateTraceIntensities(protein_traces_list,
+                                                design_matrix = NULL,
+                                                integrate_within = NULL,
+                                                aggr_fun = "sum")
+```
+
+```{r, eval=run_complex_analysis}
+
+plotSummarizedMScoverage(hypotheses = complexHypotheses_minimal,
+                         protTraces = protein_traces_sum,
+                         PDF = F)
+
+
+#' ## Complex feature finding
+# findComplexFeatures parallelises over complex hypotheses via a snow/doSNOW cluster and sets its own
+# RNG stream internally (clusterSetRNGStream(cl, 123)), so a parallel run is reproducible and equivalent
+# to the serial one - exactly like findProteinFeatures, which this report already runs with
+# parallelized = T. It was previously forced serial (parallelized = F, n_cores = 1), which is THE slow
+# step of the complex section. Run it on up to 12 cores; each worker copies the traces, so the cap keeps
+# a laptop from oversubscribing. (If your machine lacks snow/doSNOW, set parallelized = F, n_cores = 1.)
+.cf_cores <- parallel::detectCores()
+.cf_cores <- if (is.na(.cf_cores) || .cf_cores < 2L) 1L else min(.cf_cores - 1L, 12L)
+
+# Cache the (slow) complex feature finding the same way as proteinFeatures: skip it when
+# complexFeatures.RData already exists AND load_complexFeatures.RData is TRUE in SETUP.
+.cf_file <- file.path(out_dir, "rdata", "complexFeatures.RData")
+if (load_complexFeatures.RData && file.exists(.cf_file)) {
+  load(.cf_file)   # restores `complexFeatures` from the previous run
+  message("Loaded cached complexFeatures from ", .cf_file, " (skipped findComplexFeatures).")
+} else {
+  complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
+                                          complex_hypothesis = complexTargetsPlusDecoys,
+                                          corr_cutoff = 0.9,
+                                          window_size = 7,
+                                          parallelized = T,
+                                          n_cores = .cf_cores,
+                                          collapse_method = "apex_network",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1,
+                                          smoothing_length = 7)
+  dir.create(dirname(.cf_file), recursive = TRUE, showWarnings = FALSE)
+  save(complexFeatures, file = .cf_file)
+  message("Saved complexFeatures to ", .cf_file, " (re-runs with load_complexFeatures.RData = T skip findComplexFeatures).")
+}
+```
+
+## - filter Complex features
+
+```{r, eval=run_complex_analysis, message=FALSE, warning=FALSE, cache=FALSE}
+
+complexFeaturesBest <- getBestFeatures(complexFeatures)
+```
+
+```{r, eval=run_complex_analysis}
+
+# NOTE: bare `filterFeatures` is MASKED here by another loaded package's S4 generic (signature
+# object, filter - e.g. QFeatures/ProtGenerics pulled in via MSnbase), which has no method for a
+# data.table -> "unable to find an inherited method for function 'filterFeatures'". Qualify it to
+# CCprofiler's function explicitly. (If you hit the same error on another function, CCprofiler:: it too.)
+complexFeaturesBestFilterd <- CCprofiler::filterFeatures(complexFeaturesBest,
+                                  complex_ids = NULL,
+                                  protein_ids = NULL,
+                                  min_feature_completeness = NULL,
+                                  min_hypothesis_completeness = NULL,
+                                  min_subunits = NULL,
+                                  min_peak_corr = NULL,
+                                  min_monomer_distance_factor = 2)
+
+
+
+
+
+complexFeaturesBestFilterdScored <- scoreFeatures(complexFeaturesBestFilterd, FDR=0.1, PDF=F) #,  ## at FDR 0.05 anything passes name="qvalueStats_complexFeatures")
+
+scoredDataAll <- appendSecondaryComplexFeatures(scoredPrimaryFeatures = complexFeaturesBestFilterdScored, allFeatures = complexFeatures, peakCorr_cutoff = 0.7)
+
+
+plotSummarizedComplexes(scoredDataAll, complexHypotheses_minimal, protein_traces_sum, PDF=F) # ,name="complex_completeness_pie")
+
+summarizeFeatures(scoredDataAll,
+                plot=TRUE,
+                PDF=F ) #,name="feature_summary_scoredDataAll")
+
+summarizeFeatures(complexFeaturesBestFilterdScored,
+                  plot=TRUE,
+                  PDF= F) #,  name="feature_summary_complexFeaturesBestFiltered")
+
+```
+
+## - extract Complex features from each pep traces
+
+extract complex features from pep traces pepTracesList_filtered_minN
+
+by condition
+
+```{r, eval=run_complex_analysis}
+
+
+complexFeaturesUnique <- getUniqueFeatureGroups(
+                            feature_table = scoredDataAll,
+                            rt_height = 0,
+                            distance_cutoff = 1.25)
+
+complexFeaturesCollapsed <- callapseByUniqueFeatureGroups(
+                              feature_table = complexFeaturesUnique,
+                              rm_decoys = TRUE)
+
+################' ## Extract feature values
+.complex_featureVals_file <- file.path(out_dir, "rdata", "complex_featureVals.RData")
+if(!file.exists(.complex_featureVals_file)){
+
+complex_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
+                                          features = complexFeaturesCollapsed,
+                                          design_matrix = design_matrix,
+                                          extract = "subunits",
+                                          imputeZero = T,
+                                          verbose = F)
+
+save(complex_featureVals, file = .complex_featureVals_file)}
+
+if(file.exists(.complex_featureVals_file)){
+  load(.complex_featureVals_file)}
+
+######################################################################################
+
+complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
+                                             tracesList = pepTracesList_filtered_minN,
+                                             design_matrix = design_matrix)
+```
+
+## - differential
+
+```{r, eval=run_complex_analysis}
+# Reordering the vector
+
+
+# create list to append to
+complex_DiffExprPep_list <- list()
+
+# Sample_id_treat / Condition fix - see the "compare local vs global" chunk above for the rationale.
+Sample_id_treat <- treatment_conditions   # condition label(s); compare each treatment vs the reference
+for(i in Sample_id_treat) {
+            
+          sample_vector <- c(i, ref_condition) 
+          
+          #filter for just 0- and condition x
+          complex_featureValsFilled_i <- complex_featureValsFilled %>%
+            filter(Condition %in% sample_vector) %>%
+            mutate(Condition = factor(Condition, levels = sample_vector)) %>%
+            arrange(Condition)
+
+
+          #' ## Perform peptide-level differential expression testing for all features
+          complex_DiffExprPep_i <- testDifferentialExpression_beniFix(featureVals = complex_featureValsFilled_i,
+                                                            compare_between = "Condition",
+                                                            level = "peptide",
+                                                            measuredOnly = FALSE)
+          
+          # Append to the list
+                    complex_DiffExprPep_list[[i]] <- complex_DiffExprPep_i
+}
+```
+
+```{r, eval=run_complex_analysis}
+for (i in complex_DiffExprPep_list) {
+  
+#plots some numbers
+hist(i$pVal, breaks = 100)
+    hist(i$global_pVal, breaks = 100)
+    hist(log(i$qint1), breaks = 100)
+    hist(log(i$qint2), breaks = 100)
+    hist(log(i$global_int2_imp), breaks = 100)
+    hist(log(i$global_int1_imp), breaks = 100)
+    hist(i$log2FC, breaks = 50)
+    hist(i$global_log2FC, breaks = 50)
+}
+```
+
+```{r, eval=run_complex_analysis}
+complex_DiffExprProtein_list <- list()
+
+for (i in seq_along(complex_DiffExprPep_list)) {
+  
+  # Get the current dataframe
+  df <- complex_DiffExprPep_list[[i]] # need to do this, because otherwise the indexing is wrong when I want to append the results to complex_DiffExprProtein_list
+  
+#' ## Aggregate differential expression results to the protein level
+  complex_DiffExprProtein <- aggregatePeptideTests(df) # need to do this, because otherwise the indexing is wrong when I want to append the results to complex_DiffExprProtein_list
+
+
+# and plot numbers
+hist(complex_DiffExprProtein$pVal, breaks = 100)
+    hist(complex_DiffExprProtein$global_pVal, breaks = 100)
+    hist(complex_DiffExprProtein$medianLog2FC, breaks = 50)
+    hist(complex_DiffExprProtein$global_medianLog2FC, breaks = 50)
+    
+#append to vector
+    # Append to the list with name
+  name <- names(complex_DiffExprPep_list)[i]
+  complex_DiffExprProtein_list[[name]] <- complex_DiffExprProtein
+    }
+```
+
+```{r, eval=run_complex_analysis}
+complex_DiffExprComplex_list <- list()
+
+for (i in seq_along(complex_DiffExprProtein_list)) {
+  
+  # Get the current dataframe
+  df <- complex_DiffExprProtein_list[[i]] # need to do this, because otherwise the indexing is wrong when I want to append the results to complex_DiffExprComplex_list
+  
+ #' ## Aggregate differential expression results to the complex level
+ complex_DiffExprComplex <- aggregateProteinTests(df)
+
+# plot some numbers
+ hist(complex_DiffExprComplex$pVal, breaks = 100)
+    hist(complex_DiffExprComplex$global_pVal, breaks = 100)
+    hist(complex_DiffExprComplex$medianLog2FC, breaks = 50)
+    hist(complex_DiffExprComplex$global_medianLog2FC, breaks = 50)
+
+#append to vector keeping names
+  
+  name <- names(complex_DiffExprProtein_list)[i]
+  complex_DiffExprComplex_list[[name]] <- complex_DiffExprComplex
+}
+    
+```
+
+## - general volcano plots
+
+```{r, eval=run_complex_analysis}
+for(i in complex_DiffExprPep_list) {
+  plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
+```
+
+```{r, eval=run_complex_analysis}
+for(i in complex_DiffExprProtein_list) {
+  plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
+```
+
+```{r, eval=run_complex_analysis}
+for(i in complex_DiffExprComplex_list) {
+  plotVolcano(i, PDF = F, pBHadj_cutoff = 0.05)}
+```
+
+## - Get differential complexes
+
+```{r, eval=run_complex_analysis}
+
+diffComplexes_list <- list()
+
+for (j in seq_along(complex_DiffExprComplex_list)) {
+  
+  # Extract the current dataframe
+  i <- complex_DiffExprComplex_list[[j]]
+  
+  # Identify unique complexes and differential complexes
+  allComplexes <- unique(i$complex_id)
+  diffComplexes <- unique(i[i$pBHadj < 0.05 & abs(i$medianLog2FC) > 1, "complex_id"])
+  
+  #   Append diffComplexes to the list with the name from the original list
+  name <- names(complex_DiffExprComplex_list)[j]
+  diffComplexes_list[[name]] <- diffComplexes
+  
+  # Volcano plot highlighting differential complexes
+  highlight_complex <- diffComplexes
+  plotVolcano(i, highlight = highlight_complex, PDF = FALSE, pBHadj_cutoff = 0.05)
+}
+
+# ---- persist complex-level hit-sets (mirrors assembly_hits.rds) so a cross-metabolite complex
+# overlap (scripts/overlap_complex_between_metabolites.R) can load them for every metabolite. Same
+# cutoff as diffComplexes above (pBHadj < 0.05 & |medianLog2FC| > 1). medianLog2FC follows $testOrder,
+# so convert to a fixed treatment-minus-reference direction for an unambiguous up/down split (same
+# approach as assembly_hits' treat_minus_ref).
+.treat_c     <- treatment_conditions[1]
+.complex_all <- data.table::rbindlist(lapply(complex_DiffExprComplex_list, as.data.table), fill = TRUE)
+.complex_all[, treat_lfc := data.table::fifelse(
+  testOrder == paste0(.treat_c, ".vs.", ref_condition),  medianLog2FC,
+  data.table::fifelse(testOrder == paste0(ref_condition, ".vs.", .treat_c), -medianLog2FC, NA_real_))]
+.complex_sig <- .complex_all[pBHadj < 0.05 & abs(medianLog2FC) > 1]
+saveRDS(list(
+  up      = unique(as.character(.complex_sig[treat_lfc > 0]$complex_id)),   # complex UP in treatment vs ctrl
+  down    = unique(as.character(.complex_sig[treat_lfc < 0]$complex_id)),   # complex DOWN in treatment vs ctrl
+  changed = unique(as.character(.complex_sig$complex_id))),                 # any significant change
+  file.path(out_dir, "rdata", "complex_hits.rds"))
+message("Complex hits (pBHadj<0.05, |medianLog2FC|>1): ",
+        length(unique(as.character(.complex_sig$complex_id))), " differential complexes -> complex_hits.rds")
+```
+
+## - plot diffComplexes
+
+```{r, eval=run_complex_analysis}
+  #' # Plot some differential protein features
+  #' 
+for (i in diffComplexes_list) {
+  
+    for (id in i) {
+        plotFeatures(feature_table = scoredDataAll,
+                     traces = protein_traces_list,
+                     feature_id = id,
+                     annotation_label = "protein_id",  # was "input_id" (peptide-level id, absent from protein traces); protein traces are labelled by protein_id
+                     design_matrix=design_matrix,
+                     calibration=calibration,
+                     peak_area = T,
+                     legend = F,
+                     onlyBest = F,
+                     monomer_MW=T)
+    }
+  }
+
+```
+
+## - plot all_complexes
+
+```{r, eval=run_complex_analysis}
+
+all_complexes <- unique(complex_featureValsFilled$complex_id)
+
+for (id in all_complexes) {
+  plotFeatures(feature_table = scoredDataAll,
+               traces = protein_traces_list,
+               feature_id = id,
+               annotation_label = "protein_id",  # was "input_id" (peptide-level id, absent from protein traces); protein traces are labelled by protein_id
+               design_matrix=design_matrix,
+               calibration=calibration,
+               peak_area = F,
+               legend = T,
+               onlyBest = F,
+               monomer_MW=T,
+               aggregateReplicates=F) #turn T if n_replicates >1
+}
+dev.off()
+```
+
+## save RData for plotting
+
+```{r}
+
+# FLAG (bug fix): the original referenced protein_DiffExprPep_list / protein_DiffExprProtein_list,
+# which are never created - the ORIGINAL report (ORIGINAL_*.Rmd) has the identical broken save. The
+# real objects are protein_DiffExprPep / protein_DiffExprProtein (the "_list" is only a FILENAME
+# convention; see the per-object saves above). Corrected the two names so the save works; nothing else.
+# peptide_id -> stripped amino-acid sequence, for the proteoform/domain analysis (scripts/proteoform_analysis.R).
+# data_filter keeps both the grouping key (used as the peptide_id / trace id downstream) and the stripped
+# sequence; the trace id alone is not guaranteed to be a clean AA sequence, so we persist the map here.
+pep_seq_map <- unique(data.table::as.data.table(data_filter)[, .(peptide_id = as.character(pep_grouping_key),
+                                                                 stripped_sequence = as.character(pep_stripped_sequence))])
+
+save(pepTracesList_filtered, pepTracesList_filtered_minN,protein_traces_list,protein_DiffExprPep,protein_DiffExprProtein, design_matrix, pep_seq_map,  file = paste0(RData_for_further_plotting_and_analysis_location,"/",experiment_name, "_for_plotting.RData"))  # design_matrix -> scripts/plot_protein_traces.R labels conditions; pep_seq_map -> scripts/proteoform_analysis.R maps peptides to residues
+
+```
+
+# 7. Cross-correlation differential analysis (alternative / complement)
+
+The statistical test above compares **intensity / assembly state** between
+conditions. This section is a complementary, shape-based view: for each protein it
+compares the **elution profile shape and position** between the two conditions
+using the **cross-correlation function (CCF)**.
+
+For every protein we cross-correlate its mean profile in the reference condition
+(`strain31`) against the treatment (`strain83`) over a range of fraction lags and
+record:
+
+* `max_ccf` — the highest cross-correlation (how similar the two profiles are in
+  shape, scale-independent);
+* `best_lag` — the lag (in fractions) at which that maximum occurs, i.e. the
+  **peak shift** between conditions (0 = no shift);
+* `zero_lag_cor` — the correlation with no shift (similarity "as is").
+
+A non-zero `best_lag` (a peak that moves to a different fraction / apparent MW) or
+a low similarity flags proteins whose elution behaviour changes between strains —
+e.g. complex (dis)assembly — which an abundance-only test can miss.
+
+## 7a. Parameters
+
+```{r ccf-params, eval=run_cross_correlation}
+ccf_lag_max         <- 5                       # max shift (fractions) to scan
+ccf_shift_threshold <- 1                       # |best_lag| >= this  -> flagged "shifted"
+ccf_min_intensity   <- 0                       # require this summed intensity in BOTH conditions
+ccf_ref_condition   <- ref_condition           # strain31 (reference)
+ccf_treat_condition <- treatment_conditions[1] # strain83 (treatment)
+```
+
+## 7b. Per-condition mean elution profiles
+
+```{r ccf-condition-traces, eval=run_cross_correlation}
+# Average replicate protein traces within each condition. CCF is scale-invariant,
+# so aggr_fun = "sum" (used elsewhere in this pipeline) and "mean" are equivalent
+# for the correlation/shift; "sum" is used here because it is known to work with
+# this CCprofiler build.
+cond_traces <- integrateTraceIntensities(
+  protein_traces_list,
+  design_matrix    = design_matrix,
+  integrate_within = "Condition",
+  aggr_fun         = "sum"
+)
+
+# Robust extractor: traces$traces -> numeric matrix (proteins x fractions).
+.get_trace_matrix <- function(traces_obj) {
+  dt <- traces_obj$traces
+  frac_cols <- grep("^[0-9]+$", colnames(dt), value = TRUE)
+  frac_cols <- frac_cols[order(as.numeric(frac_cols))]
+  if (data.table::is.data.table(dt)) {
+    m <- as.matrix(dt[, ..frac_cols])
+  } else {
+    m <- as.matrix(dt[, frac_cols, drop = FALSE])
+  }
+  rownames(m) <- dt$id
+  m
+}
+
+ref_mat    <- .get_trace_matrix(cond_traces[[ccf_ref_condition]])
+treat_mat  <- .get_trace_matrix(cond_traces[[ccf_treat_condition]])
+common_ids <- intersect(rownames(ref_mat), rownames(treat_mat))
+message("Cross-correlation over ", length(common_ids), " proteins present in both conditions.")
+```
+
+## 7c. Compute the cross-correlation metrics per protein
+
+```{r ccf-compute, eval=run_cross_correlation}
+compute_ccf_metrics <- function(x, y, lag_max = 5) {
+  x[is.na(x)] <- 0
+  y[is.na(y)] <- 0
+  if (stats::sd(x) == 0 || stats::sd(y) == 0) {
+    return(c(max_ccf = NA_real_, best_lag = NA_real_, zero_lag_cor = NA_real_))
+  }
+  cc       <- stats::ccf(x, y, lag.max = lag_max, plot = FALSE)
+  acf_vals <- as.numeric(cc$acf)
+  lags     <- as.numeric(cc$lag)
+  i_max    <- which.max(acf_vals)
+  zero_i   <- which(lags == 0)
+  c(max_ccf      = acf_vals[i_max],
+    best_lag     = lags[i_max],
+    zero_lag_cor = if (length(zero_i)) acf_vals[zero_i] else NA_real_)
+}
+
+ccf_results <- data.table::rbindlist(lapply(common_ids, function(id) {
+  m <- compute_ccf_metrics(ref_mat[id, ], treat_mat[id, ], lag_max = ccf_lag_max)
+  data.table::data.table(
+    protein_id   = id,
+    max_ccf      = m[["max_ccf"]],
+    best_lag     = m[["best_lag"]],
+    zero_lag_cor = m[["zero_lag_cor"]],
+    int_ref      = sum(ref_mat[id, ],   na.rm = TRUE),
+    int_treat    = sum(treat_mat[id, ], na.rm = TRUE)
+  )
+}))
+
+ccf_results[, shifted := (!is.na(best_lag)) &
+              (abs(best_lag) >= ccf_shift_threshold) &
+              (int_ref   >= ccf_min_intensity) &
+              (int_treat >= ccf_min_intensity)]
+ccf_results[, log2_int_ratio := log2((int_treat + 1) / (int_ref + 1))]
+data.table::setorder(ccf_results, -shifted, -best_lag)
+
+message("Proteins flagged as shifted (|lag| >= ", ccf_shift_threshold, "): ",
+        sum(ccf_results$shifted, na.rm = TRUE))
+DT::datatable(ccf_results[order(-abs(best_lag))][1:min(.N, 100)],
+              caption = "Per-protein cross-correlation metrics (top by |shift|)")
+```
+
+## 7d. Diagnostic plots
+
+```{r ccf-plots, fig.width=7, fig.height=4, eval=run_cross_correlation}
+# Distribution of optimal lags (peak shifts)
+print(
+  ggplot(ccf_results[!is.na(best_lag)], aes(x = best_lag)) +
+    geom_bar(fill = "#4C72B0") + theme_classic() +
+    labs(title = "Optimal cross-correlation lag (peak shift) per protein",
+         x = "Optimal lag (fractions)   [0 = no shift]", y = "proteins")
+)
+
+# Profile-shape similarity (max CCF)
+print(
+  ggplot(ccf_results[!is.na(max_ccf)], aes(x = max_ccf)) +
+    geom_histogram(bins = 50, fill = "#55A868") + theme_classic() +
+    labs(title = "Maximum cross-correlation (profile-shape similarity)",
+         x = "max CCF", y = "proteins")
+)
+
+# Shift vs zero-lag similarity, hits highlighted
+print(
+  ggplot(ccf_results[!is.na(best_lag)],
+         aes(x = best_lag, y = zero_lag_cor, color = shifted)) +
+    geom_jitter(width = 0.12, height = 0, alpha = 0.6) +
+    scale_color_manual(values = c(`FALSE` = "grey70", `TRUE` = "firebrick")) +
+    theme_classic() +
+    labs(title = "Elution shift vs zero-lag similarity",
+         x = "Optimal lag (fractions)", y = "zero-lag correlation", color = "shifted")
+)
+```
+
+## 7e. Inspect top shifted proteins (overlaid profiles)
+
+```{r ccf-profile-plots, fig.width=7, fig.height=4, eval=run_cross_correlation}
+plot_ccf_protein <- function(id) {
+  df <- rbind(
+    data.frame(fraction = seq_len(ncol(ref_mat)),   intensity = ref_mat[id, ],
+               condition = ccf_ref_condition),
+    data.frame(fraction = seq_len(ncol(treat_mat)), intensity = treat_mat[id, ],
+               condition = ccf_treat_condition)
+  )
+  mrow <- ccf_results[protein_id == id]
+  ggplot(df, aes(x = fraction, y = intensity, color = condition)) +
+    geom_line(linewidth = 1) + geom_point(size = 1) + theme_classic() +
+    labs(title = paste0(id, "   (lag = ", mrow$best_lag,
+                        ", maxCCF = ", round(mrow$max_ccf, 2), ")"),
+         x = "Fraction", y = "Mean intensity")
+}
+
+top_shifted <- head(ccf_results[shifted == TRUE][order(-abs(best_lag))]$protein_id, 12)
+for (id in top_shifted) print(plot_ccf_protein(id))
+```
+
+## 7f. Complement to the statistical test
+
+```{r ccf-save-and-compare, eval=run_cross_correlation}
+# Save the cross-correlation table
+write.table(
+  ccf_results,
+  file      = file.path(out_dir, "tables", "crosscorrelation_results.txt"),
+  sep       = "\t", quote = FALSE, row.names = FALSE
+)
+
+# Cross-tabulate which proteins each approach flags (the "complement" view): the cross-correlation
+# "shifted" set vs the statistical protein-level differential set.
+# FLAG (bug fix): the original checked a non-existent `protein_DiffExprProtein_list` (the same "_list"
+# naming slip fixed in the save chunk) and treated it as a LIST via rbindlist - so it ALWAYS reported
+# "not in memory". The real stats are in protein_DiffExprProtein: a single data.table from section 6,
+# already cached in protein_DiffExpr_all.RData, whose protein id column is `feature_id`. Corrected the
+# object name, the single-table handling and the id/merge key. Also self-load the cache if the stats
+# aren't already in memory, so this chunk works even when run on its own.
+.diff_cache <- file.path(out_dir, "rdata", "protein_DiffExpr_all.RData")
+if (!exists("protein_DiffExprProtein") && file.exists(.diff_cache)) {
+  load(.diff_cache)   # restores protein_DiffExprProtein (+ the other diff objects) from section 6
+  message("Loaded protein_DiffExprProtein from ", .diff_cache, " for the complement comparison.")
+}
+if (exists("protein_DiffExprProtein")) {
+  stat_dt <- data.table::as.data.table(protein_DiffExprProtein)
+  pcol  <- intersect(c("pBHadj", "qVal", "pVal", "global_pBHadj"), names(stat_dt))[1]
+  idcol <- intersect(c("protein_id", "feature_id"), names(stat_dt))[1]
+  if (!is.na(pcol) && !is.na(idcol)) {
+    stat_best <- stat_dt[, .(stat_p = min(get(pcol), na.rm = TRUE)), by = c(idcol)]
+    data.table::setnames(stat_best, idcol, "protein_id")            # match ccf_results' key
+    merged <- merge(ccf_results, stat_best, by = "protein_id", all = TRUE)
+    merged[, stat_sig := !is.na(stat_p) & stat_p < 0.05]
+    merged[, category := data.table::fcase(                       # self-describing label for downstream filtering
+      shifted %in% TRUE &   stat_sig %in% TRUE,  "mixed (CCF+stat)",
+      shifted %in% TRUE & !(stat_sig %in% TRUE), "shift only (CCF)",
+      !(shifted %in% TRUE) & stat_sig %in% TRUE, "stat only",
+      default =                                  "neither")]
+    data.table::fwrite(merged, file.path(out_dir, "tables", "crosscorrelation_vs_stat.txt"), sep = "\t")
+    print(table(shifted = merged$shifted, stat_significant = merged$stat_sig, useNA = "ifany"))
+    message("Saved crosscorrelation_vs_stat.txt; 'shifted' (cross-correlation) vs ",
+            "'stat_significant' (", pcol, " < 0.05), matched on ", idcol, ". Table above.")
+
+    # Visualise the complement: elution shift (cross-correlation) vs abundance change (stat test).
+    # Each point is a protein; the two dashed lines are the shift / significance cut-offs, so the four
+    # quadrants ARE the 2x2 table above. Proteins OUTSIDE the horizontal band but LEFT of the vertical
+    # line are the ones the abundance test misses and cross-correlation uniquely flags (elution
+    # rearrangement with no significant total-abundance change) - the point of this complement view.
+    .plt <- merged[!is.na(best_lag) & !is.na(stat_p)]
+    if (nrow(.plt)) {
+      .plt[, neglog_p := -log10(pmax(stat_p, .Machine$double.xmin))]
+      .plt[, category := data.table::fcase(
+        shifted & stat_sig,  "shift + abundance",
+        shifted & !stat_sig, "shift only (CCF)",
+        !shifted & stat_sig, "abundance only",
+        default =            "neither")]
+      .g_cmp <- ggplot(.plt, aes(neglog_p, best_lag, colour = category)) +
+        geom_hline(yintercept = c(-ccf_shift_threshold, ccf_shift_threshold), linetype = 2, colour = "grey65") +
+        geom_vline(xintercept = -log10(0.05), linetype = 2, colour = "grey65") +
+        geom_point(alpha = 0.6, size = 1.1) +
+        labs(title    = paste0("Elution shift vs abundance change - ", comparison_id),
+             subtitle = "outside the band = elution shifted; right of the line = abundance-significant",
+             x = "-log10(BH-adjusted p)  -  statistical abundance change",
+             y = "best lag (fraction shift)  -  cross-correlation",
+             colour = NULL) +
+        theme_bw() + theme(legend.position = "bottom")
+      print(.g_cmp)
+      ggsave(file.path(out_dir, "figures", "crosscorrelation_vs_stat.pdf"), .g_cmp, width = 7, height = 5.5)
+    }
+
+    # Set-overlap view of the two hit sets: elution-shifted (CCF) vs abundance-significant (stat).
+    # Two sets, so an UpSet (consistent with the cross-metabolite overlap scripts) - the bars are
+    # shift-only / stat-only / both, i.e. the Venn regions.
+    .sets <- data.frame(
+      protein_id       = merged$protein_id,
+      shifted          = as.integer(!is.na(merged$shifted)  & merged$shifted),
+      stat_significant = as.integer(!is.na(merged$stat_sig) & merged$stat_sig))
+    if (requireNamespace("UpSetR", quietly = TRUE) && (sum(.sets$shifted) > 0 || sum(.sets$stat_significant) > 0)) {
+      print(UpSetR::upset(.sets, sets = c("shifted", "stat_significant"), order.by = "freq",
+                          mainbar.y.label = "proteins in intersection", sets.x.label = "flagged proteins"))
+      grDevices::pdf(file.path(out_dir, "figures", "crosscorrelation_vs_stat_upset.pdf"), width = 6, height = 4)
+      print(UpSetR::upset(.sets, sets = c("shifted", "stat_significant"), order.by = "freq",
+                          mainbar.y.label = "proteins in intersection", sets.x.label = "flagged proteins"))
+      grDevices::dev.off()
+      message("Saved crosscorrelation_vs_stat_upset.pdf (overlap of shifted vs stat-significant proteins).")
+    } else {
+      message("UpSetR not installed (or no hits) - the scatter + 2x2 table already show the overlap.")
+    }
+  } else {
+    message("protein_DiffExprProtein present but no recognised p-value/id column - ",
+            "join ccf_results to it manually.")
+  }
+} else {
+  message("Statistical protein-level results not in memory and no ", basename(.diff_cache),
+          " cache found; run section 6's differential test, then re-run this chunk.")
+}
+```
