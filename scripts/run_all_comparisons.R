@@ -16,7 +16,8 @@ rmd <- here("analysis", "DiffAnalysis_yeast_QTL.Rmd")
 
 # Comparisons to run (must match names in the `comparisons` registry in the .Rmd).
 # 31 and 83 are the mutant strains; BY and RM the parents (the reference in each pair).
-comparisons_to_run <- c("QTL_31_BY", "QTL_31_RM", "QTL_83_BY", "QTL_83_RM", "QTL_RM_BY")
+comparisons_to_run <- c("QTL_31_BY", "QTL_31_RM", "QTL_83_BY", "QTL_83_RM", "QTL_RM_BY",
+                        "QTL_83_RM_EtOH")   # 83 vs RM grown on ethanol (see the EtOH entry in the .Rmd registry)
 
 for (cmp in comparisons_to_run) {
   out <- here("output", cmp)

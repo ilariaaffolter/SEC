@@ -95,7 +95,13 @@ comparisons <- list(
   QTL_31_RM = list(pattern = "_31_RM_", ref = "strainRM", treat = "strain31"),
   QTL_83_BY = list(pattern = "_83_BY_", ref = "strainBY", treat = "strain83"),
   QTL_83_RM = list(pattern = "_83_RM_", ref = "strainRM", treat = "strain83"),
-  QTL_RM_BY = list(pattern = "_RM_BY_", ref = "strainBY", treat = "strainRM")
+  QTL_RM_BY = list(pattern = "_RM_BY_", ref = "strainBY", treat = "strainRM"),
+  # Ethanol growth: the "..._EtOH_83_RM_..." file. Chunk 2b tags every sample from an EtOH file with an
+  # "_EtOH" suffix on its strain condition, so this compares the two strains WITHIN ethanol. The pattern
+  # contains EtOH, so .find_tsv picks the ethanol file (and glucose QTL_83_RM ignores it).
+  # NOTE: ref/treat assume the strain tokens are strain83 / strainRM as in glucose - confirm with
+  # unique(design_matrix$Condition) and adjust if the EtOH runs are named differently.
+  QTL_83_RM_EtOH = list(pattern = "_EtOH_83_RM_", ref = "strainRM_EtOH", treat = "strain83_EtOH")
 )
 
 ## ---- choose the comparison to run ----
@@ -109,6 +115,9 @@ experiment_name      <- comparison_id
 .find_tsv <- function(pat) {
   all_tsv <- list.files(here::here("data", "raw"), pattern = "\\.tsv$")
   hits <- all_tsv[grepl(pat, all_tsv, fixed = TRUE)]
+  # A plain (glucose) pattern like "_83_RM_" ALSO matches the ethanol file "..._EtOH_83_RM_...".
+  # Unless the pattern itself asks for EtOH, drop EtOH files so glucose and ethanol stay separate.
+  if (!grepl("EtOH", pat, fixed = TRUE)) hits <- hits[!grepl("_EtOH_", hits, fixed = TRUE)]
   if (length(hits) == 0) stop("No .tsv in data/raw/ contains '", pat,
                               "'. Files present: ", paste(all_tsv, collapse = ", "))
   if (length(hits) > 1)  stop("Multiple .tsv match '", pat, "': ",
@@ -348,13 +357,24 @@ filename fraction_number heuselm_J130729_001 1
 
 #unique(data$r_file_name)
 
+# CARBON SOURCE (EtOH vs glucose): ethanol runs carry an extra "_EtOH_" token that glucose runs lack -
+# in the r_file_name and/or the .tsv filename. We detect it from EITHER, then REMOVE that token from the
+# name BEFORE the fixed-position split so `condition` still lands on the strain field, and finally fold
+# the carbon source back into `condition` so EtOH samples are their own condition (strain83 -> strain83_EtOH).
+# Glucose runs are untouched. VERIFY after import: unique(fraction_annotation$condition).
+.is_etoh_file <- grepl("_EtOH_", data_location, fixed = TRUE)
 fraction_annotation <- data %>%
-  separate(r_file_name, c("date", "instrument", "operator", "experiment", "replicate_number", "condition", "fraction_number", "plate_position"), sep="_", remove = FALSE, extra="drop") %>% # get the fraction number
+  mutate(carbon_source = ifelse(grepl("_EtOH_", r_file_name, fixed = TRUE) | .is_etoh_file, "EtOH", "glucose"),
+         r_split_tmp   = str_replace(r_file_name, "_EtOH_", "_")) %>%
+  separate(r_split_tmp, c("date", "instrument", "operator", "experiment", "replicate_number", "condition", "fraction_number", "plate_position"), sep="_", remove = TRUE, extra="drop") %>% # get the fraction number
+  mutate(condition = ifelse(carbon_source == "EtOH", paste0(condition, "_EtOH"), condition)) %>%
   dplyr::select(r_file_name, condition, fraction_number, replicate_number) %>%
   distinct() %>%
   mutate(r_file_name = str_replace_all(r_file_name, pattern = file_name_pattern, replacement = "")) %>%
   mutate(fraction_number= str_replace_all(fraction_number, pattern = "f", replacement = "")) %>%
   mutate(replicate_number= str_replace_all(replicate_number, pattern = "biolrep", replacement = ""))
+message("Conditions parsed (check EtOH suffix landed on the strain, not a shifted token): ",
+        paste(sort(unique(fraction_annotation$condition)), collapse = ", "))
   
 
 head(fraction_annotation, n = 20)
