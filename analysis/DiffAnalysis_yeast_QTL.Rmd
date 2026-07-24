@@ -344,7 +344,12 @@ source(here::here("R", "ccprofiler_fixes.R"), local = TRUE)  # local=TRUE: defin
 if(file.exists(file.path(out_dir, "rdata", "data_input.RData"))){
   load(file.path(out_dir, "rdata", "data_input.RData"))
 } else {
-  data <- read_protti(here("data", "raw", data_location))
+  # quote="" disables fread's quote handling. A Spectronaut .tsv occasionally carries a stray/embedded
+  # double-quote in a text field; with the default quoting fread then reads from that quote to the next
+  # one - potentially most of the file - as ONE string and hits R's 2^31-1 byte limit ("R character
+  # strings are limited to 2^31-1 bytes"). Tabs never appear inside Spectronaut fields, so turning off
+  # quoting is safe and reads the file row-by-row as intended. (read_protti forwards ... to fread.)
+  data <- read_protti(here("data", "raw", data_location), quote = "")
   save(data, file = file.path(out_dir, "rdata", "data_input.RData"))
 }
 
