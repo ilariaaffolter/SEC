@@ -101,7 +101,14 @@ comparisons <- list(
   # contains EtOH, so .find_tsv picks the ethanol file (and glucose QTL_83_RM ignores it).
   # NOTE: ref/treat assume the strain tokens are strain83 / strainRM as in glucose - confirm with
   # unique(design_matrix$Condition) and adjust if the EtOH runs are named differently.
-  QTL_83_RM_EtOH = list(pattern = "_EtOH_83_RM_", ref = "strainRM_EtOH", treat = "strain83_EtOH")
+  QTL_83_RM_EtOH = list(pattern = "_EtOH_83_RM_", ref = "strainRM_EtOH", treat = "strain83_EtOH"),
+  # CARBON-SOURCE EFFECT: strain83 on glucose vs strain83 on ethanol, from ONE mixed .tsv (both searched
+  # together in the same Spectronaut run). Glucose runs stay "strain83"; ethanol runs (with _EtOH_ in the
+  # run name) become "strain83_EtOH" - so this compares them directly. ref = glucose baseline.
+  # TODO: set `pattern` to a UNIQUE substring of that mixed .tsv filename once it is in data/raw/
+  #   (keep "EtOH" in the pattern so .find_tsv doesn't skip the file), then add "QTL_83_Glc_vs_EtOH" to
+  #   scripts/run_all_comparisons.R. Confirm both labels with unique(design_matrix$Condition).
+  QTL_83_Glc_vs_EtOH = list(pattern = "_83_EtOHvsGlc_", ref = "strain83", treat = "strain83_EtOH")
 )
 
 ## ---- choose the comparison to run ----
@@ -357,14 +364,19 @@ filename fraction_number heuselm_J130729_001 1
 
 #unique(data$r_file_name)
 
-# CARBON SOURCE (EtOH vs glucose): ethanol runs carry an extra "_EtOH_" token that glucose runs lack -
-# in the r_file_name and/or the .tsv filename. We detect it from EITHER, then REMOVE that token from the
-# name BEFORE the fixed-position split so `condition` still lands on the strain field, and finally fold
-# the carbon source back into `condition` so EtOH samples are their own condition (strain83 -> strain83_EtOH).
-# Glucose runs are untouched. VERIFY after import: unique(fraction_annotation$condition).
-.is_etoh_file <- grepl("_EtOH_", data_location, fixed = TRUE)
+# CARBON SOURCE (EtOH vs glucose): ethanol runs carry an extra "_EtOH_" token that glucose runs lack.
+# Detection is PER-SAMPLE from the run name, so a MIXED file - strain83 glucose + strain83 ethanol
+# searched together for the carbon-source comparison - keeps each sample correct (glucose stays strain83,
+# ethanol becomes strain83_EtOH). Fallback: if the .tsv NAME says EtOH but NONE of its runs carry the
+# token, the whole file is ethanol (covers an ethanol-only file whose runs aren't individually marked).
+# We strip the token before the fixed-position split so `condition` still lands on the strain, then fold
+# the carbon source back in as a suffix. Glucose runs are untouched.
+# VERIFY after import: unique(fraction_annotation$condition).
+.is_etoh_file    <- grepl("_EtOH_", data_location, fixed = TRUE)
+.any_etoh_in_run <- any(grepl("_EtOH_", data$r_file_name, fixed = TRUE))
+.file_all_etoh   <- .is_etoh_file && !.any_etoh_in_run
 fraction_annotation <- data %>%
-  mutate(carbon_source = ifelse(grepl("_EtOH_", r_file_name, fixed = TRUE) | .is_etoh_file, "EtOH", "glucose"),
+  mutate(carbon_source = ifelse(grepl("_EtOH_", r_file_name, fixed = TRUE) | .file_all_etoh, "EtOH", "glucose"),
          r_split_tmp   = str_replace(r_file_name, "_EtOH_", "_")) %>%
   separate(r_split_tmp, c("date", "instrument", "operator", "experiment", "replicate_number", "condition", "fraction_number", "plate_position"), sep="_", remove = TRUE, extra="drop") %>% # get the fraction number
   mutate(condition = ifelse(carbon_source == "EtOH", paste0(condition, "_EtOH"), condition)) %>%
