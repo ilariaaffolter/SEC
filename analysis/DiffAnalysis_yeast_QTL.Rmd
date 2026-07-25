@@ -1289,6 +1289,14 @@ writeLines(c(
 ```{r}
 #' # Integrate peptide traces across conditions 
 # per each oe 
+# --- progress breadcrumbs -------------------------------------------------------------------------
+# findProteinFeatures is inside suppressMessages() and knitr buffers messages, so under rmarkdown::render
+# you cannot SEE which step stalls. .brk() appends a timestamped line to out_dir/render_progress.log
+# (file writes are not buffered), so while the render runs you open that file and the LAST line is the
+# step it is currently on. Remove these once the slow/hanging step is identified.
+.brk <- function(msg) { try(cat(format(Sys.time(), "%H:%M:%S"), "|", msg, "\n",
+                               file = file.path(out_dir, "render_progress.log"), append = TRUE), silent = TRUE) }
+.brk("integrateTraceIntensities (sum) ...")
 pepTracesIntegrated_sum <- integrateTraceIntensities(pepTracesList_filtered_minN,
                                                      design_matrix = NULL,
                                                      integrate_within = NULL,
@@ -1310,6 +1318,7 @@ if (!exists("best_rt_height"))        best_rt_height        <- 1
 .pf_cores <- parallel::detectCores()
 .pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 6L)
 
+.brk(paste0("findProteinFeatures starting (parallelized=T, n_cores=", .pf_cores, ") -- if the log stops HERE, the parallel cluster is hanging under render"))
 suppressMessages(
   proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
                                           corr_cutoff      = best_corr_cutoff,      # grid search (default 0.85)
@@ -1377,6 +1386,7 @@ suppressMessages(
 
 } # end if (explore_alt_params) -- alt-parameter comparison runs, off by default
 
+.brk("findProteinFeatures DONE -> save + scoreFeatures (FDR 0.05) ...")
 save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
 
 #' Score protein features and filter for a detection FDR of 5%
@@ -1390,6 +1400,7 @@ summarizeFeatures(proteinFeaturesFiltered,
                   # name="output_files/feature_summary_proteinFeaturesFiltered")
 
 #' ## Extract feature values
+.brk("extractFeatureVals (FDR 0.05) -- SERIAL CCprofiler step, slow on big data ...")
 proteinFeaturesFiltered_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
                                              features = proteinFeaturesFiltered,
                                              design_matrix = design_matrix,
@@ -1399,10 +1410,12 @@ proteinFeaturesFiltered_featureVals <- extractFeatureVals(traces = pepTracesList
 
 
 #' ## Fill feature values
+.brk("fillFeatureVals (FDR 0.05) -- SERIAL CCprofiler step, slow on big data ...")
 proteinFeaturesFiltered_featureValsFilled <- fillFeatureVals(featureVals = proteinFeaturesFiltered_featureVals,
                                                 tracesList = pepTracesList_filtered_minN,
                                                 design_matrix = design_matrix)
 
+.brk("second pass at FDR 0.15 (scoreFeatures + extractFeatureVals + fillFeatureVals AGAIN) ...")
 proteinFeaturesFiltered_0p15featurefdr <- scoreFeatures(proteinFeatures, FDR=0.15, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
 
 #' Evaluate protein feature stats
@@ -1425,6 +1438,7 @@ proteinFeaturesFiltered_featureVals_0p15featurefdr <- extractFeatureVals(traces 
 proteinFeaturesFiltered_featureValsFilled_0p15featurefdr <- fillFeatureVals(featureVals = proteinFeaturesFiltered_featureVals_0p15featurefdr,
                                                 tracesList = pepTracesList_filtered_minN,
                                                 design_matrix = design_matrix)
+.brk("findProteinFeatures chunk COMPLETE (feature values done)")
 
 # save(proteinFeaturesFiltered_featureVals, proteinFeaturesFiltered_featureValsFilled, file = "Anna_proteinFeaturesFiltered_featureValsFilled.RData")
 
