@@ -62,6 +62,8 @@
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
+# the banner-row detector lives in secseq_compare.R; source it so either script works standalone
+if (!exists(".find_header_skip")) try(source(here::here("scripts", "secseq_compare.R")), silent = TRUE)
 
 # physical constants (cgs, water at 20 C - the anchors are s20,w values so the reference solvent is water)
 .NA_AVO <- 6.02214076e23
@@ -87,13 +89,19 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 
 # ---- 1. load the published Grad-seq protein table --------------------------------------------------
 # Deliberately format-tolerant: supplementary tables differ in column naming between versions.
-gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1) {
+gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, skip = NULL) {
   if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
   ext <- tolower(tools::file_ext(file))
-  X <- if (ext %in% c("xlsx", "xls")) {
+  # supplementary workbooks often carry banner rows above the real header - reuse the detector from
+  # secseq_compare.R when it is loaded, else fall back to no skip
+  if (is.null(skip)) {
+    skip <- if (exists(".find_header_skip")) tryCatch(.find_header_skip(file, sheet), error = function(e) 0L) else 0L
+    if (skip > 0) message("Detected ", skip, " banner row(s) above the header - skipping them. Override with skip = <n>.")
+  }
+  X <- if (ext %in% c("xlsx", "xls", "xlsm")) {
     if (!requireNamespace("readxl", quietly = TRUE)) stop("install.packages('readxl') to read ", ext)
-    as.data.table(readxl::read_excel(file, sheet = sheet))
-  } else as.data.table(data.table::fread(file))
+    suppressMessages(as.data.table(readxl::read_excel(file, sheet = sheet, skip = skip)))
+  } else as.data.table(data.table::fread(file, skip = skip))
   if (!nrow(X)) stop("No rows read from ", file)
 
   # protein id column: the one richest in UniProt-like accessions, unless named
