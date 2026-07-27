@@ -58,8 +58,12 @@
 #   globularity_category_annotation("ATP", categories = c("beyond_calibration","sub_monomer","globular_1x_4x","above_range"))
 #
 # OUTPUT (per metabolite, tables/globularity_categories/ and figures/globularity_categories/):
-#   category_annotation_summary.txt    one row per category: n, % complex / interactors / filament / IDR
-#                                      + Fisher p vs the other tested proteins
+#   category_annotation_summary.txt    one row per category (CONTROL): n, % complex / interactors /
+#                                      filament / IDR / basic-pI + Fisher p vs the other tested proteins
+#   category_annotation_by_condition.txt  the same percentages for EACH condition (control and treatment),
+#                                      which is what the side-by-side bar plot shows. The annotations are
+#                                      protein properties and do not change between conditions - what
+#                                      changes is which proteins fall into each category.
 #   category_protein_annotation.txt    per protein: category + every annotation flag (auditable)
 #   GOenrichment_<go_col>_<category>.txt   enriched GO terms per category
 #   category_annotation_barplots.pdf   the percentages side by side across categories
@@ -237,16 +241,34 @@ globularity_category_annotation <- function(
   for (m in metabolites) {
     gf <- here("output", paste0("PCM_ctrl_vs_", m), "tables", "globularity_check.txt")
     if (!file.exists(gf)) { message("[", m, "] no globularity_check.txt - run globularity_check() first; skipping."); next }
-    G <- fread(gf)
-    if (!all(c("protein_id", "class") %in% names(G))) { message("[", m, "] globularity_check.txt lacks protein_id/class; skipping."); next }
+    G_all <- fread(gf)
+    if (!all(c("protein_id", "class") %in% names(G_all))) { message("[", m, "] globularity_check.txt lacks protein_id/class; skipping."); next }
 
-    # category membership (globular_1x_4x = monomer + any clean oligomer)
-    sets <- list()
-    for (cat in categories) {
-      ids <- if (cat == "globular_1x_4x") G[class == "monomer" | grepl("^oligomer_", class)]$protein_id else G[class == cat]$protein_id
-      sets[[cat]] <- unique(as.character(ids))
+    # globularity_check now classifies EACH condition (control and treatment). Use the control for the
+    # main analysis, and keep the other condition(s) so the bar plots can show them side by side.
+    if ("condition" %in% names(G_all)) {
+      cn_all <- unique(as.character(G_all$condition))
+      cn_ctrl <- cn_all[grepl("ctrl|control|ref", cn_all, ignore.case = TRUE)][1]
+      if (is.na(cn_ctrl)) cn_ctrl <- cn_all[1]
+      cond_levels <- c(cn_ctrl, setdiff(cn_all, cn_ctrl))
+    } else {
+      G_all[, condition := "all"]; cn_ctrl <- "all"; cond_levels <- "all"
     }
-    sets <- sets[vapply(sets, length, 1L) > 0]
+    G <- G_all[condition == cn_ctrl]
+    if (!nrow(G)) { message("[", m, "] no control rows in globularity_check.txt; skipping."); next }
+
+    # category membership per condition (globular_1x_4x = monomer + any clean oligomer)
+    .sets_for <- function(dt) {
+      s <- list()
+      for (cat in categories) {
+        ids <- if (cat == "globular_1x_4x") dt[class == "monomer" | grepl("^oligomer_", class)]$protein_id else dt[class == cat]$protein_id
+        s[[cat]] <- unique(as.character(ids))
+      }
+      s[vapply(s, length, 1L) > 0]
+    }
+    sets      <- .sets_for(G)                                       # control: drives GO + the main tables
+    sets_cond <- lapply(cond_levels, function(cl) .sets_for(G_all[condition == cl]))
+    names(sets_cond) <- cond_levels
     if (!length(sets)) { message("[", m, "] none of the requested categories has proteins; skipping."); next }
     universe <- unique(as.character(G$protein_id))          # background = everything tested here
 
@@ -321,21 +343,46 @@ globularity_category_annotation <- function(
                 intersect(c("median_pI", "median_rest_pI", "wilcox_p_pI",
                             "median_net_charge", "wilcox_p_net_charge"), names(S))), with = FALSE])
 
-    # ---- bar plot of the percentages across categories ----
-    L <- melt(S, id.vars = c("category", "n_proteins"),
-              measure.vars = grep("^pct_", names(S), value = TRUE),
+    # ---- percentages per CONDITION (control vs treatment), for the side-by-side bar plot ----
+    # The annotations are protein properties and do not change between conditions; what changes is WHICH
+    # proteins fall into each category. So this shows how the treatment reshapes each category's makeup.
+    rows_cond <- list()
+    for (cl in cond_levels) {
+      for (cat in names(sets_cond[[cl]])) {
+        ids <- sets_cond[[cl]][[cat]]
+        r <- data.table(condition = cl, role = if (identical(cl, cn_ctrl)) "control" else "treatment",
+                        category = cat, n_proteins = length(ids))
+        for (fl in flags) r[[paste0("pct_", fl)]] <- round(unname(.pct(ids, fl)["pct"]), 1)
+        for (v in conts)  r[[paste0("median_", v)]] <- round(stats::median(A[protein_id %in% ids][[v]], na.rm = TRUE), 3)
+        rows_cond[[paste(cl, cat)]] <- r
+      }
+    }
+    SC <- rbindlist(rows_cond, use.names = TRUE, fill = TRUE)
+    fwrite(SC, file.path(tab_dir, "category_annotation_by_condition.txt"), sep = "\t")
+
+    # ---- bar plot of the percentages across categories, control vs treatment side by side ----
+    L <- melt(SC, id.vars = c("condition", "role", "category", "n_proteins"),
+              measure.vars = grep("^pct_", names(SC), value = TRUE),
               variable.name = "metric", value.name = "pct")
     L[, metric := sub("^pct_", "", metric)]
-    L[, category := factor(category, levels = names(sets))]
-    gbar <- ggplot(L[is.finite(pct)], aes(category, pct, fill = category)) +
-      geom_col(width = 0.7) +
-      geom_text(aes(label = sprintf("%.0f%%", pct)), vjust = -0.3, size = 3) +
+    L[, category  := factor(category, levels = names(sets))]
+    L[, condition := factor(condition, levels = cond_levels)]
+    gbar <- ggplot(L[is.finite(pct)], aes(category, pct, fill = condition)) +
+      geom_col(width = 0.72, position = position_dodge(width = 0.78)) +
+      geom_text(aes(label = sprintf("%.0f%%", pct)), position = position_dodge(width = 0.78),
+                vjust = -0.3, size = 2.6) +
       facet_wrap(~ metric, scales = "free_y") +
+      scale_fill_brewer(palette = "Set2", name = NULL) +
       labs(title = paste0("Elution-category annotation - PCM_ctrl_vs_", m),
-           subtitle = paste0("in_complex_portal / has_interaction = curated | filament_hit = KEYWORD HEURISTIC | ",
+           subtitle = paste0("control vs treatment: same annotations, but category MEMBERSHIP is recomputed per condition.\n",
+                             "in_complex_portal / has_interaction = curated | filament_hit = KEYWORD HEURISTIC | ",
                              "idr_* = FoldIndex prediction", if ("idr_plddt" %in% flags) " and AlphaFold pLDDT" else ""),
            x = NULL, y = "% of category") +
-      theme_bw() + theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+      theme_bw() + theme(legend.position = "top", axis.text.x = element_text(angle = 30, hjust = 1))
+
+    # how category membership itself shifts between conditions
+    message("[", m, "] category sizes by condition:")
+    print(dcast(SC, category ~ condition, value.var = "n_proteins"))
     .fb <- file.path(fig_dir, "category_annotation_barplots.pdf")
     tryCatch(ggsave(.fb, gbar, width = 9, height = 6),
              error = function(e) message("   !! could not write ", basename(.fb), ": ", conditionMessage(e)))

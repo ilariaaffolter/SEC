@@ -333,6 +333,15 @@ hydropro_compare <- function(metabolites, plddt_disorder_max = 0.4) {
     gf <- here("output", paste0("PCM_ctrl_vs_", m), "tables", "globularity_check.txt")
     if (!file.exists(gf)) { message("[", m, "] no globularity_check.txt - run globularity_check() first; skipping."); next }
     G <- fread(gf)
+    # globularity_check classifies every condition; compare against the CONTROL rows so each protein
+    # appears once (the theoretical f/f0 is a property of the protein, not of the condition).
+    if ("condition" %in% names(G)) {
+      cn <- unique(as.character(G$condition))
+      cc <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]
+      if (is.na(cc)) cc <- cn[1]
+      G <- G[condition == cc]
+      message("[", m, "] using the '", cc, "' (control) rows of globularity_check.txt.")
+    }
     D <- merge(G, H, by = "protein_id")
     if (!nrow(D)) { message("[", m, "] no protein has both a HYDROPRO result and a SEC measurement."); next }
 
