@@ -203,7 +203,8 @@ secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak")
 }
 
 # ---- 4. the cross-lab comparison -------------------------------------------------------------------
-secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2), save_plots = TRUE) {
+secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
+                          restrict_to_calibrated = TRUE, save_plots = TRUE) {
   S <- secseq_selfcheck(sq, save_plots = FALSE)
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
@@ -214,11 +215,23 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2), 
     G <- G[condition == cc]; message("Using the '", cc, "' rows of this project's SEC table.")
   }
   if (!all(c("protein_id", "ratio", "apex_fraction") %in% names(G))) stop("globularity_check.txt lacks protein_id/ratio/apex_fraction.")
+  # Restrict to proteins whose apex falls INSIDE the calibrated MW interval. Outside it this project's
+  # apparent MW - and therefore its deviation - is an extrapolation of the standards curve, so including
+  # those proteins would compare a measurement against an extrapolation.
+  if (restrict_to_calibrated) {
+    if ("in_calibrated_range" %in% names(G)) {
+      n0 <- nrow(G); G <- G[in_calibrated_range %in% TRUE]
+      message("Restricted to the calibrated MW interval: ", nrow(G), " of ", n0,
+              " proteins (", round(100 * nrow(G) / n0), "%). Set restrict_to_calibrated = FALSE to use all.")
+    } else message("No in_calibrated_range column - re-run globularity_check() to get it; using all proteins.")
+  }
+  if (!nrow(G)) stop("No proteins left after restricting to the calibrated range.")
   # same quantity, same units, in this project's data
   G[, deviation_log10_ours := log10(ratio)]
 
-  J <- merge(G[, .(protein_id, apex_fraction, ratio, deviation_log10_ours,
-                   expected_mw_kDa, apparent_mw_kDa, class)],
+  keepcols <- intersect(c("protein_id", "apex_fraction", "ratio", "deviation_log10_ours",
+                          "expected_mw_kDa", "apparent_mw_kDa", "class"), names(G))
+  J <- merge(G[, ..keepcols],
              S[, .(protein_id, gene, mw_kDa, pos_published = pos, deviation_log10_published = deviation_log10)],
              by = "protein_id")
   if (!nrow(J)) stop("No shared proteins - check the accession formats in both tables.")
@@ -254,8 +267,9 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2), 
       scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both") +
       geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       labs(title = paste0("Do two independent SEC experiments agree on which proteins elute anomalously?  (", metabolite, " control)"),
-           subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nEach dataset is referenced to its OWN bulk behaviour, so no calibration is transferred. Spearman rho = %+.3f (p = %.3g, n = %d).",
-                              unname(ct$estimate), ct$p.value, nrow(P)),
+           subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nEach dataset is referenced to its OWN bulk behaviour, so no calibration is transferred. Spearman rho = %+.3f (p = %.3g, n = %d).%s",
+                              unname(ct$estimate), ct$p.value, nrow(P),
+                              if (restrict_to_calibrated) "\nThis study is restricted to proteins eluting INSIDE its calibrated MW interval, where apparent mass is interpolated." else ""),
            x = "deviation, published SEC-seq", y = "deviation, this study") + theme_bw()
     g2 <- ggplot(melt(P[, .(protein_id, `this study` = deviation_log10_ours, `published` = deviation_log10_published)],
                       id.vars = "protein_id", variable.name = "dataset", value.name = "deviation"),

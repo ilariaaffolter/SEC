@@ -95,10 +95,11 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 # blues = compact/globular (monomer -> higher oligomers get lighter), warm/other = anomalous.
 .class_levels <- function(max_oligomer)
   c("monomer", if (max_oligomer >= 2) paste0("oligomer_", 2:max_oligomer, "x"),
-    "sub_monomer", "above_range", "between_states", "void", "beyond_calibration", "below_calibration")
+    "sub_monomer", "above_range", "between_states", "void", "beyond_calibration",
+    "below_calibration_expected", "below_calibration_anomalous")
 .class_colours <- function(max_oligomer) {
   olig <- if (max_oligomer >= 2) grDevices::colorRampPalette(c("#6B93C0", "#C6DBEF"))(max_oligomer - 1) else character(0)
-  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F", "#BAB0AC", "#D4C8C0")
+  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F", "#BAB0AC", "#DDD5CE", "#8C6D62")
   setNames(cols, .class_levels(max_oligomer))
 }
 
@@ -339,7 +340,11 @@ globularity_check <- function(metabolites   = NULL,
       d[, class := data.table::fcase(
         apex_fraction %in% void_fractions,                    "void",
         beyond_calibration == TRUE,                           "beyond_calibration",
-        below_calibration  == TRUE,                           "below_calibration",
+        # a protein whose MONOMER is itself below the smallest standard BELONGS below the calibrated
+        # range: it is uncalibrated, but its position is not evidence of anomaly. Only a larger protein
+        # eluting there is a genuine late-elution anomaly.
+        below_calibration & expected_mw_kDa <  calibration_min_kDa, "below_calibration_expected",
+        below_calibration & expected_mw_kDa >= calibration_min_kDa, "below_calibration_anomalous",
         globular_as_expected & oligomer_state == 1,           "monomer",
         globular_as_expected & oligomer_state >  1,           paste0("oligomer_", oligomer_state, "x"),
         ratio < 1 / tol_fold,                                 "sub_monomer",
@@ -384,8 +389,12 @@ globularity_check <- function(metabolites   = NULL,
                       n_test - n_glob, pct_anom, expected_globular_pct))
       message(sprintf("   >> DEFENSIBLE headline - within the calibrated range (apex <= %.0f kDa, non-void): %d protein(s), ANOMALOUS %.1f%%",
                       calibration_max_kDa, n_rng, pct_anom_rng))
-      message(sprintf("   (%d protein(s) elute beyond the largest standard / in the void: apparent MW there is EXTRAPOLATED, not measured)",
+      message(sprintf("   (%d protein(s) elute outside the calibrated interval or in the void: apparent MW there is EXTRAPOLATED, not measured)",
                       n_test - n_rng))
+      .bce <- sum(dc$class == "below_calibration_expected"); .bca <- sum(dc$class == "below_calibration_anomalous")
+      if (.bce + .bca > 0)
+        message(sprintf("   of the %d below the smallest standard: %d are proteins whose MONOMER is itself under %.3g kDa (they belong there - uncalibrated, not anomalous) and %d are larger proteins eluting late (a genuine anomaly).",
+                        .bce + .bca, .bce, calibration_min_kDa, .bca))
       print(dc[, .N, by = class][order(-N)])
       message(sprintf("   median apparent f/f0 (vs monomer) = %.2f | vs assigned state = %.2f",
                       stats::median(dc$ffo_vs_monomer, na.rm = TRUE), stats::median(dc$ffo_vs_state, na.rm = TRUE)))
@@ -397,7 +406,8 @@ globularity_check <- function(metabolites   = NULL,
         # in-range = apex inside the calibrated MW range (the defensible denominator)
         n_in_calibrated_range = n_rng, pct_anomalous_in_range = round(pct_anom_rng, 1),
         n_beyond_calibration  = sum(dc$class == "beyond_calibration"),
-        n_below_calibration   = sum(dc$class == "below_calibration"),
+        n_below_calibration_expected  = sum(dc$class == "below_calibration_expected"),
+        n_below_calibration_anomalous = sum(dc$class == "below_calibration_anomalous"),
         n_globular_in_range   = n_glob_rng,
         n_monomer      = sum(dc$class == "monomer"),
         n_oligomer     = sum(grepl("^oligomer_", dc$class)),
@@ -531,16 +541,18 @@ globularity_check <- function(metabolites   = NULL,
                                      levels = c("globular as expected", "anomalous")),
                       n = c(sum(S$n_globular), sum(S$n_tested) - sum(S$n_globular)))[n > 0]
     .plev <- c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void",
-               "beyond_calibration", "below_calibration")
+               "beyond_calibration", "below_calibration_expected", "below_calibration_anomalous")
+    .g <- function(nm) if (nm %in% names(S)) sum(S[[nm]]) else 0
     pooled_class <- data.table(
       class = factor(.plev, levels = .plev),
-      n = c(sum(S$n_monomer), sum(S$n_oligomer), sum(S$n_sub_monomer),
-            sum(S$n_above_range), sum(S$n_between_states), sum(S$n_void),
-            sum(S$n_beyond_calibration),
-            if ("n_below_calibration" %in% names(S)) sum(S$n_below_calibration) else 0))[n > 0]
+      n = c(.g("n_monomer"), .g("n_oligomer"), .g("n_sub_monomer"),
+            .g("n_above_range"), .g("n_between_states"), .g("n_void"),
+            .g("n_beyond_calibration"),
+            .g("n_below_calibration_expected"), .g("n_below_calibration_anomalous")))[n > 0]
     pooled_cols <- c("monomer" = "#2C5F8A", "oligomer (2-Nx)" = "#8CB3D9", "sub_monomer" = "#F28E2B",
                      "above_range" = "#E15759", "between_states" = "#B07AA1", "void" = "#9C755F",
-                     "beyond_calibration" = "#BAB0AC", "below_calibration" = "#D4C8C0")
+                     "beyond_calibration" = "#BAB0AC",
+                     "below_calibration_expected" = "#DDD5CE", "below_calibration_anomalous" = "#8C6D62")
     # pooled, restricted to the calibrated interval - the number to quote
     hlR <- if ("n_globular_in_range" %in% names(S)) data.table(
       group = factor(c("globular as expected", "anomalous"), levels = c("globular as expected", "anomalous")),
