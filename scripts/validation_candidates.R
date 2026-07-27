@@ -327,3 +327,93 @@ validation_candidates <- function(metabolites   = NULL,
     invisible(AC)
   } else { message("No candidates produced."); invisible(NULL) }
 }
+
+# ---------------------------------------------------------------------------------------------------
+# Plot the SEC traces of the candidates for manual inspection.
+#
+# Reads output/validation_candidates/validation_candidates_all.csv (written by validation_candidates())
+# and draws plot_protein_traces() for each candidate, ONE PROTEIN PER PDF PAGE, per metabolite. A protein
+# that is a candidate for several metabolites gets one page in each of those metabolites' PDFs, which is
+# the point - the trace is only meaningful against the condition it was called in.
+#
+# NOTE ON DUPLICATES: the candidate table has one row per protein PER METABOLITE, so a protein hit in
+# several comparisons appears several times. Ids are de-duplicated WITHIN each metabolite here.
+#
+#   plot_validation_candidates()                          # all metabolites, stat hits only
+#   plot_validation_candidates("ATP")
+#   plot_validation_candidates(only_stat_hits = FALSE)    # include shift-screen-only candidates
+#   plot_validation_candidates(ids = c("P15723","P0A6F5"))# an explicit list you pasted yourself
+#   plot_validation_candidates(top_n = 20)                # only the 20 best-scoring per metabolite
+#
+# OUTPUT (per metabolite): output/PCM_ctrl_vs_<m>/validation_traces/
+#   <m>_candidate_traces.pdf   one page per protein
+#   <m>_candidate_ids.txt      the plotted accessions, one per line (handy for copy/paste elsewhere)
+# ---------------------------------------------------------------------------------------------------
+plot_validation_candidates <- function(metabolites   = NULL,
+                                       ids            = NULL,
+                                       only_stat_hits = TRUE,
+                                       top_n          = Inf,
+                                       max_per_metabolite = 250,
+                                       x_axis         = c("fraction", "mw"),
+                                       aggregate      = c("condition", "replicate"),
+                                       out_subdir     = "validation_traces") {
+  x_axis <- match.arg(x_axis); aggregate <- match.arg(aggregate)
+  source(here::here("scripts", "plot_protein_traces.R"))
+
+  AC <- NULL
+  f <- here("output", "validation_candidates", "validation_candidates_all.csv")
+  if (is.null(ids)) {
+    if (!file.exists(f)) stop("No ", f, " - run validation_candidates() first, or pass ids = c(...).")
+    AC <- fread(f)
+    if (only_stat_hits && "is_stat_hit" %in% names(AC)) AC <- AC[as.logical(is_stat_hit) %in% TRUE]
+    if (!nrow(AC)) stop("No candidates left after filtering (try only_stat_hits = FALSE).")
+  }
+  if (is.null(metabolites)) {
+    metabolites <- if (!is.null(AC)) unique(as.character(AC$metabolite)) else {
+      dirs <- basename(list.dirs(here("output"), recursive = FALSE))
+      sub("^PCM_ctrl_vs_", "", dirs[grepl("^PCM_ctrl_vs_", dirs)]) }
+  }
+
+  for (m in metabolites) {
+    if (!is.null(ids)) {
+      pid <- unique(as.character(ids))
+    } else {
+      sub <- AC[metabolite == m]
+      if ("score" %in% names(sub)) setorder(sub, -score)
+      pid <- unique(as.character(sub$protein_id))          # de-duplicate within the metabolite
+      if (is.finite(top_n)) pid <- head(pid, top_n)
+    }
+    pid <- pid[!is.na(pid) & nzchar(pid)]
+    if (!length(pid)) { message("[", m, "] no candidates to plot."); next }
+    if (length(pid) > max_per_metabolite) {
+      message("[", m, "] ", length(pid), " candidates - plotting the first ", max_per_metabolite,
+              " (raise max_per_metabolite, or use top_n).")
+      pid <- head(pid, max_per_metabolite)
+    }
+
+    outdir <- here("output", paste0("PCM_ctrl_vs_", m), out_subdir)
+    dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+    writeLines(pid, file.path(outdir, paste0(m, "_candidate_ids.txt")))
+
+    pdf_file <- file.path(outdir, paste0(m, "_candidate_traces.pdf"))
+    ok <- tryCatch({ grDevices::pdf(pdf_file, width = 6, height = 6); TRUE },
+                   error = function(e) { message("   !! cannot write ", basename(pdf_file), ": ",
+                                                 conditionMessage(e), " (open in a viewer?)"); FALSE })
+    if (!ok) next
+    np <- 0L; miss <- character(0)
+    for (p in pid) {
+      done <- tryCatch({
+        g <- plot_protein_traces(p, metabolites = m, x_axis = x_axis, aggregate = aggregate,
+                                 save_pdf = FALSE, print_plot = FALSE)
+        if (!is.null(g)) print(g)
+        !is.null(g)
+      }, error = function(e) { miss <<- c(miss, p); FALSE })
+      if (isTRUE(done)) np <- np + 1L
+    }
+    grDevices::dev.off()
+    message("[", m, "] ", np, "/", length(pid), " protein page(s) -> ", pdf_file)
+    if (length(miss)) message("   not plottable (absent from the traces): ", paste(utils::head(miss, 10), collapse = ", "),
+                              if (length(miss) > 10) paste0(" ... +", length(miss) - 10, " more") else "")
+  }
+  invisible(NULL)
+}

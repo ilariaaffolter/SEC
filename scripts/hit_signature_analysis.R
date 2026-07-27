@@ -64,7 +64,9 @@ source(here::here("scripts", "globularity_category_annotation.R"))
   NAD = "NAD|nicotinamide|dinucleotide|dehydrogenase|oxidoreductase|redox",
   aKG = "2-oxoglutarate|oxoglutarate|alpha-ketoglutarate|ketoglutarate|tricarboxylic|citrate cycle|TCA",
   PEP = "phosphoenolpyruvate|pyruvate|glycoly|phosphotransferase",
-  PGP = "phosphoglycer|glycoly|phosphoglycolate|bisphosphoglycerate|mutase")
+  # PGP here = 6-phospho-D-gluconate (per the experiment), NOT phosphoglycerate: the Entner-Doudoroff /
+  # oxidative pentose-phosphate branch (zwf, pgl, gnd, edd, eda).
+  PGP = "gluconate|gluconolacton|pentose.?phosphate|Entner|Doudoroff|KDPG|2-dehydro-3-deoxy")
 .NUCLEOTIDE_REGEX <- "P-loop|nucleotide.?binding|ATP.?binding|GTP.?binding|NAD.?binding|nucleoside.?triphosphate"
 
 hit_signature_analysis <- function(metabolites   = NULL,
@@ -198,6 +200,19 @@ hit_signature_analysis <- function(metabolites   = NULL,
     .hy <- S[signature == "hydrotrope" & p_BHadj < 0.05]
     message("[", m, "] => specific-binding signature enriched: ", if (nrow(.sp)) paste(.sp$metric, collapse = ", ") else "none",
             " | hydrotrope signature enriched: ", if (nrow(.hy)) paste(.hy$metric, collapse = ", ") else "none")
+    # POWER: with a handful of hits Fisher cannot reach significance whatever the true effect. Report the
+    # smallest number of flagged hits that WOULD give a raw p < 0.05 against this background, so an
+    # underpowered test is never read as evidence of absence.
+    .bgp <- mean(A[is_hit == FALSE]$net_positive, na.rm = TRUE)
+    if (is.finite(.bgp) && length(hits) > 0) {
+      .k <- which(stats::pbinom(seq_len(length(hits)) - 1, length(hits), .bgp, lower.tail = FALSE) < 0.05)[1]
+      if (!is.na(.k))
+        message(sprintf("[%s] POWER: with %d hits, a flag would need >= %d/%d (%.0f%%) hits to reach even a RAW p < 0.05 (background %.0f%%). Below that, 'ns' means underpowered, not absent.",
+                        m, length(hits), .k, length(hits), 100 * .k / length(hits), 100 * .bgp))
+    }
+    if (length(hits) < 20)
+      message("[", m, "] CAUTION: only ", length(hits), " hits - these signatures are descriptive only; ",
+              "BH across ~", nrow(S), " metrics will drive nearly every adjusted p to 1.")
 
     # ---- GO molecular-function over-representation of the hits ----
     if ("go_f" %in% names(U)) {
@@ -220,9 +235,11 @@ hit_signature_analysis <- function(metabolites   = NULL,
         Lb[, .(metric, signature, set = "hits",      pct = pct_hits,       k = k_hits, n = n_hits)],
         Lb[, .(metric, signature, set = "background", pct = pct_background, k = k_bg,   n = n_bg)]))
       Lm[, set := factor(set, levels = c("hits", "background"))]
+      # show the RAW p as well: with a small hit set every BH p collapses to 1, which hides whether a
+      # metric was merely underpowered or genuinely flat
       ann <- Lb[, .(metric, signature,
                     y   = pmax(pct_hits, pct_background),
-                    lab = sprintf("%s  OR %.2f\nBH p %.2g", .stars(p_BHadj), odds_ratio, p_BHadj))]
+                    lab = sprintf("%s  OR %.2f\np %.2g (BH %.2g)", .stars(p_BHadj), odds_ratio, p, p_BHadj))]
       ggplot(Lm, aes(metric, pct, fill = set)) +
         geom_col(position = position_dodge(width = 0.78), width = 0.72) +
         geom_text(aes(label = sprintf("%.0f%%\n%d/%d", pct, k, n)),
@@ -234,6 +251,8 @@ hit_signature_analysis <- function(metabolites   = NULL,
         scale_fill_manual(values = c(hits = "#E15759", background = "#9AA5B1"), name = NULL) +
         labs(title = paste0("Hit signature - PCM_ctrl_vs_", m, " (", length(hits), " hits)"),
              subtitle = paste0("specific = ligand / nucleotide-fold annotation | hydrotrope = disorder and net positive charge.\n",
+                               if (length(hits) < 20) paste0("*** ONLY ", length(hits), " HITS: descriptive only. Fisher has almost no power here and BH drives every adjusted p to ~1;\n",
+                                                             "an 'ns' below means UNDERPOWERED, not absent. Read the raw p and the counts. ***\n") else "",
                                "NOTE: for a CHARGED ligand (ATP, ADP, NAD, PEP, PGP) the charge flags (basic_pI, net_positive) are ALSO\n",
                                "expected for specific binders - a polyanion is bound by a basic pocket. DISORDER (idr_*) is the flag that\n",
                                "actually discriminates hydrotropy. Judge on the BH-adjusted p values in hit_signature_summary.txt.\n",
@@ -251,8 +270,9 @@ hit_signature_analysis <- function(metabolites   = NULL,
       Sc <- S[type == "continuous"]
       ann2 <- Ac[, .(y = max(value, na.rm = TRUE)), by = metric]
       ann2 <- merge(ann2, Sc[, .(metric, p_BHadj, n_hits, median_hits, median_background)], by = "metric", all.x = TRUE)
-      ann2[, lab := sprintf("%s  BH p %.2g\nmed %.3g vs %.3g  (n hits = %d)",
-                            .stars(p_BHadj), p_BHadj, median_hits, median_background, n_hits)]
+      ann2 <- merge(ann2, Sc[, .(metric, p_raw = p)], by = "metric", all.x = TRUE)
+      ann2[, lab := sprintf("%s  p %.2g (BH %.2g)\nmed %.3g vs %.3g  (n hits = %d)",
+                            .stars(p_BHadj), p_raw, p_BHadj, median_hits, median_background, n_hits)]
       ggplot(Ac, aes(set, value, fill = set)) +
         geom_violin(alpha = 0.5, colour = NA, scale = "width") +
         geom_boxplot(width = 0.15, outlier.size = 0.3, fill = "white") +
