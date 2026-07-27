@@ -53,13 +53,41 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 
 .sq_dir <- function(...) here("output", "secseq", ...)
 
+# Supplementary workbooks often carry one or more banner rows above the real header (e.g. merged group
+# labels such as "Features" / "Normalized by maximum value"). Scan the first rows for the one that holds
+# the actual column names and return how many rows to skip.
+.find_header_skip <- function(file, sheet = 1, hints = c("protein.?id", "gene name", "fraction", "accession"),
+                              max_scan = 12) {
+  ext <- tolower(tools::file_ext(file))
+  probe <- if (ext %in% c("xlsx", "xls", "xlsm")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) return(0L)
+    suppressMessages(as.data.frame(readxl::read_excel(file, sheet = sheet, col_names = FALSE,
+                                                      n_max = max_scan, .name_repair = "minimal")))
+  } else {
+    ln <- readLines(file, n = max_scan, warn = FALSE)
+    as.data.frame(do.call(rbind, lapply(strsplit(ln, "\t|,"), function(x) { length(x) <- max(lengths(strsplit(ln, "\t|,"))); x })),
+                  stringsAsFactors = FALSE)
+  }
+  if (!nrow(probe)) return(0L)
+  for (i in seq_len(nrow(probe))) {
+    txt <- paste(as.character(unlist(probe[i, ])), collapse = " | ")
+    if (sum(vapply(hints, function(h) grepl(h, txt, ignore.case = TRUE), logical(1))) >= 2) return(i - 1L)
+  }
+  0L
+}
+
 # ---- 1. load ---------------------------------------------------------------------------------------
-secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col = NULL, fraction_prefix = "SEC-Fraction") {
+secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col = NULL,
+                        fraction_prefix = "SEC-Fraction", skip = NULL) {
   if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
-  X <- if (tolower(tools::file_ext(file)) %in% c("xlsx", "xls")) {
+  if (is.null(skip)) {
+    skip <- .find_header_skip(file, sheet)
+    if (skip > 0) message("Detected ", skip, " banner row(s) above the header - skipping them. Override with skip = <n>.")
+  }
+  X <- if (tolower(tools::file_ext(file)) %in% c("xlsx", "xls", "xlsm")) {
     if (!requireNamespace("readxl", quietly = TRUE)) stop("install.packages('readxl') to read this file")
-    as.data.table(readxl::read_excel(file, sheet = sheet))
-  } else as.data.table(data.table::fread(file))
+    suppressMessages(as.data.table(readxl::read_excel(file, sheet = sheet, skip = skip)))
+  } else as.data.table(data.table::fread(file, skip = skip))
   nm <- names(X)
   pick <- function(given, patterns, what) {
     if (!is.null(given)) return(given)
