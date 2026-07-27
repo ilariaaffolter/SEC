@@ -46,6 +46,9 @@
 #   source(here::here("scripts", "gradseq_ffo.R"))
 #   gs <- gradseq_load("data/raw/Hor2020_gradseq_proteins.xlsx")   # inspect what was parsed
 #   cal <- gradseq_calibrate(gs)                                   # LOOK at the calibration plot
+#   # ribosomal anchors alone do NOT calibrate s for ordinary proteins (see gradseq_ffo's physical check);
+#   # when that fails, use the calibration-free comparison instead:
+#   gradseq_vs_sec_deviation(gs, metabolite = "ATP")
 #   ff  <- gradseq_ffo(gs, cal)
 #   gradseq_vs_sec(ff, metabolite = "ATP")
 #   gradseq_all("data/raw/Hor2020_gradseq_proteins.xlsx", metabolite = "ATP")   # all of the above
@@ -241,9 +244,23 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
   D[, mw_Da := unname(mass_map[protein_id])]
   D[, frac_used := if (position == "com") com_fraction else as.numeric(peak_fraction)]
   D[, s_svedberg := unname(stats::predict(cal$fit, data.frame(fraction = frac_used)))]
+  n_before <- nrow(D[is.finite(mw_Da) & mw_Da > 0])
   D <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(s_svedberg) & s_svedberg > 0]
   if (!nrow(D)) stop("No protein has both a monomer mass and a positive s - check the calibration.")
+  if (n_before - nrow(D) > 0)
+    message(sprintf("   %d of %d protein(s) (%.0f%%) were dropped for a NON-POSITIVE s: the fitted line runs negative near the top of the gradient, which is where the low-molecular-weight bulk peak sits.",
+                    n_before - nrow(D), n_before, 100 * (n_before - nrow(D)) / n_before))
   D[, ffo_gradseq := .ffo_from_s(s_svedberg, mw_Da, vbar)]
+
+  # PHYSICAL SANITY CHECK. f/f0 cannot be below 1: the sphere is the minimum-friction shape. A sizeable
+  # sub-1 population therefore proves the s calibration is wrong, not that the proteins are compact.
+  .imposs <- mean(D$ffo_gradseq < 1, na.rm = TRUE)
+  if (.imposs > 0.05)
+    warning(sprintf(paste0("%.0f%% of proteins get f/f0 < 1, which is PHYSICALLY IMPOSSIBLE (a sphere is the minimum). ",
+                           "The sedimentation calibration is unreliable for this mass range: the ribosomal anchors sit at s = 30-50 ",
+                           "while ordinary proteins are at s = 2-10, so the fit is being extrapolated far below its anchors and ",
+                           "over-estimates s (which under-estimates f/f0). Add low-s anchors, or use the calibration-free route ",
+                           "gradseq_vs_sec_deviation()."), 100 * .imposs))
   setorder(D, -ffo_gradseq)
   fwrite(D, .gs_dir("gradseq_ffo.csv"))
   message(sprintf("Sedimentation-derived ABSOLUTE f/f0 for %d protein(s): median %.2f (IQR %.2f-%.2f).",
@@ -251,6 +268,8 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
                   stats::quantile(D$ffo_gradseq, .25, na.rm = TRUE), stats::quantile(D$ffo_gradseq, .75, na.rm = TRUE)))
   message("   Reference: ~1.2 = compact globular (hydrated), ~1.5 = moderately elongated, >2 = extended/disordered.")
   message("   NOTE the monomer assumption DEFLATES this estimate for oligomers (by n^(2/3)), so a high value is a strong claim.")
+  message(sprintf("   Physical check: %.0f%% of values are below 1 (impossible). Above ~5%% the absolute scale should not be used - prefer gradseq_vs_sec_deviation().",
+                  100 * .imposs))
   if (save_plots) {
     refs <- data.table(x = c(1.0, 1.2, 1.5, 2.0), lab = c("sphere", "globular", "elongated", "extended"))
     g <- ggplot(D[is.finite(ffo_gradseq) & ffo_gradseq > 0], aes(ffo_gradseq)) +
@@ -354,6 +373,77 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
     tryCatch({ grDevices::pdf(.gs_dir("sec_vs_gradseq_perprotein.pdf"), width = 7.5, height = 5.5)
                print(g2); print(g3); grDevices::dev.off() },
              error = function(e) try(grDevices::dev.off(), silent = TRUE))
+  }
+  invisible(J)
+}
+
+# ---- 5. CALIBRATION-FREE alternative -----------------------------------------------------------------
+# The absolute route above needs a trustworthy fraction -> s calibration, and ribosomal anchors alone do
+# not provide one for ordinary proteins (they sit at s = 30-50, the proteome at s = 2-10, so the fit is
+# extrapolated far below its anchors and returns impossible f/f0 < 1). This route avoids s entirely.
+#
+# In BOTH datasets, reduce each protein to how far it migrates relative to what its monomer mass predicts:
+#     deviation = log10(mass expected at this position) - log10(monomer mass)
+# with the expectation taken from a robust fit WITHIN that dataset. Positive = migrates as though heavier.
+# Sedimentation and SEC weight mass and shape differently (s ~ M^(2/3)/(f/f0) versus R_s ~ (f/f0)M^(1/3)),
+# so the two deviations are NOT the same quantity and their magnitudes should not be equated - but a
+# protein that is anomalous for its mass should be anomalous in both, and that is what is tested here.
+gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position = c("com", "peak"),
+                                     restrict_to_calibrated = TRUE, dev_cut = log10(2),
+                                     mass_map = NULL, save_plots = TRUE) {
+  position <- match.arg(position)
+  D <- copy(gs$meta)
+  if (is.null(mass_map)) {
+    sf <- here("output", "uniprot_annotation_shared.RData")
+    if (!file.exists(sf)) stop("No UniProt cache for monomer masses.")
+    e <- new.env(); load(sf, envir = e); u <- as.data.table(e$.uniprot_all)
+    mass_map <- setNames(as.numeric(u$mass), as.character(u$input_id))
+  }
+  D[, mw_kDa := unname(mass_map[protein_id]) / 1000]
+  D[, pos := if (position == "com") com_fraction else as.numeric(peak_fraction)]
+  D <- D[is.finite(mw_kDa) & mw_kDa > 0 & is.finite(pos)]
+  fit <- if (requireNamespace("MASS", quietly = TRUE)) MASS::rlm(log10(mw_kDa) ~ pos, data = D) else stats::lm(log10(mw_kDa) ~ pos, data = D)
+  D[, deviation_log10_gradseq := stats::predict(fit, D) - log10(mw_kDa)]
+
+  gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
+  if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
+  G <- fread(gf)
+  if ("condition" %in% names(G)) {
+    cn <- unique(as.character(G$condition))
+    cc <- if (!is.null(condition)) condition else { x <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]; if (is.na(x)) cn[1] else x }
+    G <- G[condition == cc]
+  }
+  if (restrict_to_calibrated && "in_calibrated_range" %in% names(G)) {
+    n0 <- nrow(G); G <- G[in_calibrated_range %in% TRUE]
+    message("Restricted to the calibrated MW interval: ", nrow(G), " of ", n0, " proteins.")
+  }
+  G[, deviation_log10_ours := log10(ratio)]
+  J <- merge(G[, .(protein_id, deviation_log10_ours, class)],
+             D[, .(protein_id, mw_kDa, pos, deviation_log10_gradseq)], by = "protein_id")
+  J <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_gradseq)]
+  if (!nrow(J)) stop("No shared proteins.")
+  ct <- suppressWarnings(stats::cor.test(J$deviation_log10_ours, J$deviation_log10_gradseq, method = "spearman"))
+  message("Proteins in both datasets: ", nrow(J))
+  message(sprintf("Deviation agreement (SEC vs sedimentation), Spearman rho = %+.3f (p = %.3g).",
+                  unname(ct$estimate), ct$p.value))
+  message("   The two techniques weight mass and shape differently, so only the AGREEMENT is meaningful, not the magnitudes.")
+  J[, reproducible := abs(deviation_log10_ours) > dev_cut & abs(deviation_log10_gradseq) > dev_cut &
+                      sign(deviation_log10_ours) == sign(deviation_log10_gradseq)]
+  message(sprintf("Anomalous (>%.1f-fold) and in the SAME direction in both: %d protein(s) (%.1f%%).",
+                  10^dev_cut, sum(J$reproducible), 100 * mean(J$reproducible)))
+  dir.create(.gs_dir(), recursive = TRUE, showWarnings = FALSE)
+  fwrite(J, .gs_dir("sec_vs_gradseq_deviation.csv"))
+  if (save_plots) {
+    g <- ggplot(J, aes(deviation_log10_gradseq, deviation_log10_ours)) +
+      geom_hline(yintercept = 0, colour = "grey60") + geom_vline(xintercept = 0, colour = "grey60") +
+      geom_point(aes(colour = reproducible), alpha = 0.45, size = 0.9) +
+      scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both") +
+      geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      labs(title = paste0("SEC vs sedimentation: do the same proteins migrate anomalously?  (", metabolite, ")"),
+           subtitle = sprintf("Calibration-free: each dataset is referenced to its own bulk trend of mass against migration position.\nSpearman rho = %+.3f (p = %.3g, n = %d). Magnitudes are NOT comparable between techniques - only the agreement is.",
+                              unname(ct$estimate), ct$p.value, nrow(J)),
+           x = "deviation, Grad-seq (sedimentation)", y = "deviation, this study (SEC)") + theme_bw()
+    tryCatch(ggsave(.gs_dir("sec_vs_gradseq_deviation.pdf"), g, width = 7.5, height = 5.5), error = function(e) NULL)
   }
   invisible(J)
 }
