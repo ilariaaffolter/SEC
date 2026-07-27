@@ -1,0 +1,253 @@
+# scripts/secseq_compare.R
+# =============================================================================
+# CROSS-LAB VALIDATION of the elution behaviour, against a published E. coli SEC-seq complexome
+# (Chihara et al., same separation principle as this project: size-exclusion chromatography, 20 fractions).
+#
+# WHY THIS AND NOT THE GRADIENT DATA: SEC-seq measures the SAME physical quantity as this project - the
+# Stokes radius - so it CANNOT give an independent frictional ratio (both share the identical mass/shape
+# degeneracy). What it can do, and what a sedimentation dataset cannot, is test REPRODUCIBILITY: if a
+# protein elutes away from the position expected for its monomer mass here AND does so in an independent
+# lab, with a different column, buffer and growth condition, then the anomaly is a property of the
+# protein, not of this chromatography. That argument needs no calibration transfer and no assumption
+# about the absolute f/f0 of the standards, which makes it considerably harder to attack than any
+# cross-technique comparison. Use scripts/gradseq_ffo.R with a glycerol-gradient dataset for the
+# orthogonal, absolute f/f0.
+#
+# THE MEASUREMENT USED HERE IS CALIBRATION-FREE. Rather than converting the published fractions into
+# molecular weights (their standards are not in the table, and anchoring only on the ribosome would mean
+# extrapolating from ~1 MDa down to ~10 kDa), each dataset is reduced to a DEVIATION:
+#      deviation = log10( mass expected at this elution position ) - log10( monomer mass )
+# where "mass expected at this elution position" comes from a robust fit of monomer mass against elution
+# position WITHIN that dataset. Positive = the protein elutes as though it were heavier than its monomer
+# (assembly and/or an extended shape); negative = it elutes late for its mass. Because each dataset is
+# referenced to its own bulk behaviour, the two are directly comparable without sharing a calibration.
+#
+# ORIENTATION IS DETERMINED FROM THE DATA, NOT ASSUMED. Fraction numbering runs in opposite directions in
+# the two datasets. The script settles it two independent ways - the ribosomal proteins (rps*/rpl*, the
+# largest species present, must sit at the high-mass end) and the sign of the global mass-vs-position
+# correlation - and refuses to continue if they disagree.
+#
+# INPUT: the supplementary protein table, e.g. Chihara_2023_RNA_SEC_Seq_Supplemental_Table_S2.xlsx, with
+#        columns "Protein IDs", "Gene names", "Molecular weight [kDa]" and SEC-Fraction-1..20.
+#        Values are normalised to 1 at each protein's own maximum, which is all this analysis needs.
+#
+# USAGE (RStudio console, project open):
+#   source(here::here("scripts", "secseq_compare.R"))
+#   sq <- secseq_load("data/raw/Chihara_2023_RNA_SEC_Seq_Supplemental_Table_S2.xlsx")
+#   secseq_orientation(sq)                       # check this before anything else
+#   secseq_selfcheck(sq)                         # how anomalous is elution in THEIR data alone?
+#   secseq_vs_sec(sq, metabolite = "ATP")        # the cross-lab comparison
+#   secseq_all("data/raw/Chihara_2023_...xlsx", metabolite = "ATP")
+#
+# OUTPUT (output/secseq/):
+#   secseq_profiles.csv             parsed profiles, peak and centre-of-mass fraction, monomer mass
+#   secseq_orientation.pdf          the two orientation tests
+#   secseq_selfcheck.pdf            their monomer mass vs elution position, with the fitted bulk trend
+#   secseq_deviation.csv            per protein: elution deviation in their data
+#   secseq_vs_sec.csv               per-protein join with this project's SEC
+#   secseq_vs_sec.pdf               position agreement, deviation agreement, and the reproducible set
+#   secseq_reproducible_anomalies.csv   proteins that elute anomalously in BOTH datasets
+# =============================================================================
+
+suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
+
+.sq_dir <- function(...) here("output", "secseq", ...)
+
+# ---- 1. load ---------------------------------------------------------------------------------------
+secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col = NULL, fraction_prefix = "SEC-Fraction") {
+  if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
+  X <- if (tolower(tools::file_ext(file)) %in% c("xlsx", "xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) stop("install.packages('readxl') to read this file")
+    as.data.table(readxl::read_excel(file, sheet = sheet))
+  } else as.data.table(data.table::fread(file))
+  nm <- names(X)
+  pick <- function(given, patterns, what) {
+    if (!is.null(given)) return(given)
+    for (p in patterns) { hit <- grep(p, nm, ignore.case = TRUE, value = TRUE); if (length(hit)) return(hit[1]) }
+    stop("Could not find the ", what, " column. Pass it explicitly. Columns: ", paste(nm, collapse = ", "))
+  }
+  id_col   <- pick(id_col,   c("^Protein IDs$", "protein.?id", "accession", "uniprot"), "protein id")
+  mw_col   <- pick(mw_col,   c("^Molecular weight", "molecular.?weight", "\\bmw\\b", "mass"), "molecular weight")
+  gene_col <- tryCatch(pick(gene_col, c("^Gene names$", "gene"), "gene name"), error = function(e) NA_character_)
+
+  fr <- grep(paste0("^", fraction_prefix), nm, value = TRUE)
+  if (length(fr) < 5) {
+    fr <- grep("fraction", nm, ignore.case = TRUE, value = TRUE)
+    if (length(fr) < 5) stop("Fewer than 5 fraction columns found. Columns: ", paste(nm, collapse = ", "))
+  }
+  fno <- suppressWarnings(as.numeric(gsub("[^0-9]", "", fr)))
+  ok  <- is.finite(fno); fr <- fr[ok]; fno <- fno[ok]
+  o   <- order(fno); fr <- fr[o]; fno <- fno[o]
+  message("Using ", length(fr), " fraction column(s): ", fr[1], " ... ", fr[length(fr)])
+
+  num <- function(v) suppressWarnings(as.numeric(as.character(v)))
+  M <- as.matrix(as.data.frame(lapply(X[, ..fr], num))); M[!is.finite(M)] <- 0
+  ids <- sub("[;,].*$", "", trimws(as.character(X[[id_col]])))          # first accession of a group
+  mw  <- num(X[[mw_col]])
+  gene <- if (!is.na(gene_col)) tolower(sub("[;,].*$", "", trimws(as.character(X[[gene_col]])))) else NA_character_
+
+  keep <- nzchar(ids) & is.finite(mw) & mw > 0 & rowSums(M) > 0
+  M <- M[keep, , drop = FALSE]; ids <- ids[keep]; mw <- mw[keep]
+  gene <- if (length(gene) > 1) gene[keep] else rep(NA_character_, length(ids))
+
+  Mn <- M / rowSums(M)
+  D <- data.table(protein_id = ids, gene = gene, mw_kDa = mw,
+                  peak_fraction = fno[max.col(Mn, ties.method = "first")],
+                  com_fraction  = as.vector(Mn %*% fno))
+  dir.create(.sq_dir(), recursive = TRUE, showWarnings = FALSE)
+  fwrite(cbind(D, as.data.table(Mn)), .sq_dir("secseq_profiles.csv"))
+  message("Parsed ", nrow(D), " protein profile(s) over fractions ", min(fno), "-", max(fno), ".")
+  invisible(list(meta = D, profiles = Mn, fractions = fno))
+}
+
+# ---- 2. which way round is the fraction axis? ------------------------------------------------------
+secseq_orientation <- function(sq, save_plots = TRUE) {
+  D <- sq$meta
+  rib <- D[grepl("^rp[sl][a-z]$", gene)]
+  # test 1: the ribosome (~1-2.5 MDa) must lie at the high-mass end of the axis
+  t1 <- if (nrow(rib) >= 5) {
+    med_rib <- stats::median(rib$peak_fraction); med_all <- stats::median(D$peak_fraction)
+    list(ok = TRUE, ribosome_fraction = med_rib, overall_fraction = med_all,
+         high_mass_at = if (med_rib < med_all) "low fractions" else "high fractions", n = nrow(rib))
+  } else list(ok = FALSE, n = nrow(rib))
+  # test 2: sign of the global monomer-mass vs position correlation
+  rho <- suppressWarnings(stats::cor(log10(D$mw_kDa), D$com_fraction, method = "spearman", use = "complete.obs"))
+  t2_high_mass_at <- if (rho < 0) "low fractions" else "high fractions"
+
+  if (isTRUE(t1$ok)) {
+    message(sprintf("Orientation test 1 (ribosome, n = %d): rps*/rpl* peak at fraction %.1f vs %.1f overall -> high mass at %s.",
+                    t1$n, t1$ribosome_fraction, t1$overall_fraction, t1$high_mass_at))
+  } else message("Orientation test 1 skipped: only ", t1$n, " ribosomal protein(s) matched (need >= 5). Check the gene column.")
+  message(sprintf("Orientation test 2 (mass vs position): Spearman rho = %+.3f -> high mass at %s.", rho, t2_high_mass_at))
+  if (isTRUE(t1$ok) && t1$high_mass_at != t2_high_mass_at)
+    stop("The two orientation tests DISAGREE. Inspect secseq_orientation.pdf before going further - ",
+         "something is wrong with the fraction parsing or the gene mapping.")
+  high_mass_at <- if (isTRUE(t1$ok)) t1$high_mass_at else t2_high_mass_at
+  message("=> Adopted orientation: HIGH MASS at ", high_mass_at,
+          if (high_mass_at == "high fractions") "  (opposite to this project's SEC, where fraction 1 is the void)" else "  (same as this project's SEC)")
+
+  if (save_plots) {
+    dir.create(.sq_dir(), recursive = TRUE, showWarnings = FALSE)
+    g1 <- ggplot(D, aes(com_fraction, mw_kDa)) +
+      geom_point(alpha = 0.25, size = 0.7, colour = "grey45") +
+      { if (nrow(rib)) geom_point(data = rib, aes(com_fraction, mw_kDa), colour = "firebrick", size = 1.4) else NULL } +
+      scale_y_log10() +
+      labs(title = "Orientation of the published SEC fraction axis",
+           subtitle = sprintf("Red = ribosomal proteins (the ~1-2.5 MDa particle, so they mark the high-mass end).\nSpearman rho(log mass, position) = %+.3f  =>  high mass at %s.", rho, high_mass_at),
+           x = "centre-of-mass fraction (published data)", y = "monomer mass (kDa)") + theme_bw()
+    tryCatch(ggsave(.sq_dir("secseq_orientation.pdf"), g1, width = 7, height = 5), error = function(e) NULL)
+  }
+  invisible(list(high_mass_at = high_mass_at, rho = rho, ribosome = rib))
+}
+
+# ---- 3. deviation from the bulk trend, within the published data alone -----------------------------
+# A robust fit of log10(monomer mass) against elution position describes how a TYPICAL protein of this
+# proteome elutes on that column. The residual is then "how much heavier the protein would have to be to
+# elute here", i.e. exactly the quantity globularity_check reports as log(apparent/expected).
+secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak"), save_plots = TRUE) {
+  position <- match.arg(position)
+  if (is.null(orientation)) orientation <- secseq_orientation(sq, save_plots = FALSE)
+  D <- copy(sq$meta)
+  D[, pos := if (position == "com") com_fraction else as.numeric(peak_fraction)]
+  D <- D[is.finite(pos) & is.finite(mw_kDa) & mw_kDa > 0]
+  fit <- if (requireNamespace("MASS", quietly = TRUE)) MASS::rlm(log10(mw_kDa) ~ pos, data = D)
+         else stats::lm(log10(mw_kDa) ~ pos, data = D)
+  D[, expected_log10_mw := stats::predict(fit, D)]
+  # positive = elutes as though HEAVIER than its monomer (assembled and/or extended)
+  D[, deviation_log10 := expected_log10_mw - log10(mw_kDa)]
+  setorder(D, -deviation_log10)
+  fwrite(D[, .(protein_id, gene, mw_kDa, pos, expected_log10_mw, deviation_log10)], .sq_dir("secseq_deviation.csv"))
+  message(sprintf("Published data: median |deviation| = %.2f log10 units (%.1f-fold); %.1f%% of proteins deviate by more than 2-fold.",
+                  stats::median(abs(D$deviation_log10), na.rm = TRUE),
+                  10^stats::median(abs(D$deviation_log10), na.rm = TRUE),
+                  100 * mean(abs(D$deviation_log10) > log10(2), na.rm = TRUE)))
+  if (save_plots) {
+    g <- ggplot(D, aes(pos, mw_kDa)) +
+      geom_point(alpha = 0.25, size = 0.7, colour = "grey45") +
+      geom_line(aes(y = 10^expected_log10_mw), colour = "steelblue", linewidth = 0.9) +
+      scale_y_log10() +
+      labs(title = "Published SEC-seq: monomer mass vs elution position",
+           subtitle = "Blue = robust fit describing how a typical protein of this proteome elutes.\nPoints far ABOVE the line elute late for their mass; far BELOW, they elute as though much heavier.",
+           x = paste0(position, " fraction"), y = "monomer mass (kDa)") + theme_bw()
+    tryCatch(ggsave(.sq_dir("secseq_selfcheck.pdf"), g, width = 7, height = 5), error = function(e) NULL)
+  }
+  invisible(D)
+}
+
+# ---- 4. the cross-lab comparison -------------------------------------------------------------------
+secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2), save_plots = TRUE) {
+  S <- secseq_selfcheck(sq, save_plots = FALSE)
+  gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
+  if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
+  G <- fread(gf)
+  if ("condition" %in% names(G)) {
+    cn <- unique(as.character(G$condition))
+    cc <- if (!is.null(condition)) condition else { x <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]; if (is.na(x)) cn[1] else x }
+    G <- G[condition == cc]; message("Using the '", cc, "' rows of this project's SEC table.")
+  }
+  if (!all(c("protein_id", "ratio", "apex_fraction") %in% names(G))) stop("globularity_check.txt lacks protein_id/ratio/apex_fraction.")
+  # same quantity, same units, in this project's data
+  G[, deviation_log10_ours := log10(ratio)]
+
+  J <- merge(G[, .(protein_id, apex_fraction, ratio, deviation_log10_ours,
+                   expected_mw_kDa, apparent_mw_kDa, class)],
+             S[, .(protein_id, gene, mw_kDa, pos_published = pos, deviation_log10_published = deviation_log10)],
+             by = "protein_id")
+  if (!nrow(J)) stop("No shared proteins - check the accession formats in both tables.")
+  message("Proteins measured in BOTH SEC datasets: ", nrow(J),
+          " (this study ", nrow(G), ", published ", nrow(S), ").")
+  # sanity: do the two labs agree on the monomer mass they used?
+  mwdiff <- abs(J$expected_mw_kDa - J$mw_kDa) / pmax(J$mw_kDa, 1)
+  message(sprintf("Monomer mass agreement between the two annotation sources: %.1f%% within 5%%.", 100 * mean(mwdiff < 0.05, na.rm = TRUE)))
+
+  P <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_published)]
+  rho_pos <- suppressWarnings(stats::cor(P$apex_fraction, P$pos_published, method = "spearman"))
+  ct  <- suppressWarnings(stats::cor.test(P$deviation_log10_ours, P$deviation_log10_published, method = "spearman"))
+  message(sprintf("Elution POSITION agreement (Spearman, note the axes run opposite ways): rho = %+.3f", rho_pos))
+  message(sprintf("DEVIATION agreement - do both labs flag the SAME proteins as eluting off their monomer mass?\n   Spearman rho = %+.3f (p = %.3g, n = %d)",
+                  unname(ct$estimate), ct$p.value, nrow(P)))
+
+  # the reproducible set: anomalous, in the same direction, in both datasets
+  P[, anom_ours := abs(deviation_log10_ours) > dev_cut]
+  P[, anom_pub  := abs(deviation_log10_published) > dev_cut]
+  P[, same_direction := sign(deviation_log10_ours) == sign(deviation_log10_published)]
+  P[, reproducible := anom_ours & anom_pub & same_direction]
+  message(sprintf("Anomalous (>%.1f-fold) here: %.1f%% | in the published data: %.1f%% | REPRODUCIBLE in both, same direction: %d protein(s) (%.1f%% of the shared set).",
+                  10^dev_cut, 100 * mean(P$anom_ours), 100 * mean(P$anom_pub),
+                  sum(P$reproducible), 100 * mean(P$reproducible)))
+  fwrite(P, .sq_dir("secseq_vs_sec.csv"))
+  fwrite(P[reproducible == TRUE][order(-abs(deviation_log10_ours))], .sq_dir("secseq_reproducible_anomalies.csv"))
+
+  if (save_plots) {
+    g1 <- ggplot(P, aes(deviation_log10_published, deviation_log10_ours)) +
+      geom_hline(yintercept = 0, colour = "grey60") + geom_vline(xintercept = 0, colour = "grey60") +
+      geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey45") +
+      geom_point(aes(colour = reproducible), alpha = 0.45, size = 0.9) +
+      scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both") +
+      geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      labs(title = paste0("Do two independent SEC experiments agree on which proteins elute anomalously?  (", metabolite, " control)"),
+           subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nEach dataset is referenced to its OWN bulk behaviour, so no calibration is transferred. Spearman rho = %+.3f (p = %.3g, n = %d).",
+                              unname(ct$estimate), ct$p.value, nrow(P)),
+           x = "deviation, published SEC-seq", y = "deviation, this study") + theme_bw()
+    g2 <- ggplot(melt(P[, .(protein_id, `this study` = deviation_log10_ours, `published` = deviation_log10_published)],
+                      id.vars = "protein_id", variable.name = "dataset", value.name = "deviation"),
+                 aes(deviation, fill = dataset)) +
+      geom_density(alpha = 0.45, colour = NA) +
+      geom_vline(xintercept = c(-dev_cut, 0, dev_cut), linetype = c(3, 1, 3), colour = "grey40") +
+      labs(title = "Distribution of elution deviation in both datasets",
+           subtitle = paste0("Dotted lines mark a ", round(10^dev_cut, 1), "-fold deviation. If the two distributions have a similar spread,\nthe anomalous population is a property of the proteome rather than of one column."),
+           x = "log10(expected mass at position / monomer mass)", y = "density", fill = NULL) +
+      theme_bw() + theme(legend.position = "top")
+    tryCatch({ grDevices::pdf(.sq_dir("secseq_vs_sec.pdf"), width = 8, height = 5.5)
+               print(g1); print(g2); grDevices::dev.off() },
+             error = function(e) try(grDevices::dev.off(), silent = TRUE))
+  }
+  invisible(P)
+}
+
+secseq_all <- function(file, metabolite, ...) {
+  sq <- secseq_load(file, ...)
+  secseq_orientation(sq)
+  secseq_selfcheck(sq)
+  secseq_vs_sec(sq, metabolite = metabolite)
+}
