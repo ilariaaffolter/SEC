@@ -33,6 +33,17 @@
 #                                         extended/IDR, or aggregate)
 #   void               apex in the void fraction(s) - excluded volume, MW cannot be inferred there
 #   between_states     matches no n within tolerance (only possible for a tight tolerance)
+#   beyond_calibration apparent MW above the LARGEST calibration standard (default 670 kDa). The
+#                      calibration is a log-linear fit to the standards, so above the top standard it is
+#                      EXTRAPOLATED - in the earliest fractions it runs to physically impossible values
+#                      (1e4-1e7 kDa). Those numbers are not measurements. They are reported separately,
+#                      and the headline anomalous % is ALSO given for the calibrated range only, which is
+#                      the defensible figure.
+#
+# CALIBRATION STANDARDS are drawn on the scatter (gold diamonds, labelled) by reading each standard's
+# observed elution fraction back through the calibration curve. Because the curve was FITTED to those
+# points, their offset from the 1x line is the log-linear fit RESIDUAL (a check of how well the fit
+# describes the standards, especially at the top end) - not an independent validation.
 #
 # IMPORTANT CAVEAT (do not over-read): SEC apparent MW conflates SHAPE and ASSEMBLY. Eluting larger than
 # the monomer can be a genuine complex OR an extended monomer - this script cannot separate them. The
@@ -47,9 +58,13 @@
 #   globularity_check(tolerance = 1.3)        # stricter "matches a clean oligomer" window
 #   globularity_check(max_oligomer = 6)       # allow up to hexamer as "globular as expected"
 #   globularity_check(min_intensity = 300)    # drop low-signal proteins
+#   globularity_check(calibration_max_kDa = 300)          # treat above 300 kDa as extrapolated
+#   globularity_check(calibration_file = "PCM17_calibration_table.xlsx")   # if auto-find fails
+#   globularity_check(standards = data.frame(name = c("Thyroglobulin","IgG"), mw_kDa = c(670,150)))
 #
 # OUTPUT (per metabolite):
 #   tables/globularity_check.txt                    per protein: expected/apparent MW, ratio, f/f0, class
+#   tables/globularity_standards_check.txt          each standard: expected vs recovered MW (fit residual)
 #   figures/globularity_apparent_vs_expected.pdf    log-log scatter + monomer/oligomer reference lines
 #   figures/globularity_ffo_distribution.pdf        proteome-wide apparent f/f0 distribution
 #   figures/globularity_pies.pdf                    pie 1: globular-as-expected vs anomalous (headline)
@@ -66,11 +81,45 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 # blues = compact/globular (monomer -> higher oligomers get lighter), warm/other = anomalous.
 .class_levels <- function(max_oligomer)
   c("monomer", if (max_oligomer >= 2) paste0("oligomer_", 2:max_oligomer, "x"),
-    "sub_monomer", "above_range", "between_states", "void")
+    "sub_monomer", "above_range", "between_states", "void", "beyond_calibration")
 .class_colours <- function(max_oligomer) {
   olig <- if (max_oligomer >= 2) grDevices::colorRampPalette(c("#6B93C0", "#C6DBEF"))(max_oligomer - 1) else character(0)
-  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F")
+  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F", "#BAB0AC")
   setNames(cols, .class_levels(max_oligomer))
+}
+
+# ---- SEC calibration standards --------------------------------------------------------------------
+# Default = the standards of the kit used here (see SETUP calibration_location). Only used to draw the
+# standards on the plot and to set the calibration's upper limit; nothing is re-fitted.
+.default_standards <- function() data.table(
+  name   = c("Thyroglobulin", "IgA", "IgG", "Ovalbumin", "Myoglobin", "Uridine"),
+  mw_kDa = c(670, 300, 150, 44, 17, 0.244))
+
+# Read the calibration table (std_weights_kDa + std_elu_fractions, the columns calibrateMW expects) so
+# each standard's OBSERVED elution fraction is known. Auto-finds *calibration*.xlsx in data/raw unless a
+# file is given. Returns NULL if unavailable - the standards are then drawn without observed fractions.
+.read_calibration <- function(calibration_file = NULL) {
+  f <- calibration_file
+  if (is.null(f)) {
+    cand <- list.files(here("data", "raw"), pattern = "calibration.*\\.xlsx$", full.names = TRUE, ignore.case = TRUE)
+    if (!length(cand)) return(NULL)
+    f <- cand[1]
+  } else if (!file.exists(f)) {
+    f2 <- here("data", "raw", f); if (!file.exists(f2)) return(NULL); f <- f2
+  }
+  if (!requireNamespace("readxl", quietly = TRUE)) return(NULL)
+  ct <- tryCatch(as.data.table(readxl::read_excel(f)), error = function(e) NULL)
+  if (is.null(ct) || !all(c("std_weights_kDa", "std_elu_fractions") %in% names(ct))) return(NULL)
+  ct[, .(mw_kDa = as.numeric(std_weights_kDa), fraction = as.numeric(std_elu_fractions))][is.finite(mw_kDa) & is.finite(fraction)]
+}
+
+# apparent MW (kDa) at an arbitrary (possibly non-integer) fraction, from the fraction->MW map already
+# stored in the traces. The calibration is log-linear, so interpolating log10(MW) vs fraction is exact.
+.mw_at_fraction <- function(mwmap, x) {
+  fr <- as.numeric(names(mwmap)); mw <- as.numeric(mwmap)
+  ok <- is.finite(fr) & is.finite(mw) & mw > 0
+  if (sum(ok) < 2) return(rep(NA_real_, length(x)))
+  10^stats::approx(fr[ok], log10(mw[ok]), xout = x, rule = 2)$y
 }
 # one pie from a table of (label, n); slices below label_min_pct are left unlabelled to avoid clutter
 .pie <- function(dt, fill_col, cols, title, subtitle, label_min_pct = 3) {
@@ -118,8 +167,16 @@ globularity_check <- function(metabolites   = NULL,
                               max_oligomer   = 4L,    # clean oligomer states allowed as "globular as expected"
                               min_intensity  = 0,     # drop proteins below this summed ctrl intensity
                               void_fractions = 1L,    # apex here = excluded volume, MW not interpretable
+                              calibration_max_kDa = NULL,   # NULL = the largest standard; above this the
+                                                            # calibration is EXTRAPOLATED, not measured
+                              standards      = NULL,  # data.frame(name, mw_kDa); NULL = the kit defaults
+                              calibration_file = NULL,# NULL = auto-find data/raw/*calibration*.xlsx
                               expected_globular_pct = 95,   # literature expectation, for the headline only
                               out_subdir     = "globularity") {
+  std <- if (is.null(standards)) .default_standards() else as.data.table(standards)
+  if (!all(c("name", "mw_kDa") %in% names(std))) stop("`standards` needs columns name, mw_kDa.")
+  cal_obs <- .read_calibration(calibration_file)      # observed elution fraction per standard (or NULL)
+  if (is.null(calibration_max_kDa)) calibration_max_kDa <- max(std$mw_kDa, na.rm = TRUE)
   if (is.null(metabolites)) {
     dirs        <- basename(list.dirs(here("output"), recursive = FALSE))
     metabolites <- sub("^PCM_ctrl_vs_", "", dirs[grepl("^PCM_ctrl_vs_", dirs)])
@@ -187,14 +244,23 @@ globularity_check <- function(metabolites   = NULL,
     d[, globular_as_expected := dev_from_state <= log(tolerance)]
     # void apex: excluded volume, apparent MW is not interpretable there
     d[apex_fraction %in% void_fractions, globular_as_expected := FALSE]
+    # BEYOND the largest calibration standard the log-linear fit is EXTRAPOLATED, so the "apparent MW"
+    # there is not a measurement (it runs to physically impossible values in the earliest fractions).
+    # Flag those separately instead of counting them as a quantitative "much larger than expected".
+    d[, beyond_calibration := apparent_mw_kDa > calibration_max_kDa]
+    d[beyond_calibration == TRUE, globular_as_expected := FALSE]
 
     d[, class := data.table::fcase(
       apex_fraction %in% void_fractions,                    "void",
+      beyond_calibration == TRUE,                           "beyond_calibration",
       globular_as_expected & oligomer_state == 1,           "monomer",
       globular_as_expected & oligomer_state >  1,           paste0("oligomer_", oligomer_state, "x"),
       ratio < 1 / tolerance,                                "sub_monomer",
       ratio > max_oligomer * tolerance,                     "above_range",
       default =                                             "between_states")]
+
+    # proteins whose apex falls INSIDE the calibrated range - the defensible denominator
+    d[, in_calibrated_range := !(apex_fraction %in% void_fractions) & !beyond_calibration]
 
     # apparent frictional ratio: cube root of the MW ratio (see header)
     d[, ffo_vs_monomer := ratio^(1/3)]
@@ -207,12 +273,18 @@ globularity_check <- function(metabolites   = NULL,
     fwrite(d, file.path(tab_dir, "globularity_check.txt"), sep = "\t")
 
     n_test <- nrow(d); n_glob <- sum(d$globular_as_expected); pct_anom <- 100 * (1 - n_glob / n_test)
+    n_rng  <- sum(d$in_calibrated_range); n_glob_rng <- sum(d$globular_as_expected & d$in_calibrated_range)
+    pct_anom_rng <- if (n_rng) 100 * (1 - n_glob_rng / n_rng) else NA_real_
     message(sprintf("[%s] ctrl globularity: %d/%d proteins tested (%d had no monomer mass or no usable peak).",
                     m, n_test, n_all, n_all - n_test))
     message(sprintf("[%s]   globular as expected (monomer or clean oligomer <=%dx, within %.2gx): %d (%.1f%%)",
                     m, max_oligomer, tolerance, n_glob, 100 * n_glob / n_test))
-    message(sprintf("[%s]   ANOMALOUS: %d (%.1f%%)  vs ~%.0f%% globular expected from literature (i.e. ~%.0f%% anomalous)",
-                    m, n_test - n_glob, pct_anom, expected_globular_pct, 100 - expected_globular_pct))
+    message(sprintf("[%s]   ANOMALOUS (all tested): %d (%.1f%%)  vs ~%.0f%% globular expected from literature",
+                    m, n_test - n_glob, pct_anom, expected_globular_pct))
+    message(sprintf("[%s]   >> DEFENSIBLE headline - within the calibrated range (apex <= %.0f kDa, non-void): %d protein(s), ANOMALOUS %.1f%%",
+                    m, calibration_max_kDa, n_rng, pct_anom_rng))
+    message(sprintf("[%s]   (%d protein(s) elute beyond the largest standard / in the void: apparent MW there is EXTRAPOLATED, not measured)",
+                    m, n_test - n_rng))
     print(d[, .N, by = class][order(-N)])
     message(sprintf("[%s]   median apparent f/f0 (vs monomer) = %.2f | vs assigned state = %.2f",
                     m, stats::median(d$ffo_vs_monomer, na.rm = TRUE), stats::median(d$ffo_vs_state, na.rm = TRUE)))
@@ -220,6 +292,9 @@ globularity_check <- function(metabolites   = NULL,
     summary_rows[[m]] <- data.table(
       metabolite = m, n_tested = n_test, n_globular = n_glob,
       pct_globular = round(100 * n_glob / n_test, 1), pct_anomalous = round(pct_anom, 1),
+      # in-range = apex inside the calibrated MW range (the defensible denominator)
+      n_in_calibrated_range = n_rng, pct_anomalous_in_range = round(pct_anom_rng, 1),
+      n_beyond_calibration  = sum(d$class == "beyond_calibration"),
       n_monomer      = sum(d$class == "monomer"),
       n_oligomer     = sum(grepl("^oligomer_", d$class)),
       n_sub_monomer  = sum(d$class == "sub_monomer"),
@@ -230,18 +305,57 @@ globularity_check <- function(metabolites   = NULL,
       median_ffo_vs_state   = round(stats::median(d$ffo_vs_state,   na.rm = TRUE), 3))
 
     # ---- plot 1: apparent vs expected MW (log-log) with monomer / oligomer reference lines ----
+    # Standards overlay: a standard's apparent MW is its OBSERVED elution fraction read back through the
+    # calibration curve. Because the curve was fitted to these points, the offset from the 1x line is the
+    # log-linear fit RESIDUAL - it shows how well the calibration describes the standards (especially at
+    # the top end), it is not an independent validation.
+    std_pts <- copy(std)
+    if (!is.null(cal_obs) && nrow(cal_obs)) {
+      std_pts[, fraction := cal_obs$fraction[match(round(mw_kDa, 3), round(cal_obs$mw_kDa, 3))]]
+      std_pts[, apparent := .mw_at_fraction(mwmap, fraction)]
+    } else {
+      std_pts[, `:=`(fraction = NA_real_, apparent = NA_real_)]
+    }
+    std_ok <- std_pts[is.finite(apparent) & is.finite(mw_kDa) & mw_kDa > 0]
+    if (!nrow(std_ok))
+      message("[", m, "]   (calibration table not found/readable - standards drawn on the x axis only; ",
+              "pass calibration_file= to locate it. Needs columns std_weights_kDa + std_elu_fractions.)")
+
     ref <- data.table(n = ns, label = paste0(ns, "x"))
     g1 <- ggplot(d, aes(expected_mw_kDa, apparent_mw_kDa, colour = class)) +
+      # everything above the largest standard is extrapolated calibration, not a measurement
+      annotate("rect", xmin = 0, xmax = Inf, ymin = calibration_max_kDa, ymax = Inf,
+               fill = "grey70", alpha = 0.22) +
+      geom_hline(yintercept = calibration_max_kDa, linetype = 3, colour = "grey30") +
       # on log10-log10 axes, y = n*x is a line of slope 1 with intercept log10(n)
       geom_abline(data = ref, aes(slope = 1, intercept = log10(n)), linetype = 2, colour = "grey60", inherit.aes = FALSE) +
       geom_point(alpha = 0.5, size = 1) +
       scale_x_log10() + scale_y_log10() +
       annotation_logticks(sides = "bl", colour = "grey70") +
       labs(title = paste0("Control elution vs expected monomer MW - PCM_ctrl_vs_", m),
-           subtitle = paste0("dashed = 1x (monomer) to ", max_oligomer, "x (clean oligomers); points off those lines elute anomalously"),
-           x = "expected monomer MW (kDa, UniProt)", y = "apparent MW at apex (kDa, SEC calibration)", colour = NULL) +
-      theme_bw() + theme(legend.position = "right")
-    ggsave(file.path(fig_dir, "globularity_apparent_vs_expected.pdf"), g1, width = 7.5, height = 5.5)
+           subtitle = paste0("dashed = 1x (monomer) to ", max_oligomer, "x (clean oligomers); points off those lines elute anomalously.\n",
+                             "Shaded = above the largest standard (", calibration_max_kDa,
+                             " kDa): the MW calibration is EXTRAPOLATED there, so those values are not measurements.\n",
+                             "Diamonds = calibration standards (offset from 1x = the log-linear fit residual)."),
+           x = "expected monomer MW (kDa, UniProt)", y = "apparent MW at apex (kDa, SEC calibration)", colour = NULL)
+    if (nrow(std_ok)) {
+      g1 <- g1 +
+        geom_point(data = std_ok, aes(mw_kDa, apparent), shape = 23, size = 3.2,
+                   fill = "gold", colour = "black", stroke = 0.7, inherit.aes = FALSE) +
+        geom_text(data = std_ok, aes(mw_kDa, apparent, label = name), inherit.aes = FALSE,
+                  vjust = -1.1, size = 2.9, colour = "black")
+    }
+    g1 <- g1 + theme_bw() + theme(legend.position = "right")
+    ggsave(file.path(fig_dir, "globularity_apparent_vs_expected.pdf"), g1, width = 8.5, height = 6)
+
+    # standards check table: expected vs recovered MW (fit residual per standard)
+    if (nrow(std_ok)) {
+      chk <- copy(std_ok)[, .(standard = name, expected_kDa = mw_kDa, elution_fraction = fraction,
+                              recovered_kDa = round(apparent, 3))]
+      chk[, ratio_recovered_expected := round(recovered_kDa / expected_kDa, 3)]
+      fwrite(chk, file.path(tab_dir, "globularity_standards_check.txt"), sep = "\t")
+      message("[", m, "]   calibration standards (recovered vs expected MW):"); print(chk)
+    }
 
     # ---- plot 2: proteome-wide apparent frictional ratio distribution ----
     vlines <- data.table(x = ns^(1/3), label = paste0(ns, "x"))
@@ -288,13 +402,15 @@ globularity_check <- function(metabolites   = NULL,
     hlP <- data.table(group = factor(c("globular as expected", "anomalous"),
                                      levels = c("globular as expected", "anomalous")),
                       n = c(sum(S$n_globular), sum(S$n_tested) - sum(S$n_globular)))[n > 0]
+    .plev <- c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void", "beyond_calibration")
     pooled_class <- data.table(
-      class = factor(c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void"),
-                     levels = c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void")),
+      class = factor(.plev, levels = .plev),
       n = c(sum(S$n_monomer), sum(S$n_oligomer), sum(S$n_sub_monomer),
-            sum(S$n_above_range), sum(S$n_between_states), sum(S$n_void)))[n > 0]
+            sum(S$n_above_range), sum(S$n_between_states), sum(S$n_void),
+            sum(S$n_beyond_calibration)))[n > 0]
     pooled_cols <- c("monomer" = "#2C5F8A", "oligomer (2-Nx)" = "#8CB3D9", "sub_monomer" = "#F28E2B",
-                     "above_range" = "#E15759", "between_states" = "#B07AA1", "void" = "#9C755F")
+                     "above_range" = "#E15759", "between_states" = "#B07AA1", "void" = "#9C755F",
+                     "beyond_calibration" = "#BAB0AC")
     grDevices::pdf(file.path(out, "globularity_pies_pooled.pdf"), width = 6.5, height = 5.5)
     print(.pie(hlP, "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
                "Control globularity - all metabolites pooled",
