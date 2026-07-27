@@ -46,6 +46,10 @@
 #   validation_shortlist.md                  the readable shortlist: per metabolite, the top N with
 #                                            gene, evidence, suggested assay and partner requirements
 #   validation_shortlist.pdf                 score composition of the shortlisted proteins
+#   nucleic_acid_binders_<metabolite>.txt    DNA/RNA binders, set aside from the shortlist
+#   nucleic_acid_binders_all.csv             the same, combined
+#   nucleic_acid_binders.md                  readable list of the nucleic-acid binders that shift, with
+#                                            the matched terms and a note on how to follow them up
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
@@ -109,6 +113,19 @@ source(here::here("scripts", "globularity_category_annotation.R"))
                          "amino.?acid biosynth|one.?carbon|folate|NAD biosynth|carbon metabol|",
                          "carbohydrate metabol|energy")
 
+# DNA / RNA binders - set aside from the main prioritisation. A nucleic-acid-associated protein travels
+# with DNA, RNA or the ribosome, so a change in its elution can reflect altered nucleic-acid association
+# or ribosome engagement rather than an allosteric effect on the protein itself, and a photometric assay
+# on a purified subunit is rarely meaningful for them. They are NOT discarded: they get their own list,
+# since a metabolite-dependent shift of a nucleic-acid binder is interesting in its own right
+# (ppGpp-like signalling, riboswitch-like behaviour, nucleoid remodelling, ribosome assembly).
+# NOTE the pattern deliberately does NOT contain "nucleotide": a P-loop nucleotide-binding enzyme is not
+# a nucleic-acid binder. HEURISTIC - override with `nucleic_acid_regex`; matched terms are written out.
+.NUCLEIC_REGEX <- paste0("DNA.?binding|RNA.?binding|nucleic acid|\\brRNA|\\btRNA|\\bmRNA|ribosom|",
+                         "translation|transcription|nucleoid|helicase|topoisomerase|polymerase|",
+                         "ribonucleoprotein|sigma factor|nuclease|primase|recombinase|transposase|",
+                         "chromosome|DNA repair|DNA replication|riboswitch|antitermination")
+
 # CURATED PRIOR - classic allosterically regulated E. coli enzymes (textbook knowledge; VERIFY, do not
 # treat as evidence from this dataset). Gene symbols as used by UniProt gene_names.
 .ALLOSTERIC_PRIOR <- c(
@@ -145,6 +162,8 @@ validation_candidates <- function(metabolites   = NULL,
                                   ccf_top_n      = 50L,
                                   rank_source    = c("emd", "ccf"),
                                   require_photometric = TRUE,
+                                  exclude_nucleic_acid = TRUE,   # DNA/RNA binders -> their own list
+                                  nucleic_acid_regex   = NULL,
                                   pBHadj_cut     = 0.05, log2fc_cut = 1,
                                   w_stat = 3, w_shift = 3, w_both = 2,
                                   w_central = 3, w_assay = 1, w_allosteric = 2,
@@ -185,7 +204,7 @@ validation_candidates <- function(metabolites   = NULL,
   if (!length(metabolites)) stop("No PCM_ctrl_vs_* output folders found.")
 
   out <- here("output", out_subdir); dir.create(out, recursive = TRUE, showWarnings = FALSE)
-  all_cand <- list(); md <- c("# Orthogonal validation shortlist", "",
+  all_cand <- list(); all_nucleic <- list(); md <- c("# Orthogonal validation shortlist", "",
     "Annotation-driven candidates for photometric activity assays of allosteric regulation.",
     "Evidence = CCprofiler differential abundance (pBHadj < 0.05, |log2FC| > 1) and/or the top-ranked",
     paste0("proteins of the ", toupper(rank_source), " elution-shift screen (exploratory: no FDR-significant hits)."),
@@ -253,6 +272,12 @@ validation_candidates <- function(metabolites   = NULL,
     D[, suggested_assay := vapply(aa, function(x) x$assay, character(1))]
     D[, assay_weight    := vapply(aa, function(x) x$w,     numeric(1))]
     D[, is_central := grepl(.CENTRAL_REGEX, annot_text, ignore.case = TRUE)]
+    # DNA/RNA binders: flagged and set aside (see .NUCLEIC_REGEX for why), with the matched terms kept
+    .nrx <- if (is.null(nucleic_acid_regex)) .NUCLEIC_REGEX else nucleic_acid_regex
+    D[, nucleic_acid_binder := grepl(.nrx, annot_text, ignore.case = TRUE)]
+    D[, nucleic_terms := vapply(annot_text, function(s) {
+      tt <- trimws(unlist(strsplit(s, ";")))
+      paste(unique(tt[grepl(.nrx, tt, ignore.case = TRUE)]), collapse = " | ") }, character(1), USE.NAMES = FALSE)]
     prior_names <- tolower(names(.ALLOSTERIC_PRIOR))
     D[, allosteric_note := ifelse(gene_lc %in% prior_names, unname(.ALLOSTERIC_PRIOR[match(gene_lc, prior_names)]), NA_character_)]
     D[, is_allosteric_prior := !is.na(allosteric_note)]
@@ -282,14 +307,25 @@ validation_candidates <- function(metabolites   = NULL,
       default =                   "none")]
     if (require_photometric) D <- D[assay_weight > 0]
     setorder(D, -score)
-    fwrite(D, file.path(out, paste0("validation_candidates_", m, ".txt")), sep = "\t")
+    fwrite(D, file.path(out, paste0("validation_candidates_", m, ".txt")), sep = "\t")   # everything, flag included
+
+    # split off the DNA/RNA binders - kept as their own list, not thrown away
+    D_na <- D[nucleic_acid_binder == TRUE]
+    if (exclude_nucleic_acid) D <- D[nucleic_acid_binder == FALSE]
+    if (nrow(D_na)) {
+      fwrite(D_na, file.path(out, paste0("nucleic_acid_binders_", m, ".txt")), sep = "\t")
+      all_nucleic[[m]] <- copy(D_na)[, metabolite := m]
+    }
     all_cand[[m]] <- copy(D)[, metabolite := m]
+    if (!nrow(D)) { message("[", m, "] no candidates left after the DNA/RNA-binder split."); next }
 
     top <- head(D, n_per_metabolite)
-    message("\n[", m, "] top ", nrow(top), " validation candidate(s):")
+    message("\n[", m, "] top ", nrow(top), " validation candidate(s)",
+            if (exclude_nucleic_acid) paste0("  [", nrow(D_na), " DNA/RNA binder(s) moved to their own list]") else "", ":")
     print(top[, .(gene, protein_id, evidence, is_central, is_allosteric_prior, ec, score)])
 
-    md <- c(md, paste0("## ", m, "  (", nrow(D), " scored candidates)"), "")
+    md <- c(md, paste0("## ", m, "  (", nrow(D), " scored candidates",
+                       if (exclude_nucleic_acid && nrow(D_na)) paste0("; ", nrow(D_na), " DNA/RNA binders set aside") else "", ")"), "")
     for (i in seq_len(nrow(top))) {
       r <- top[i]
       md <- c(md,
@@ -312,6 +348,43 @@ validation_candidates <- function(metabolites   = NULL,
     fwrite(AC, file.path(out, "validation_candidates_all.csv"))
     writeLines(md, file.path(out, "validation_shortlist.md"))
     message("\nShortlist written to ", file.path(out, "validation_shortlist.md"))
+
+    # ---- the DNA/RNA-binder list: separate table + its own readable summary ----
+    if (length(all_nucleic)) {
+      AN <- rbindlist(all_nucleic, use.names = TRUE, fill = TRUE)
+      fwrite(AN, file.path(out, "nucleic_acid_binders_all.csv"))
+      nmd <- c("# Nucleic-acid binders with a metabolite-dependent elution change", "",
+        "Set aside from the activity-assay shortlist: these proteins travel with DNA, RNA or the ribosome,",
+        "so an elution change may reflect altered nucleic-acid association or ribosome engagement rather",
+        "than an allosteric effect on the protein itself, and a photometric assay on a purified subunit is",
+        "rarely informative for them.",
+        "",
+        "They are listed here because the observation is interesting in its own right - metabolite-dependent",
+        "nucleoprotein remodelling, ppGpp-like signalling, or ribosome-association changes. Validating these",
+        "needs a different orthogonal approach (EMSA, RNA/DNA pull-down, polysome profiling, ITC with the",
+        "nucleic-acid ligand), not a cuvette activity assay.",
+        "",
+        "Classification is a KEYWORD HEURISTIC over GO / UniProt annotation - the matched terms are given",
+        "per protein so every call can be checked.", "")
+      for (m in names(all_nucleic)) {
+        dn <- all_nucleic[[m]]; setorder(dn, -score)
+        nmd <- c(nmd, paste0("## ", m, "  (", nrow(dn), " nucleic-acid binders)"), "")
+        for (i in seq_len(min(nrow(dn), n_per_metabolite))) {
+          r <- dn[i]
+          nmd <- c(nmd,
+            paste0("**", i, ". ", ifelse(is.na(r$gene) || !nzchar(r$gene), r$protein_id, r$gene), "** (", r$protein_id, ")"),
+            paste0("- Protein: ", r$protein_name),
+            paste0("- Evidence: ", r$evidence,
+                   ifelse(is.na(r$log2fc), "", sprintf("; log2FC = %.2f, BH p = %.3g", r$log2fc, r$stat_p)),
+                   ifelse(is.na(r$shift_rank), "", sprintf("; shift-screen rank %d", r$shift_rank))),
+            paste0("- Matched nucleic-acid terms: ", substr(ifelse(is.na(r$nucleic_terms) | !nzchar(r$nucleic_terms), "(name/GO match)", r$nucleic_terms), 1, 200)),
+            "")
+        }
+      }
+      writeLines(nmd, file.path(out, "nucleic_acid_binders.md"))
+      message("DNA/RNA binders (", nrow(AN), " rows across ", length(all_nucleic),
+              " metabolite(s)) -> ", file.path(out, "nucleic_acid_binders.md"))
+    }
 
     TOP <- AC[, head(.SD[order(-score)], n_per_metabolite), by = metabolite]
     TOP[, label := ifelse(is.na(gene) | !nzchar(gene), protein_id, gene)]
@@ -343,6 +416,7 @@ validation_candidates <- function(metabolites   = NULL,
 #   plot_validation_candidates("ATP")
 #   plot_validation_candidates(only_stat_hits = FALSE)    # include shift-screen-only candidates
 #   plot_validation_candidates(ids = c("P15723","P0A6F5"))# an explicit list you pasted yourself
+#   plot_validation_candidates(set = "nucleic_acid")      # the DNA/RNA-binder list instead
 #   plot_validation_candidates(top_n = 20)                # only the 20 best-scoring per metabolite
 #
 # OUTPUT (per metabolite): output/PCM_ctrl_vs_<m>/validation_traces/
@@ -351,17 +425,20 @@ validation_candidates <- function(metabolites   = NULL,
 # ---------------------------------------------------------------------------------------------------
 plot_validation_candidates <- function(metabolites   = NULL,
                                        ids            = NULL,
+                                       set            = c("candidates", "nucleic_acid"),
                                        only_stat_hits = TRUE,
                                        top_n          = Inf,
                                        max_per_metabolite = 250,
                                        x_axis         = c("fraction", "mw"),
                                        aggregate      = c("condition", "replicate"),
                                        out_subdir     = "validation_traces") {
-  x_axis <- match.arg(x_axis); aggregate <- match.arg(aggregate)
+  x_axis <- match.arg(x_axis); aggregate <- match.arg(aggregate); set <- match.arg(set)
   source(here::here("scripts", "plot_protein_traces.R"))
+  if (set == "nucleic_acid" && identical(out_subdir, "validation_traces")) out_subdir <- "nucleic_acid_traces"
 
   AC <- NULL
-  f <- here("output", "validation_candidates", "validation_candidates_all.csv")
+  f <- here("output", "validation_candidates",
+            if (set == "nucleic_acid") "nucleic_acid_binders_all.csv" else "validation_candidates_all.csv")
   if (is.null(ids)) {
     if (!file.exists(f)) stop("No ", f, " - run validation_candidates() first, or pass ids = c(...).")
     AC <- fread(f)
