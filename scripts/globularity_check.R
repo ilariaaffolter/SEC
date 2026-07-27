@@ -10,7 +10,12 @@
 # baseline population BEFORE any metabolite interpretation, so a treatment "shift" is read against a
 # known background rather than assumed.
 #
-# HOW (per protein, CONTROL samples only, replicates averaged):
+# The classification is run SEPARATELY FOR EACH CONDITION (control and treatment) on the same protein set
+# and the same calibration, so the two are directly comparable; the results table carries a `condition`
+# column and the summary one row per metabolite x condition. The plots and the pooled pies use the
+# CONTROL, which is the baseline the literature expectation refers to.
+#
+# HOW (per protein, per condition, replicates averaged):
 #   apparent_mw  = the calibrated apparent MW (kDa) at the protein's APEX fraction (its dominant peak).
 #                  Comes from the SEC MW calibration already stored in the traces (fraction_annotation$
 #                  molecular_weight, built by calibrateMW() from the kDa standards).
@@ -228,149 +233,163 @@ globularity_check <- function(metabolites   = NULL,
     }
     tl <- e$protein_traces_list; samples <- names(tl)
 
-    # CONTROL samples only (ctrl/control/ref-named condition, else the first factor level)
+    # CONDITIONS: the classification is run SEPARATELY for the control and for the treatment, on the same
+    # protein set and the same calibration, so the two are directly comparable (the results table carries
+    # a `condition` column). The control is always first and drives the plots below.
     dm    <- as.data.table(e$design_matrix)
     cond  <- as.character(dm$Condition[match(samples, as.character(dm$Sample_name))])
-    conds <- unique(cond)
+    conds <- unique(stats::na.omit(cond))
     ctrl  <- conds[grepl("ctrl|control|ref", conds, ignore.case = TRUE)][1]
     if (is.na(ctrl)) ctrl <- if (is.factor(dm$Condition)) as.character(levels(dm$Condition))[1] else conds[1]
-    ctrl_idx <- which(cond == ctrl)
-    if (!length(ctrl_idx)) { message("[", m, "] no control samples identified; skipping."); next }
+    cond_names <- c(ctrl, setdiff(conds, ctrl))
+    if (!length(cond_names)) { message("[", m, "] no conditions identified; skipping."); next }
 
-    mats   <- lapply(ctrl_idx, function(i) .get_mat(tl[[i]]))
-    common <- Reduce(intersect, lapply(mats, rownames))
-    if (length(common) < 10) { message("[", m, "] <10 shared proteins in ctrl; skipping."); next }
-    mats <- lapply(mats, function(M) { M <- M[common, , drop = FALSE]; M[is.na(M)] <- 0; M })
-    ctrl_mean <- Reduce(`+`, mats) / length(mats)          # mean ctrl profile per protein
+    # protein set shared by ALL samples, so ctrl and treatment are classified on the same proteins
+    all_mats <- lapply(seq_along(samples), function(i) .get_mat(tl[[i]]))
+    common   <- Reduce(intersect, lapply(all_mats, rownames))
+    if (length(common) < 10) { message("[", m, "] <10 shared proteins; skipping."); next }
+    all_mats <- lapply(all_mats, function(M) { M <- M[common, , drop = FALSE]; M[is.na(M)] <- 0; M })
 
-    mwmap <- .fraction_mw_map(tl[[ctrl_idx[1]]])
+    mwmap <- .fraction_mw_map(tl[[1]])
     if (is.null(mwmap)) { message("[", m, "] traces carry no MW calibration (fraction_annotation$molecular_weight); skipping."); next }
-    pmw   <- .protein_mw_map(tl[[ctrl_idx[1]]])
+    pmw   <- .protein_mw_map(tl[[1]])
     if (is.null(pmw)) { message("[", m, "] traces carry no protein_mw (UniProt monomer mass); skipping."); next }
-
-    fracs     <- as.numeric(colnames(ctrl_mean))
-    total_int <- rowSums(ctrl_mean)
-    apex_col  <- max.col(ctrl_mean, ties.method = "first")
-    apex_frac <- fracs[apex_col]
-    apparent  <- unname(mwmap[as.character(apex_frac)])
-    expected  <- unname(pmw[common])
-
-    d <- data.table(protein_id = common, apex_fraction = apex_frac, ctrl_intensity = total_int,
-                    expected_mw_kDa = expected, apparent_mw_kDa = apparent)
-    n_all <- nrow(d)
-    d <- d[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 &
-           is.finite(apparent_mw_kDa) & apparent_mw_kDa > 0 &
-           total_int > min_intensity & is.finite(total_int) & total_int > 0]
-    if (!nrow(d)) { message("[", m, "] no protein has both a monomer mass and a usable ctrl peak; skipping."); next }
-    d[, ratio := apparent_mw_kDa / expected_mw_kDa]
-
-    # Unit sanity check: both should be kDa. A median ratio near 1000x / 0.001x means a Da-vs-kDa mix-up,
-    # which would make every classification meaningless - report it rather than silently classifying.
-    .med <- stats::median(d$ratio, na.rm = TRUE)
-    if (.med > 100 || .med < 0.01)
-      warning(sprintf("[%s] median apparent/expected MW ratio is %.3g - apparent and monomer MW may be in DIFFERENT UNITS (expect both kDa). Interpret with care.", m, .med))
-
-    # assign the closest clean oligomer state n, then test whether it is within the tolerance factor
-    ns <- as.numeric(seq_len(max_oligomer))   # numeric: vapply below is type-strict
+    fracs <- as.numeric(colnames(all_mats[[1]]))
+    ns    <- as.numeric(seq_len(max_oligomer))   # numeric: vapply below is type-strict
 
     # RESOLUTION: one fraction step spans this MW factor. If the mwfold tolerance is SMALLER than this,
     # a protein whose apex is a single fraction off is auto-flagged anomalous - which is a property of the
-    # fractionation grid, not of the protein. Hence the default "fractions" method below.
+    # fractionation grid, not of the protein. Hence the default "fractions" method.
     mw_per_frac <- .mw_per_fraction(mwmap)
     if (is.finite(mw_per_frac))
       message(sprintf("[%s]   resolution: one fraction step = %.2fx in apparent MW (= %.3fx in f/f0).",
                       m, mw_per_frac, mw_per_frac^(1/3)))
-
-    if (method == "fractions") {
-      # distance, IN FRACTIONS, from the apex to where each clean oligomer state n would elute
-      devF <- vapply(ns, function(n) abs(d$apex_fraction - .fraction_at_mw(mwmap, n * d$expected_mw_kDa)),
-                     numeric(nrow(d)))
-      if (is.null(dim(devF))) devF <- matrix(devF, nrow = nrow(d))
-      best_i <- max.col(-devF, ties.method = "first")
-      d[, oligomer_state := ns[best_i]]
-      d[, dev_fractions  := devF[cbind(seq_len(nrow(d)), best_i)]]
-      d[, globular_as_expected := dev_fractions <= tolerance_fractions]
-      if (is.finite(mw_per_frac))
-        message(sprintf("[%s]   window: apex within %.2g fraction(s) of the expected position (~%.2fx in MW).",
-                        m, tolerance_fractions, mw_per_frac^tolerance_fractions))
-    } else {
-      n_best <- vapply(d$ratio, function(r) ns[which.min(abs(log(r / ns)))], numeric(1))
-      d[, oligomer_state := n_best]
-      d[, dev_fractions  := NA_real_]
-      d[, dev_from_state := abs(log(ratio / oligomer_state))]        # log-distance to that state
-      d[, globular_as_expected := dev_from_state <= log(tolerance)]
-      if (is.finite(mw_per_frac) && tolerance < mw_per_frac)
-        warning(sprintf("[%s] tolerance (%.2gx) is NARROWER than one fraction step (%.2fx): proteins one fraction off are flagged anomalous by construction. Use method='fractions' or raise tolerance.",
-                        m, tolerance, mw_per_frac))
-    }
-    # void apex: excluded volume, apparent MW is not interpretable there
-    d[apex_fraction %in% void_fractions, globular_as_expected := FALSE]
-    # BEYOND the largest calibration standard the log-linear fit is EXTRAPOLATED, so the "apparent MW"
-    # there is not a measurement (it runs to physically impossible values in the earliest fractions).
-    # Flag those separately instead of counting them as a quantitative "much larger than expected".
-    d[, beyond_calibration := apparent_mw_kDa > calibration_max_kDa]
-    d[beyond_calibration == TRUE, globular_as_expected := FALSE]
-
     # the MW-fold equivalent of the accepted window, used for the anomalous SUBTYPE thresholds so they
     # follow whichever method was chosen
     tol_fold <- if (method == "fractions" && is.finite(mw_per_frac)) mw_per_frac^tolerance_fractions else tolerance
+    if (method == "fractions" && is.finite(mw_per_frac))
+      message(sprintf("[%s]   window: apex within %.2g fraction(s) of the expected position (~%.2fx in MW).",
+                      m, tolerance_fractions, tol_fold))
+    if (method == "mwfold" && is.finite(mw_per_frac) && tolerance < mw_per_frac)
+      warning(sprintf("[%s] tolerance (%.2gx) is NARROWER than one fraction step (%.2fx): proteins one fraction off are flagged anomalous by construction. Use method='fractions' or raise tolerance.",
+                      m, tolerance, mw_per_frac))
 
-    d[, class := data.table::fcase(
-      apex_fraction %in% void_fractions,                    "void",
-      beyond_calibration == TRUE,                           "beyond_calibration",
-      globular_as_expected & oligomer_state == 1,           "monomer",
-      globular_as_expected & oligomer_state >  1,           paste0("oligomer_", oligomer_state, "x"),
-      ratio < 1 / tol_fold,                                 "sub_monomer",
-      ratio > max_oligomer * tol_fold,                      "above_range",
-      default =                                             "between_states")]
+    # classify one condition group -> its own results table
+    .classify_one <- function(cn) {
+      idx <- which(cond == cn)
+      if (!length(idx)) return(NULL)
+      gm        <- Reduce(`+`, all_mats[idx]) / length(idx)     # mean profile per protein in this condition
+      total_int <- rowSums(gm)
+      apex_frac <- fracs[max.col(gm, ties.method = "first")]
+      d <- data.table(condition = cn, protein_id = common, apex_fraction = apex_frac,
+                      group_intensity = total_int,
+                      expected_mw_kDa = unname(pmw[common]),
+                      apparent_mw_kDa = unname(mwmap[as.character(apex_frac)]))
+      n_all <- nrow(d)
+      d <- d[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 &
+             is.finite(apparent_mw_kDa) & apparent_mw_kDa > 0 &
+             group_intensity > min_intensity & is.finite(group_intensity) & group_intensity > 0]
+      if (!nrow(d)) return(NULL)
+      d[, ratio := apparent_mw_kDa / expected_mw_kDa]
 
-    # proteins whose apex falls INSIDE the calibrated range - the defensible denominator
-    d[, in_calibrated_range := !(apex_fraction %in% void_fractions) & !beyond_calibration]
+      # Unit sanity check: both should be kDa. A median ratio near 1000x / 0.001x means a Da-vs-kDa
+      # mix-up, which would make every classification meaningless - report rather than silently classify.
+      .med <- stats::median(d$ratio, na.rm = TRUE)
+      if (.med > 100 || .med < 0.01)
+        warning(sprintf("[%s/%s] median apparent/expected MW ratio is %.3g - apparent and monomer MW may be in DIFFERENT UNITS (expect both kDa).", m, cn, .med))
 
-    # apparent frictional ratio: cube root of the MW ratio (see header)
-    d[, ffo_vs_monomer := ratio^(1/3)]
-    d[, ffo_vs_state   := (ratio / oligomer_state)^(1/3)]
-    setorder(d, -ratio)
+      if (method == "fractions") {
+        # distance, IN FRACTIONS, from the apex to where each clean oligomer state n would elute
+        devF <- vapply(ns, function(n) abs(d$apex_fraction - .fraction_at_mw(mwmap, n * d$expected_mw_kDa)),
+                       numeric(nrow(d)))
+        if (is.null(dim(devF))) devF <- matrix(devF, nrow = nrow(d))
+        best_i <- max.col(-devF, ties.method = "first")
+        d[, oligomer_state := ns[best_i]]
+        d[, dev_fractions  := devF[cbind(seq_len(nrow(d)), best_i)]]
+        d[, globular_as_expected := dev_fractions <= tolerance_fractions]
+      } else {
+        n_best <- vapply(d$ratio, function(r) ns[which.min(abs(log(r / ns)))], numeric(1))
+        d[, oligomer_state := n_best]
+        d[, dev_fractions  := NA_real_]
+        d[, dev_from_state := abs(log(ratio / oligomer_state))]      # log-distance to that state
+        d[, globular_as_expected := dev_from_state <= log(tolerance)]
+      }
+      # void apex: excluded volume, apparent MW is not interpretable there
+      d[apex_fraction %in% void_fractions, globular_as_expected := FALSE]
+      # BEYOND the largest calibration standard the log-linear fit is EXTRAPOLATED, so the "apparent MW"
+      # there is not a measurement (it runs to physically impossible values in the earliest fractions).
+      d[, beyond_calibration := apparent_mw_kDa > calibration_max_kDa]
+      d[beyond_calibration == TRUE, globular_as_expected := FALSE]
+
+      d[, class := data.table::fcase(
+        apex_fraction %in% void_fractions,                    "void",
+        beyond_calibration == TRUE,                           "beyond_calibration",
+        globular_as_expected & oligomer_state == 1,           "monomer",
+        globular_as_expected & oligomer_state >  1,           paste0("oligomer_", oligomer_state, "x"),
+        ratio < 1 / tol_fold,                                 "sub_monomer",
+        ratio > max_oligomer * tol_fold,                      "above_range",
+        default =                                             "between_states")]
+
+      # proteins whose apex falls INSIDE the calibrated range - the defensible denominator
+      d[, in_calibrated_range := !(apex_fraction %in% void_fractions) & !beyond_calibration]
+      # apparent frictional ratio: cube root of the MW ratio (see header)
+      d[, ffo_vs_monomer := ratio^(1/3)]
+      d[, ffo_vs_state   := (ratio / oligomer_state)^(1/3)]
+      setorder(d, -ratio)
+      attr(d, "n_all") <- n_all
+      d
+    }
+
+    d_list <- lapply(cond_names, .classify_one); names(d_list) <- cond_names
+    d_list <- d_list[!vapply(d_list, is.null, logical(1))]
+    if (!length(d_list)) { message("[", m, "] no condition produced usable data; skipping."); next }
+    d_all <- rbindlist(d_list, use.names = TRUE, fill = TRUE)
+    d     <- d_list[[1]]          # control: drives the plots below
 
     tab_dir <- here("output", paste0("PCM_ctrl_vs_", m), "tables")
     fig_dir <- here("output", paste0("PCM_ctrl_vs_", m), "figures")
     dir.create(tab_dir, recursive = TRUE, showWarnings = FALSE); dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
-    fwrite(d, file.path(tab_dir, "globularity_check.txt"), sep = "\t")
+    fwrite(d_all, file.path(tab_dir, "globularity_check.txt"), sep = "\t")
 
-    n_test <- nrow(d); n_glob <- sum(d$globular_as_expected); pct_anom <- 100 * (1 - n_glob / n_test)
-    n_rng  <- sum(d$in_calibrated_range); n_glob_rng <- sum(d$globular_as_expected & d$in_calibrated_range)
-    pct_anom_rng <- if (n_rng) 100 * (1 - n_glob_rng / n_rng) else NA_real_
-    message(sprintf("[%s] ctrl globularity: %d/%d proteins tested (%d had no monomer mass or no usable peak).",
-                    m, n_test, n_all, n_all - n_test))
-    message(sprintf("[%s]   globular as expected (monomer or clean oligomer <=%dx, window: %s): %d (%.1f%%)",
-                    m, max_oligomer,
-                    if (method == "fractions") sprintf("+/-%.2g fraction(s) ~ %.2fx MW", tolerance_fractions, tol_fold)
-                    else sprintf("%.2gx MW", tolerance),
-                    n_glob, 100 * n_glob / n_test))
-    message(sprintf("[%s]   ANOMALOUS (all tested): %d (%.1f%%)  vs ~%.0f%% globular expected from literature",
-                    m, n_test - n_glob, pct_anom, expected_globular_pct))
-    message(sprintf("[%s]   >> DEFENSIBLE headline - within the calibrated range (apex <= %.0f kDa, non-void): %d protein(s), ANOMALOUS %.1f%%",
-                    m, calibration_max_kDa, n_rng, pct_anom_rng))
-    message(sprintf("[%s]   (%d protein(s) elute beyond the largest standard / in the void: apparent MW there is EXTRAPOLATED, not measured)",
-                    m, n_test - n_rng))
-    print(d[, .N, by = class][order(-N)])
-    message(sprintf("[%s]   median apparent f/f0 (vs monomer) = %.2f | vs assigned state = %.2f",
-                    m, stats::median(d$ffo_vs_monomer, na.rm = TRUE), stats::median(d$ffo_vs_state, na.rm = TRUE)))
+    for (cn in names(d_list)) {
+      dc <- d_list[[cn]]; n_all_c <- attr(dc, "n_all")
+      role <- if (identical(cn, ctrl)) "control" else "treatment"
+      n_test <- nrow(dc); n_glob <- sum(dc$globular_as_expected); pct_anom <- 100 * (1 - n_glob / n_test)
+      n_rng  <- sum(dc$in_calibrated_range); n_glob_rng <- sum(dc$globular_as_expected & dc$in_calibrated_range)
+      pct_anom_rng <- if (n_rng) 100 * (1 - n_glob_rng / n_rng) else NA_real_
+      message(sprintf("[%s | %s (%s)] %d/%d proteins tested (%d had no monomer mass or no usable peak).",
+                      m, cn, role, n_test, n_all_c, n_all_c - n_test))
+      message(sprintf("   globular as expected (monomer or clean oligomer <=%dx, window: %s): %d (%.1f%%)",
+                      max_oligomer,
+                      if (method == "fractions") sprintf("+/-%.2g fraction(s) ~ %.2fx MW", tolerance_fractions, tol_fold)
+                      else sprintf("%.2gx MW", tolerance),
+                      n_glob, 100 * n_glob / n_test))
+      message(sprintf("   ANOMALOUS (all tested): %d (%.1f%%)  vs ~%.0f%% globular expected from literature",
+                      n_test - n_glob, pct_anom, expected_globular_pct))
+      message(sprintf("   >> DEFENSIBLE headline - within the calibrated range (apex <= %.0f kDa, non-void): %d protein(s), ANOMALOUS %.1f%%",
+                      calibration_max_kDa, n_rng, pct_anom_rng))
+      message(sprintf("   (%d protein(s) elute beyond the largest standard / in the void: apparent MW there is EXTRAPOLATED, not measured)",
+                      n_test - n_rng))
+      print(dc[, .N, by = class][order(-N)])
+      message(sprintf("   median apparent f/f0 (vs monomer) = %.2f | vs assigned state = %.2f",
+                      stats::median(dc$ffo_vs_monomer, na.rm = TRUE), stats::median(dc$ffo_vs_state, na.rm = TRUE)))
 
-    summary_rows[[m]] <- data.table(
-      metabolite = m, n_tested = n_test, n_globular = n_glob,
-      pct_globular = round(100 * n_glob / n_test, 1), pct_anomalous = round(pct_anom, 1),
-      # in-range = apex inside the calibrated MW range (the defensible denominator)
-      n_in_calibrated_range = n_rng, pct_anomalous_in_range = round(pct_anom_rng, 1),
-      n_beyond_calibration  = sum(d$class == "beyond_calibration"),
-      n_monomer      = sum(d$class == "monomer"),
-      n_oligomer     = sum(grepl("^oligomer_", d$class)),
-      n_sub_monomer  = sum(d$class == "sub_monomer"),
-      n_above_range  = sum(d$class == "above_range"),
-      n_between_states = sum(d$class == "between_states"),
-      n_void         = sum(d$class == "void"),
-      median_ffo_vs_monomer = round(stats::median(d$ffo_vs_monomer, na.rm = TRUE), 3),
-      median_ffo_vs_state   = round(stats::median(d$ffo_vs_state,   na.rm = TRUE), 3))
+      summary_rows[[paste(m, cn)]] <- data.table(
+        metabolite = m, condition = cn, role = role,
+        n_tested = n_test, n_globular = n_glob,
+        pct_globular = round(100 * n_glob / n_test, 1), pct_anomalous = round(pct_anom, 1),
+        # in-range = apex inside the calibrated MW range (the defensible denominator)
+        n_in_calibrated_range = n_rng, pct_anomalous_in_range = round(pct_anom_rng, 1),
+        n_beyond_calibration  = sum(dc$class == "beyond_calibration"),
+        n_monomer      = sum(dc$class == "monomer"),
+        n_oligomer     = sum(grepl("^oligomer_", dc$class)),
+        n_sub_monomer  = sum(dc$class == "sub_monomer"),
+        n_above_range  = sum(dc$class == "above_range"),
+        n_between_states = sum(dc$class == "between_states"),
+        n_void         = sum(dc$class == "void"),
+        median_ffo_vs_monomer = round(stats::median(dc$ffo_vs_monomer, na.rm = TRUE), 3),
+        median_ffo_vs_state   = round(stats::median(dc$ffo_vs_state,   na.rm = TRUE), 3))
+    }
 
     # ---- plot 1: apparent vs expected MW (log-log) with monomer / oligomer reference lines ----
     # Standards overlay: a standard's apparent MW is its OBSERVED elution fraction read back through the
@@ -468,10 +487,14 @@ globularity_check <- function(metabolites   = NULL,
   if (length(summary_rows)) {
     S <- rbindlist(summary_rows, use.names = TRUE)
     out <- here("output", out_subdir); dir.create(out, recursive = TRUE, showWarnings = FALSE)
-    fwrite(S, file.path(out, "globularity_summary.csv"))
+    fwrite(S, file.path(out, "globularity_summary.csv"))   # all metabolite x condition rows
 
-    # pooled pies across all metabolites' control sets (counts summed over metabolites; a protein tested
-    # in several ctrl sets is counted once per set - this is a pooled view, not a de-duplicated one)
+    # pooled pies across all metabolites' CONTROL sets only (the treatment rows are in the summary table
+    # and in globularity_check.txt; counts are summed over metabolites, so a protein tested in several
+    # control sets is counted once per set - a pooled view, not a de-duplicated one)
+    S_all <- S
+    if ("role" %in% names(S)) S <- S[role == "control"]
+    if (!nrow(S)) S <- S_all
     .cols <- .class_colours(max_oligomer)
     hlP <- data.table(group = factor(c("globular as expected", "anomalous"),
                                      levels = c("globular as expected", "anomalous")),
@@ -500,7 +523,7 @@ globularity_check <- function(metabolites   = NULL,
                                      " (open in a PDF viewer? continuing)")
                              try(grDevices::dev.off(), silent = TRUE) })
 
-    cat("\n==== control-condition globularity summary ====\n"); print(S)
+    cat("\n==== globularity summary (one row per metabolite x condition) ====\n"); print(S_all)
     cat("Pooled pies -> ", file.path(out, "globularity_pies_pooled.pdf"), "\n", sep = "")
     cat(sprintf("\nPooled: median %.1f%% of tested proteins elute as expected for a globular species; median %.1f%% anomalous (literature expectation ~%.0f%% globular).\n",
                 stats::median(S$pct_globular), stats::median(S$pct_anomalous), expected_globular_pct))

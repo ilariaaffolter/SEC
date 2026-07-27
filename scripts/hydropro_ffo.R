@@ -74,13 +74,47 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
                               silent = TRUE))
     if (!inherits(r, "try-error") && file.exists(dest) && file.size(dest) > 1000) return(list(ok = TRUE, msg = NA_character_))
     if (inherits(r, "try-error")) msg <- trimws(as.character(r))
-    else if (file.exists(dest)) msg <- "downloaded file too small / not a model"
+    else if (file.exists(dest)) {
+      # something came back but it is not a model - show its start, which is what identifies a proxy
+      # login page, a 404 body, or an HTML error instead of a PDB
+      head_txt <- tryCatch(paste(readLines(dest, n = 3, warn = FALSE), collapse = " | "), error = function(e) "")
+      msg <- paste0("downloaded ", file.size(dest), " bytes, not a model. Content starts: ",
+                    substr(gsub("\\s+", " ", head_txt), 1, 200))
+    }
     try(if (file.exists(dest)) file.remove(dest), silent = TRUE)
   }
   list(ok = FALSE, msg = msg)
 }
 
 # Quick connectivity check - run this first if a batch returns 0 structures. Prints the actual error.
+# Import AlphaFold models you downloaded by hand (or by any other means) into the structures cache.
+# Accepts a folder or a vector of files; recognises AF-<ACC>-F1-model_v?.pdb and plain <ACC>.pdb names.
+# After this, hydropro_prepare() / _run() / _parse() / _compare() all work with no internet at all.
+hydropro_import_structures <- function(from) {
+  sdir <- .hp_dir("structures"); dir.create(sdir, recursive = TRUE, showWarnings = FALSE)
+  files <- if (length(from) == 1L && dir.exists(from))
+    list.files(from, pattern = "\\.pdb$", full.names = TRUE, ignore.case = TRUE) else from
+  files <- files[file.exists(files)]
+  if (!length(files)) stop("No .pdb files found in: ", paste(from, collapse = ", "))
+  n <- 0L
+  for (f in files) {
+    b <- basename(f)
+    acc <- if (grepl("^AF-.*-F1-model", b)) sub("^AF-(.*)-F1-model.*$", "\\1", b) else sub("\\.pdb$", "", b, ignore.case = TRUE)
+    if (file.copy(f, file.path(sdir, sprintf("AF-%s-F1-model_v4.pdb", acc)), overwrite = TRUE)) n <- n + 1L
+  }
+  message("Imported ", n, " structure(s) into ", sdir)
+  # refresh the pLDDT table so the annotation script can use it
+  pdbs <- list.files(sdir, pattern = "^AF-.*\\.pdb$", full.names = TRUE)
+  D <- rbindlist(lapply(pdbs, function(p) {
+    acc <- sub("^AF-(.*)-F1-model_v4\\.pdb$", "\\1", basename(p)); q <- .plddt_from_pdb(p)
+    if (is.null(q)) data.table(protein_id = acc, has_structure = TRUE) else
+      data.table(protein_id = acc, has_structure = TRUE, n_res = q$n_res, mean_plddt = round(q$mean_plddt, 2),
+                 plddt_disorder_frac = round(q$frac_lt70, 4), plddt_verylow_frac = round(q$frac_lt50, 4))
+  }), use.names = TRUE, fill = TRUE)
+  if (nrow(D)) fwrite(D, .hp_dir("plddt_disorder.csv"))
+  invisible(D)
+}
+
 test_alphafold_access <- function(acc = "P0A6F5") {
   tmp <- tempfile(fileext = ".pdb")
   for (meth in unique(c(getOption("download.file.method", "auto"), "libcurl", "wininet", "curl"))) {
@@ -299,6 +333,15 @@ hydropro_compare <- function(metabolites, plddt_disorder_max = 0.4) {
     gf <- here("output", paste0("PCM_ctrl_vs_", m), "tables", "globularity_check.txt")
     if (!file.exists(gf)) { message("[", m, "] no globularity_check.txt - run globularity_check() first; skipping."); next }
     G <- fread(gf)
+    # globularity_check classifies every condition; compare against the CONTROL rows so each protein
+    # appears once (the theoretical f/f0 is a property of the protein, not of the condition).
+    if ("condition" %in% names(G)) {
+      cn <- unique(as.character(G$condition))
+      cc <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]
+      if (is.na(cc)) cc <- cn[1]
+      G <- G[condition == cc]
+      message("[", m, "] using the '", cc, "' (control) rows of globularity_check.txt.")
+    }
     D <- merge(G, H, by = "protein_id")
     if (!nrow(D)) { message("[", m, "] no protein has both a HYDROPRO result and a SEC measurement."); next }
 
