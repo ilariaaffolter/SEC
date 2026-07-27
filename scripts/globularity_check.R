@@ -95,10 +95,10 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 # blues = compact/globular (monomer -> higher oligomers get lighter), warm/other = anomalous.
 .class_levels <- function(max_oligomer)
   c("monomer", if (max_oligomer >= 2) paste0("oligomer_", 2:max_oligomer, "x"),
-    "sub_monomer", "above_range", "between_states", "void", "beyond_calibration")
+    "sub_monomer", "above_range", "between_states", "void", "beyond_calibration", "below_calibration")
 .class_colours <- function(max_oligomer) {
   olig <- if (max_oligomer >= 2) grDevices::colorRampPalette(c("#6B93C0", "#C6DBEF"))(max_oligomer - 1) else character(0)
-  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F", "#BAB0AC")
+  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F", "#BAB0AC", "#D4C8C0")
   setNames(cols, .class_levels(max_oligomer))
 }
 
@@ -207,6 +207,8 @@ globularity_check <- function(metabolites   = NULL,
                               void_fractions = 1L,    # apex here = excluded volume, MW not interpretable
                               calibration_max_kDa = NULL,   # NULL = the largest standard; above this the
                                                             # calibration is EXTRAPOLATED, not measured
+                              calibration_min_kDa = NULL,   # NULL = the smallest standard >= 1 kDa; BELOW
+                                                            # this the calibration is equally extrapolated
                               standards      = NULL,  # data.frame(name, mw_kDa); NULL = the kit defaults
                               calibration_file = NULL,# NULL = auto-find data/raw/*calibration*.xlsx
                               expected_globular_pct = 95,   # literature expectation, for the headline only
@@ -216,6 +218,18 @@ globularity_check <- function(metabolites   = NULL,
   if (!all(c("name", "mw_kDa") %in% names(std))) stop("`standards` needs columns name, mw_kDa.")
   cal_obs <- .read_calibration(calibration_file)      # observed elution fraction per standard (or NULL)
   if (is.null(calibration_max_kDa)) calibration_max_kDa <- max(std$mw_kDa, na.rm = TRUE)
+  # The LOW end is extrapolated just as much as the high end. Standards below ~1 kDa (e.g. uridine) sit in
+  # the total-volume peak, outside the column's resolving range, so they do not constrain the curve -
+  # default to the smallest standard that is a real protein.
+  if (is.null(calibration_min_kDa)) {
+    .sm <- std$mw_kDa[is.finite(std$mw_kDa) & std$mw_kDa >= 1]
+    calibration_min_kDa <- if (length(.sm)) min(.sm) else min(std$mw_kDa, na.rm = TRUE)
+    if (any(std$mw_kDa < 1, na.rm = TRUE))
+      message(sprintf("Standards below 1 kDa (%s) are outside the resolving range and are NOT used as the lower calibration bound; using %.3g kDa.",
+                      paste(std$name[std$mw_kDa < 1], collapse = ", "), calibration_min_kDa))
+  }
+  message(sprintf("Calibrated MW interval: %.3g - %.3g kDa. Outside it the log-linear fit is EXTRAPOLATED and the apparent MW is not a measurement.",
+                  calibration_min_kDa, calibration_max_kDa))
   if (is.null(metabolites)) {
     dirs        <- basename(list.dirs(here("output"), recursive = FALSE))
     metabolites <- sub("^PCM_ctrl_vs_", "", dirs[grepl("^PCM_ctrl_vs_", dirs)])
@@ -319,11 +333,13 @@ globularity_check <- function(metabolites   = NULL,
       # BEYOND the largest calibration standard the log-linear fit is EXTRAPOLATED, so the "apparent MW"
       # there is not a measurement (it runs to physically impossible values in the earliest fractions).
       d[, beyond_calibration := apparent_mw_kDa > calibration_max_kDa]
-      d[beyond_calibration == TRUE, globular_as_expected := FALSE]
+      d[, below_calibration  := apparent_mw_kDa < calibration_min_kDa]
+      d[beyond_calibration == TRUE | below_calibration == TRUE, globular_as_expected := FALSE]
 
       d[, class := data.table::fcase(
         apex_fraction %in% void_fractions,                    "void",
         beyond_calibration == TRUE,                           "beyond_calibration",
+        below_calibration  == TRUE,                           "below_calibration",
         globular_as_expected & oligomer_state == 1,           "monomer",
         globular_as_expected & oligomer_state >  1,           paste0("oligomer_", oligomer_state, "x"),
         ratio < 1 / tol_fold,                                 "sub_monomer",
@@ -331,7 +347,7 @@ globularity_check <- function(metabolites   = NULL,
         default =                                             "between_states")]
 
       # proteins whose apex falls INSIDE the calibrated range - the defensible denominator
-      d[, in_calibrated_range := !(apex_fraction %in% void_fractions) & !beyond_calibration]
+      d[, in_calibrated_range := !(apex_fraction %in% void_fractions) & !beyond_calibration & !below_calibration]
       # apparent frictional ratio: cube root of the MW ratio (see header)
       d[, ffo_vs_monomer := ratio^(1/3)]
       d[, ffo_vs_state   := (ratio / oligomer_state)^(1/3)]
@@ -381,6 +397,8 @@ globularity_check <- function(metabolites   = NULL,
         # in-range = apex inside the calibrated MW range (the defensible denominator)
         n_in_calibrated_range = n_rng, pct_anomalous_in_range = round(pct_anom_rng, 1),
         n_beyond_calibration  = sum(dc$class == "beyond_calibration"),
+        n_below_calibration   = sum(dc$class == "below_calibration"),
+        n_globular_in_range   = n_glob_rng,
         n_monomer      = sum(dc$class == "monomer"),
         n_oligomer     = sum(grepl("^oligomer_", dc$class)),
         n_sub_monomer  = sum(dc$class == "sub_monomer"),
@@ -475,9 +493,22 @@ globularity_check <- function(metabolites   = NULL,
                     paste0("Elution class breakdown - PCM_ctrl_vs_", m),
                     paste0("blue = compact/globular states (monomer to ", max_oligomer,
                            "x); warm = anomalous.\nSlices under 3% are left unlabelled."))
+    # the DEFENSIBLE pie: restricted to proteins whose apex falls inside the calibrated MW interval,
+    # where the apparent MW is an interpolation rather than an extrapolation of the standards curve
+    dr    <- d[in_calibrated_range == TRUE]
+    n_rr  <- nrow(dr); n_gr <- sum(dr$globular_as_expected)
+    p_rng <- if (n_rr) .pie(
+      data.table(group = factor(c("globular as expected", "anomalous"),
+                                levels = c("globular as expected", "anomalous")),
+                 n = c(n_gr, n_rr - n_gr))[n > 0],
+      "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
+      paste0("WITHIN the calibrated range - PCM_ctrl_vs_", m),
+      sprintf("%d of %d proteins elute between %.3g and %.3g kDa, where the standards curve is interpolated.\nOutside that interval the apparent MW is extrapolated, so this is the defensible figure.",
+              n_rr, nrow(d), calibration_min_kDa, calibration_max_kDa)) else NULL
+
     .f3 <- file.path(fig_dir, "globularity_pies.pdf")
     .ok3 <- tryCatch({ grDevices::pdf(.f3, width = 6.5, height = 5.5)
-                       print(p_head); print(p_class); grDevices::dev.off(); TRUE },
+                       print(p_head); if (!is.null(p_rng)) print(p_rng); print(p_class); grDevices::dev.off(); TRUE },
                      error = function(e) { message("   !! could not write ", basename(.f3), ": ",
                                                    conditionMessage(e), " (open in a PDF viewer? continuing)")
                                            try(grDevices::dev.off(), silent = TRUE); FALSE })
@@ -499,22 +530,33 @@ globularity_check <- function(metabolites   = NULL,
     hlP <- data.table(group = factor(c("globular as expected", "anomalous"),
                                      levels = c("globular as expected", "anomalous")),
                       n = c(sum(S$n_globular), sum(S$n_tested) - sum(S$n_globular)))[n > 0]
-    .plev <- c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void", "beyond_calibration")
+    .plev <- c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void",
+               "beyond_calibration", "below_calibration")
     pooled_class <- data.table(
       class = factor(.plev, levels = .plev),
       n = c(sum(S$n_monomer), sum(S$n_oligomer), sum(S$n_sub_monomer),
             sum(S$n_above_range), sum(S$n_between_states), sum(S$n_void),
-            sum(S$n_beyond_calibration)))[n > 0]
+            sum(S$n_beyond_calibration),
+            if ("n_below_calibration" %in% names(S)) sum(S$n_below_calibration) else 0))[n > 0]
     pooled_cols <- c("monomer" = "#2C5F8A", "oligomer (2-Nx)" = "#8CB3D9", "sub_monomer" = "#F28E2B",
                      "above_range" = "#E15759", "between_states" = "#B07AA1", "void" = "#9C755F",
-                     "beyond_calibration" = "#BAB0AC")
+                     "beyond_calibration" = "#BAB0AC", "below_calibration" = "#D4C8C0")
+    # pooled, restricted to the calibrated interval - the number to quote
+    hlR <- if ("n_globular_in_range" %in% names(S)) data.table(
+      group = factor(c("globular as expected", "anomalous"), levels = c("globular as expected", "anomalous")),
+      n = c(sum(S$n_globular_in_range), sum(S$n_in_calibrated_range) - sum(S$n_globular_in_range)))[n > 0] else NULL
     .fp <- file.path(out, "globularity_pies_pooled.pdf")
     tryCatch({
       grDevices::pdf(.fp, width = 6.5, height = 5.5)
       print(.pie(hlP, "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
-                 "Control globularity - all metabolites pooled",
-                 sprintf("%d protein-observations across %d control set(s) | literature expectation ~%.0f%% globular",
+                 "Control globularity - all metabolites pooled (ALL tested)",
+                 sprintf("%d protein-observations across %d control set(s) | literature expectation ~%.0f%% globular.\nIncludes proteins eluting OUTSIDE the calibrated MW interval, where the apparent MW is extrapolated - see the next pie.",
                          sum(S$n_tested), nrow(S), expected_globular_pct)))
+      if (!is.null(hlR) && nrow(hlR))
+        print(.pie(hlR, "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
+                   "Pooled, WITHIN the calibrated range",
+                   sprintf("%d of %d protein-observations elute between %.3g and %.3g kDa, where the standards curve is interpolated.\nThis is the defensible figure to quote.",
+                           sum(S$n_in_calibrated_range), sum(S$n_tested), calibration_min_kDa, calibration_max_kDa)))
       print(.pie(pooled_class, "class", pooled_cols,
                  "Elution class breakdown - all metabolites pooled",
                  "blue = compact/globular states; warm = anomalous. Slices under 3% are left unlabelled."))
