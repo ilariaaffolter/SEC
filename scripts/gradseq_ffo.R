@@ -89,6 +89,16 @@ if (!exists(".find_header_skip")) try(source(here::here("scripts", "secseq_compa
 
 # ---- 1. load the published Grad-seq protein table --------------------------------------------------
 # Deliberately format-tolerant: supplementary tables differ in column naming between versions.
+# List the sheets of a workbook - a macro workbook (.xlsm) usually holds several, and the protein table
+# is rarely the first. Run this before gradseq_load() if the parse looks wrong.
+gradseq_sheets <- function(file) {
+  if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
+  if (!requireNamespace("readxl", quietly = TRUE)) stop("install.packages('readxl')")
+  s <- readxl::excel_sheets(file)
+  message("Sheets in ", basename(file), ":"); print(data.frame(index = seq_along(s), sheet = s))
+  invisible(s)
+}
+
 gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, skip = NULL) {
   if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
   ext <- tolower(tools::file_ext(file))
@@ -257,7 +267,8 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
 }
 
 # ---- 4. join to this project's SEC data ------------------------------------------------------------
-gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2, vbar = .VBAR, save_plots = TRUE) {
+gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2, vbar = .VBAR,
+                           restrict_to_calibrated = TRUE, save_plots = TRUE) {
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
   G <- fread(gf)
@@ -268,6 +279,17 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
   }
   if (!all(c("protein_id", "apparent_mw_kDa", "ffo_vs_monomer") %in% names(G)))
     stop("globularity_check.txt lacks the expected columns.")
+  # The Stokes radius below is derived from this project's apparent MW, so outside the calibrated
+  # interval it would be built on an extrapolation of the standards curve - and every downstream
+  # quantity (f/f0, native mass, n_implied) would inherit that.
+  if (restrict_to_calibrated) {
+    if ("in_calibrated_range" %in% names(G)) {
+      n0 <- nrow(G); G <- G[in_calibrated_range %in% TRUE]
+      message("Restricted to the calibrated MW interval: ", nrow(G), " of ", n0,
+              " proteins (", round(100 * nrow(G) / n0), "%). Set restrict_to_calibrated = FALSE to use all.")
+    } else message("No in_calibrated_range column - re-run globularity_check() to get it; using all proteins.")
+  }
+  if (!nrow(G)) stop("No proteins left after restricting to the calibrated range.")
 
   # SEC apparent MW -> Stokes radius. The calibration reports the mass of an equivalent GLOBULAR protein,
   # so R_s = R_min(M_app) * globular_ffo, where globular_ffo is the absolute f/f0 of the calibrants
