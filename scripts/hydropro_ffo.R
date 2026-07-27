@@ -38,7 +38,9 @@
 #
 # USAGE (RStudio console, project open):
 #   source(here::here("scripts", "hydropro_ffo.R"))
+#   test_alphafold_access()                                 # FIRST: is AlphaFold reachable from here?
 #   hydropro_fetch("ATP")                                   # structures + pLDDT for that metabolite's proteins
+#   hydropro_fetch("ATP", method = "wininet")               # if a proxy blocks the default method
 #   hydropro_fetch("ATP", ids = c("P0A6F5","P0A6Y8"))        # or an explicit id list
 #   hydropro_prepare()
 #   hydropro_run(exe = "C:/hydropro/hydropro10-msd.exe")     # slow: minutes per protein
@@ -57,7 +59,48 @@
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
 
 .hp_dir  <- function(...) here("output", "hydropro", ...)
-.AF_URL  <- "https://alphafold.ebi.ac.uk/files/AF-%s-F1-model_v4.pdb"
+# AlphaFold DB file names carry a model version; try newest first and fall back, since not every entry
+# has been rebuilt at the same version.
+.AF_URLS <- c("https://alphafold.ebi.ac.uk/files/AF-%s-F1-model_v4.pdb",
+              "https://alphafold.ebi.ac.uk/files/AF-%s-F1-model_v3.pdb",
+              "https://alphafold.ebi.ac.uk/files/AF-%s-F1-model_v2.pdb")
+
+# Download one AlphaFold model. Returns list(ok, msg) - msg carries the REAL failure reason (proxy,
+# offline, 404 ...) instead of swallowing it, which is what made a whole batch fail silently.
+.download_af <- function(acc, dest, method = getOption("download.file.method", "auto")) {
+  msg <- NA_character_
+  for (u in sprintf(.AF_URLS, acc)) {
+    r <- suppressWarnings(try(utils::download.file(u, dest, mode = "wb", quiet = TRUE, method = method),
+                              silent = TRUE))
+    if (!inherits(r, "try-error") && file.exists(dest) && file.size(dest) > 1000) return(list(ok = TRUE, msg = NA_character_))
+    if (inherits(r, "try-error")) msg <- trimws(as.character(r))
+    else if (file.exists(dest)) msg <- "downloaded file too small / not a model"
+    try(if (file.exists(dest)) file.remove(dest), silent = TRUE)
+  }
+  list(ok = FALSE, msg = msg)
+}
+
+# Quick connectivity check - run this first if a batch returns 0 structures. Prints the actual error.
+test_alphafold_access <- function(acc = "P0A6F5") {
+  tmp <- tempfile(fileext = ".pdb")
+  for (meth in unique(c(getOption("download.file.method", "auto"), "libcurl", "wininet", "curl"))) {
+    r <- .download_af(acc, tmp, method = meth)
+    if (isTRUE(r$ok)) {
+      message("OK: AlphaFold reachable with download method '", meth, "' (", file.size(tmp), " bytes).")
+      message("If a batch still fails, pass it explicitly: hydropro_fetch(..., method = '", meth, "')")
+      try(file.remove(tmp), silent = TRUE); return(invisible(meth))
+    }
+    message("method '", meth, "' failed: ", r$msg)
+  }
+  message("\nAlphaFold could not be reached with any method. Usual causes:\n",
+          " - institutional proxy: set options(download.file.method = 'wininet') on Windows, or\n",
+          "   Sys.setenv(https_proxy = 'http://proxy.ethz.ch:3128') to match your network;\n",
+          " - no outbound internet from this session;\n",
+          " - TLS/certificate interception.\n",
+          "You can also download the models manually from https://alphafold.ebi.ac.uk and drop the\n",
+          "AF-<ACCESSION>-F1-model_v4.pdb files into output/hydropro/structures/ - every later step works offline.")
+  invisible(NULL)
+}
 
 # ---- 1. structures + pLDDT ------------------------------------------------------------------------
 # AlphaFold stores per-residue pLDDT (0-100) in the PDB B-factor column. Low pLDDT is the standard
@@ -73,7 +116,8 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
        frac_lt70 = mean(b < 70), frac_lt50 = mean(b < 50))
 }
 
-hydropro_fetch <- function(metabolites = NULL, ids = NULL, max_proteins = Inf, overwrite = FALSE) {
+hydropro_fetch <- function(metabolites = NULL, ids = NULL, max_proteins = Inf, overwrite = FALSE,
+                           method = getOption("download.file.method", "auto")) {
   sdir <- .hp_dir("structures"); dir.create(sdir, recursive = TRUE, showWarnings = FALSE)
   if (is.null(ids)) {
     if (is.null(metabolites)) stop("Give either ids = c(...) or metabolites = '<name>'.")
@@ -84,14 +128,13 @@ hydropro_fetch <- function(metabolites = NULL, ids = NULL, max_proteins = Inf, o
   ids <- ids[!is.na(ids) & nzchar(ids)]
   if (length(ids) > max_proteins) { message("Limiting to the first ", max_proteins, " of ", length(ids), " proteins."); ids <- head(ids, max_proteins) }
 
-  rows <- vector("list", length(ids)); nok <- 0L
+  rows <- vector("list", length(ids)); nok <- 0L; first_msg <- NA_character_
   for (i in seq_along(ids)) {
     acc <- ids[i]; dest <- file.path(sdir, sprintf("AF-%s-F1-model_v4.pdb", acc))
     if (overwrite || !file.exists(dest) || file.size(dest) < 1000) {
-      ok <- tryCatch({ utils::download.file(sprintf(.AF_URL, acc), dest, mode = "wb", quiet = TRUE); TRUE },
-                     error = function(e) FALSE)
-      if (!ok || !file.exists(dest) || file.size(dest) < 1000) {
-        try(file.remove(dest), silent = TRUE)
+      dl <- .download_af(acc, dest, method = method)
+      if (!isTRUE(dl$ok)) {
+        if (is.na(first_msg)) first_msg <- dl$msg
         rows[[i]] <- data.table(protein_id = acc, has_structure = FALSE); next
       }
     }
@@ -107,6 +150,13 @@ hydropro_fetch <- function(metabolites = NULL, ids = NULL, max_proteins = Inf, o
   dir.create(.hp_dir(), recursive = TRUE, showWarnings = FALSE)
   fwrite(D, .hp_dir("plddt_disorder.csv"))
   message("Structures available for ", nok, "/", length(ids), " proteins. pLDDT metrics -> ", .hp_dir("plddt_disorder.csv"))
+  if (nok == 0L) {
+    message("\nNo structure downloaded at all. First failure was:\n  ", first_msg,
+            "\nRun test_alphafold_access() to find a working download method, then pass it, e.g.\n",
+            "  hydropro_fetch('ATP', max_proteins = 50, method = 'wininet')\n",
+            "Or download AF-<ACCESSION>-F1-model_v4.pdb files manually from https://alphafold.ebi.ac.uk\n",
+            "into ", .hp_dir("structures"), " - every later step works offline.")
+  }
   invisible(D)
 }
 

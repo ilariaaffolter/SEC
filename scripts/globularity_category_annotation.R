@@ -262,11 +262,10 @@ globularity_category_annotation <- function(
                U[, ..ann_cols], by.x = "protein_id", by.y = "accession", all.x = TRUE)
     if (!is.null(PL) && "plddt_disorder_frac" %in% names(PL))
       A <- merge(A, PL[, .(protein_id, mean_plddt, plddt_disorder_frac)], by = "protein_id", all.x = TRUE)
-    A[, category := data.table::fcase(
-      protein_id %in% sets[["globular_1x_4x"]],     "globular_1x_4x",
-      protein_id %in% sets[["beyond_calibration"]], "beyond_calibration",
-      protein_id %in% sets[["sub_monomer"]],        "sub_monomer",
-      default = as.character(class))]
+    # start from the raw class, then overwrite with the requested categories (fcase cannot take a
+    # vector `default`, and a protein may belong to a composite category such as globular_1x_4x)
+    A[, category := as.character(class)]
+    for (cat in names(sets)) A[protein_id %in% sets[[cat]], category := cat]
     fwrite(A, file.path(tab_dir, "category_protein_annotation.txt"), sep = "\t")
 
     # ---- percentages per category, each Fisher-tested against the OTHER tested proteins ----
