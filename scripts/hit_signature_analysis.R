@@ -165,7 +165,9 @@ hit_signature_analysis <- function(metabolites   = NULL,
                                                  sum(out), length(out) - sum(out)), nrow = 2)),
                      error = function(e) NULL)
       rows[[fl]] <- data.table(metabolite = m, signature = sig, metric = fl, type = "binary",
-                               n_hits = length(inn), pct_hits = round(100 * mean(inn), 1),
+                               k_hits = sum(inn), n_hits = length(inn),
+                               k_bg   = sum(out), n_bg   = length(out),
+                               pct_hits = round(100 * mean(inn), 1),
                                pct_background = round(100 * mean(out), 1),
                                odds_ratio = if (is.null(tt)) NA_real_ else round(unname(tt$estimate), 3),
                                p = if (is.null(tt)) NA_real_ else signif(tt$p.value, 3))
@@ -208,14 +210,26 @@ hit_signature_analysis <- function(metabolites   = NULL,
     }
 
     # ---- figure: binary flags side by side + continuous distributions ----
+    # significance stars from the BH-adjusted p, so the figure is readable without the table
+    .stars <- function(p) ifelse(is.na(p), "", ifelse(p < 0.001, "***", ifelse(p < 0.01, "**",
+                          ifelse(p < 0.05, "*", "ns"))))
     Lb <- S[type == "binary"]
     p1 <- if (nrow(Lb)) {
-      Lm <- melt(Lb, id.vars = c("metric", "signature"), measure.vars = c("pct_hits", "pct_background"),
-                 variable.name = "set", value.name = "pct")
-      Lm[, set := factor(ifelse(set == "pct_hits", "hits", "background"), levels = c("hits", "background"))]
+      # counts as well as percentages, so a 3.5x enrichment resting on 4 proteins is visible as such
+      Lm <- rbindlist(list(
+        Lb[, .(metric, signature, set = "hits",      pct = pct_hits,       k = k_hits, n = n_hits)],
+        Lb[, .(metric, signature, set = "background", pct = pct_background, k = k_bg,   n = n_bg)]))
+      Lm[, set := factor(set, levels = c("hits", "background"))]
+      ann <- Lb[, .(metric, signature,
+                    y   = pmax(pct_hits, pct_background),
+                    lab = sprintf("%s  OR %.2f\nBH p %.2g", .stars(p_BHadj), odds_ratio, p_BHadj))]
       ggplot(Lm, aes(metric, pct, fill = set)) +
         geom_col(position = position_dodge(width = 0.78), width = 0.72) +
-        geom_text(aes(label = sprintf("%.0f%%", pct)), position = position_dodge(width = 0.78), vjust = -0.3, size = 2.8) +
+        geom_text(aes(label = sprintf("%.0f%%\n%d/%d", pct, k, n)),
+                  position = position_dodge(width = 0.78), vjust = -0.25, size = 2.4, lineheight = 0.9) +
+        geom_text(data = ann, aes(x = metric, y = y * 1.30, label = lab), inherit.aes = FALSE,
+                  size = 2.6, lineheight = 0.95, fontface = "bold", colour = "grey20") +
+        scale_y_continuous(expand = expansion(mult = c(0.02, 0.32))) +
         facet_grid(~ signature, scales = "free_x", space = "free_x") +
         scale_fill_manual(values = c(hits = "#E15759", background = "#9AA5B1"), name = NULL) +
         labs(title = paste0("Hit signature - PCM_ctrl_vs_", m, " (", length(hits), " hits)"),
@@ -230,15 +244,26 @@ hit_signature_analysis <- function(metabolites   = NULL,
     Ac <- melt(A[, c("is_hit", intersect(c("foldindex_disorder_frac", "pI", "net_charge"), names(A))), with = FALSE],
                id.vars = "is_hit", variable.name = "metric", value.name = "value")
     Ac <- Ac[is.finite(value)]
+    Ac[, metric := as.character(metric)]   # melt returns a factor; keep it character to merge with S
     p2 <- if (nrow(Ac)) {
       Ac[, set := factor(ifelse(is_hit, "hits", "background"), levels = c("hits", "background"))]
+      # Wilcoxon p + group medians and n, drawn on each facet
+      Sc <- S[type == "continuous"]
+      ann2 <- Ac[, .(y = max(value, na.rm = TRUE)), by = metric]
+      ann2 <- merge(ann2, Sc[, .(metric, p_BHadj, n_hits, median_hits, median_background)], by = "metric", all.x = TRUE)
+      ann2[, lab := sprintf("%s  BH p %.2g\nmed %.3g vs %.3g  (n hits = %d)",
+                            .stars(p_BHadj), p_BHadj, median_hits, median_background, n_hits)]
       ggplot(Ac, aes(set, value, fill = set)) +
         geom_violin(alpha = 0.5, colour = NA, scale = "width") +
         geom_boxplot(width = 0.15, outlier.size = 0.3, fill = "white") +
+        geom_text(data = ann2, aes(x = 1.5, y = y, label = lab), inherit.aes = FALSE,
+                  vjust = -0.1, size = 2.5, lineheight = 0.95, fontface = "bold", colour = "grey20") +
+        scale_y_continuous(expand = expansion(mult = c(0.05, 0.22))) +
         facet_wrap(~ metric, scales = "free_y") +
         scale_fill_manual(values = c(hits = "#E15759", background = "#9AA5B1")) +
-        labs(title = paste0("Hydrotrope-signature variables - PCM_ctrl_vs_", m),
-             subtitle = "Wilcoxon p values in hit_signature_summary.txt", x = NULL, y = NULL) +
+        labs(title = paste0("Charge / disorder variables - PCM_ctrl_vs_", m),
+             subtitle = "Wilcoxon, hits vs the tested background; BH-adjusted across all metrics of this metabolite.",
+             x = NULL, y = NULL) +
         theme_bw() + theme(legend.position = "none")
     } else NULL
     .fp <- file.path(fig_dir, "hit_signature.pdf")
