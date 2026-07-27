@@ -5,7 +5,8 @@
 #   (b) what % of its proteins are subunits of a CURATED COMPLEX (Complex Portal) or have any annotated
 #       binary interaction partner (UniProt cc_interaction);
 #   (c) what % are annotated as FILAMENT / polymer-forming;
-#   (d) what % carry intrinsically disordered regions (IDR).
+#   (d) what % carry intrinsically disordered regions (IDR);
+#   (e) their ISOELECTRIC POINT / net charge - the column-interaction (artefact) test.
 # Each percentage is also tested against the other tested proteins (Fisher), so "30% have IDRs" comes
 # with "...which is / is not more than the globular set".
 #
@@ -36,6 +37,18 @@
 #                       If output/hydropro/plddt_disorder.csv exists (from hydropro_ffo.R), the
 #                       AlphaFold pLDDT-based disorder fraction is reported ALONGSIDE it, which is the
 #                       better measure where available.
+#   pI / NET CHARGE     computed from the cached sequence by Henderson-Hasselbalch titration with the
+#                       EMBOSS 'iep' pKa set (pI by bisection; net charge evaluated at `buffer_pH`,
+#                       default 7.4 - SET THIS TO YOUR ACTUAL RUNNING BUFFER). Predicted, not measured,
+#                       but accurate enough to compare groups.
+#                       WHY IT MATTERS: a sub_monomer protein elutes LATE, i.e. it is RETAINED. SEC
+#                       resins carry residual negative charge, so cation-exchange-like retention acts on
+#                       BASIC (net-positive) proteins. Two readouts are produced:
+#                         * pI per category (violin + Wilcoxon vs the other tested proteins, plus % with
+#                           pI > pI_basic_cut and % net-positive at buffer_pH, Fisher-tested);
+#                         * pI vs log2(apparent/expected MW) across ALL tested proteins, with a Spearman
+#                           correlation. A negative trend means basic proteins systematically elute late
+#                           => charge-driven retention, i.e. a chromatography ARTEFACT rather than biology.
 #
 # USAGE (RStudio console, project open):
 #   source(here::here("scripts", "globularity_category_annotation.R"))
@@ -49,7 +62,8 @@
 #                                      + Fisher p vs the other tested proteins
 #   category_protein_annotation.txt    per protein: category + every annotation flag (auditable)
 #   GOenrichment_<go_col>_<category>.txt   enriched GO terms per category
-#   category_annotation_barplots.pdf   the four percentages side by side across categories
+#   category_annotation_barplots.pdf   the percentages side by side across categories
+#   category_pI_charge.pdf             pI per category (violin) + pI vs elution deviation (artefact test)
 #   GOenrichment_<category>.pdf        GO bar plots
 # =============================================================================
 
@@ -92,6 +106,41 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   q <- ifelse(aa %in% c("R", "K"), 1, ifelse(aa %in% c("D", "E"), -1, 0))
   list(h = h, q = q)
 }
+# ---- isoelectric point / net charge from sequence ---------------------------------------------------
+# Why this matters here: a protein eluting LATER than its own monomer (the sub_monomer class) is being
+# RETAINED by the column. SEC resins carry residual negative charge, so cation-exchange-like retention
+# acts on BASIC (high-pI, net-positive) proteins. If sub_monomer is enriched for high pI, the class is a
+# chromatography artefact rather than biology - which is exactly what this test is for.
+# pKa values: EMBOSS 'iep' defaults (the set behind most pI calculators). Standard Henderson-Hasselbalch
+# titration, pI found by bisection. Cysteine/tyrosine are included as weak acids, as in EMBOSS.
+.PKA <- list(Nterm = 8.6, Cterm = 3.6, K = 10.8, R = 12.5, H = 6.5, D = 3.9, E = 4.1, C = 8.5, Y = 10.1)
+.net_charge_counts <- function(cnt, pH) {
+  pos <- 1 / (1 + 10^(pH - .PKA$Nterm)) +
+         cnt[["K"]] / (1 + 10^(pH - .PKA$K)) +
+         cnt[["R"]] / (1 + 10^(pH - .PKA$R)) +
+         cnt[["H"]] / (1 + 10^(pH - .PKA$H))
+  neg <- 1 / (1 + 10^(.PKA$Cterm - pH)) +
+         cnt[["D"]] / (1 + 10^(.PKA$D - pH)) +
+         cnt[["E"]] / (1 + 10^(.PKA$E - pH)) +
+         cnt[["C"]] / (1 + 10^(.PKA$C - pH)) +
+         cnt[["Y"]] / (1 + 10^(.PKA$Y - pH))
+  pos - neg
+}
+.charge_props <- function(seq, buffer_pH = 7.4) {
+  aa <- strsplit(toupper(gsub("[^A-Za-z]", "", seq)), "")[[1]]
+  if (!length(aa)) return(list(pI = NA_real_, net_charge = NA_real_, charge_per_res = NA_real_))
+  cnt <- as.list(setNames(rep(0, 7), c("K", "R", "H", "D", "E", "C", "Y")))
+  tb  <- table(aa)
+  for (r in names(cnt)) if (!is.na(tb[r])) cnt[[r]] <- as.numeric(tb[r])
+  lo <- 0; hi <- 14
+  for (i in 1:60) {                                   # bisection: ~1e-4 pH units
+    mid <- (lo + hi) / 2
+    if (.net_charge_counts(cnt, mid) > 0) lo <- mid else hi <- mid
+  }
+  q <- .net_charge_counts(cnt, buffer_pH)
+  list(pI = (lo + hi) / 2, net_charge = q, charge_per_res = q / length(aa))
+}
+
 .foldindex <- function(seq, window = 51L) {
   aa <- strsplit(toupper(gsub("[^A-Za-z]", "", seq)), "")[[1]]
   if (!length(aa)) return(list(global = NA_real_, disorder_frac = NA_real_, length = 0L))
@@ -144,6 +193,8 @@ globularity_category_annotation <- function(
     go_min_genes  = 2, go_top_n = 15,
     filament_regex = "filament|polymeriz|polymeris|cytoskelet|flagell|pilus|pili\\b|fimbri|microtubul|actin|tubulin|z-ring|divisome",
     foldindex_window = 51L,
+    buffer_pH     = 7.4,   # running-buffer pH: net charge is evaluated here (set to your actual buffer)
+    pI_basic_cut  = 8.0,   # "basic" protein cutoff for the categorical pI test
     complex_portal_file = NULL,
     out_subdir    = "globularity_categories") {
 
@@ -156,10 +207,14 @@ globularity_category_annotation <- function(
 
   # FoldIndex per protein (once, over the whole cached proteome)
   if (!"sequence" %in% names(U)) stop("The UniProt cache has no `sequence` column - re-render so it is fetched.")
-  message("Computing FoldIndex disorder for ", nrow(U), " cached protein(s) ...")
+  message("Computing FoldIndex disorder + pI/net charge for ", nrow(U), " cached protein(s) ...")
   fi <- lapply(U$sequence, function(s) if (is.na(s) || !nzchar(s)) list(global = NA_real_, disorder_frac = NA_real_, length = NA_integer_) else .foldindex(s, foldindex_window))
   U[, `:=`(foldindex_global = vapply(fi, function(x) x$global, numeric(1)),
            foldindex_disorder_frac = vapply(fi, function(x) x$disorder_frac, numeric(1)))]
+  ch <- lapply(U$sequence, function(s) if (is.na(s) || !nzchar(s)) list(pI = NA_real_, net_charge = NA_real_, charge_per_res = NA_real_) else .charge_props(s, buffer_pH))
+  U[, `:=`(pI              = vapply(ch, function(x) x$pI, numeric(1)),
+           net_charge      = vapply(ch, function(x) x$net_charge, numeric(1)),
+           charge_per_res  = vapply(ch, function(x) x$charge_per_res, numeric(1)))]
   # filament keyword hit over GO terms + protein name (recorded, so every call is auditable)
   .txtcols <- intersect(c("go_p", "go_f", "go_c", "protein_name"), names(U))
   .stxt <- Reduce(function(a, b) paste(a, b, sep = " ; "),
@@ -201,7 +256,8 @@ globularity_category_annotation <- function(
 
     # ---- per-protein annotation table (auditable) ----
     ann_cols <- intersect(c("accession", "protein_name", "gene_names", "in_complex_portal", "has_interaction",
-                            "filament_hit", "filament_terms", "foldindex_global", "foldindex_disorder_frac"), names(U))
+                            "filament_hit", "filament_terms", "foldindex_global", "foldindex_disorder_frac",
+                            "pI", "net_charge", "charge_per_res"), names(U))
     A <- merge(G[, .(protein_id, class, expected_mw_kDa, apparent_mw_kDa, ratio, ffo_vs_monomer)],
                U[, ..ann_cols], by.x = "protein_id", by.y = "accession", all.x = TRUE)
     if (!is.null(PL) && "plddt_disorder_frac" %in% names(PL))
@@ -227,9 +283,20 @@ globularity_category_annotation <- function(
     A[, idr_foldindex := foldindex_global < 0]                       # predicted unfolded overall
     A[, idr_highfrac  := foldindex_disorder_frac > 0.3]              # >30% of residues in unfolded windows
     if ("plddt_disorder_frac" %in% names(A)) A[, idr_plddt := plddt_disorder_frac > 0.4]
+    A[, basic_pI      := pI > pI_basic_cut]                          # net-positive at neutral pH
+    A[, net_positive  := net_charge > 0]                             # at the running-buffer pH
 
     flags <- intersect(c("in_complex_portal", "has_interaction", "filament_hit",
-                         "idr_foldindex", "idr_highfrac", "idr_plddt"), names(A))
+                         "idr_foldindex", "idr_highfrac", "idr_plddt",
+                         "basic_pI", "net_positive"), names(A))
+    # continuous variables compared per category with a two-sided Wilcoxon test (vs all other tested proteins)
+    conts <- intersect(c("pI", "net_charge", "charge_per_res", "foldindex_disorder_frac"), names(A))
+    .wilcox <- function(ids, v) {
+      inn <- A[protein_id %in% ids][[v]]; out <- A[!(protein_id %in% ids)][[v]]
+      inn <- inn[is.finite(inn)]; out <- out[is.finite(out)]
+      if (length(inn) < 3 || length(out) < 3) return(NA_real_)
+      tryCatch(stats::wilcox.test(inn, out)$p.value, error = function(e) NA_real_)
+    }
     rows <- lapply(names(sets), function(cat) {
       ids <- sets[[cat]]
       r <- data.table(metabolite = m, category = cat, n_proteins = length(ids))
@@ -239,13 +306,21 @@ globularity_category_annotation <- function(
         r[[paste0("n_", fl)]]        <- unname(p["n"])
         r[[paste0("fisher_p_", fl)]] <- signif(.fisher(ids, fl), 3)
       }
-      r[["median_foldindex_disorder_frac"]] <- round(stats::median(A[protein_id %in% ids]$foldindex_disorder_frac, na.rm = TRUE), 3)
+      for (v in conts) {
+        r[[paste0("median_", v)]]    <- round(stats::median(A[protein_id %in% ids][[v]], na.rm = TRUE), 3)
+        r[[paste0("median_rest_", v)]] <- round(stats::median(A[!(protein_id %in% ids)][[v]], na.rm = TRUE), 3)
+        r[[paste0("wilcox_p_", v)]] <- signif(.wilcox(ids, v), 3)
+      }
       r
     })
     S <- rbindlist(rows, use.names = TRUE, fill = TRUE)
     fwrite(S, file.path(tab_dir, "category_annotation_summary.txt"), sep = "\t")
     message("\n[", m, "] category annotation (Fisher p vs all other tested proteins):")
     print(S[, c("category", "n_proteins", grep("^pct_", names(S), value = TRUE)), with = FALSE])
+    message("[", m, "] pI / charge per category (Wilcoxon vs all other tested proteins):")
+    print(S[, c("category", "n_proteins",
+                intersect(c("median_pI", "median_rest_pI", "wilcox_p_pI",
+                            "median_net_charge", "wilcox_p_net_charge"), names(S))), with = FALSE])
 
     # ---- bar plot of the percentages across categories ----
     L <- melt(S, id.vars = c("category", "n_proteins"),
@@ -265,6 +340,48 @@ globularity_category_annotation <- function(
     .fb <- file.path(fig_dir, "category_annotation_barplots.pdf")
     tryCatch(ggsave(.fb, gbar, width = 9, height = 6),
              error = function(e) message("   !! could not write ", basename(.fb), ": ", conditionMessage(e)))
+
+    # ---- pI / charge: the column-interaction (artefact) test ----
+    # (1) pI distribution per category; (2) pI vs how far the protein elutes from its expected position,
+    # across ALL tested proteins. A systematic trend in (2) is the signature of charge-driven retention
+    # on the column rather than biology - basic proteins retained (eluting late) by a negatively charged
+    # resin appear as sub_monomer.
+    AP <- A[is.finite(pI)]
+    if (nrow(AP) > 10) {
+      AP[, category := factor(category, levels = unique(c(names(sets), setdiff(unique(category), names(sets)))))]
+      g_pi <- ggplot(AP, aes(category, pI, fill = category)) +
+        geom_violin(alpha = 0.45, colour = NA, scale = "width") +
+        geom_boxplot(width = 0.16, outlier.size = 0.4, fill = "white") +
+        geom_hline(yintercept = buffer_pH, linetype = 2, colour = "grey40") +
+        annotate("text", x = 0.6, y = buffer_pH, label = paste0("buffer pH ", buffer_pH),
+                 hjust = 0, vjust = -0.5, size = 3, colour = "grey35") +
+        labs(title = paste0("Isoelectric point by elution category - PCM_ctrl_vs_", m),
+             subtitle = paste0("Proteins above the dashed line are net POSITIVE in the running buffer.\n",
+                               "sub_monomer enriched for high pI => cation-exchange-like retention on the column (artefact), not biology."),
+             x = NULL, y = "predicted pI (EMBOSS pKa set)") +
+        theme_bw() + theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+
+      AP2 <- AP[is.finite(ratio) & ratio > 0]
+      rho <- if (nrow(AP2) > 10) suppressWarnings(stats::cor(AP2$pI, log2(AP2$ratio), method = "spearman", use = "complete.obs")) else NA_real_
+      rho_p <- if (nrow(AP2) > 10) tryCatch(suppressWarnings(stats::cor.test(AP2$pI, log2(AP2$ratio), method = "spearman"))$p.value, error = function(e) NA_real_) else NA_real_
+      g_pi2 <- ggplot(AP2, aes(pI, log2(ratio))) +
+        geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+        geom_vline(xintercept = buffer_pH, linetype = 3, colour = "grey55") +
+        geom_point(aes(colour = category), alpha = 0.45, size = 0.9) +
+        geom_smooth(method = "loess", se = TRUE, colour = "black", linewidth = 0.6, formula = y ~ x) +
+        labs(title = paste0("pI vs elution deviation - PCM_ctrl_vs_", m),
+             subtitle = sprintf("y = log2(apparent / expected MW); below 0 = elutes late (retained). Spearman rho = %.3f (p = %.3g).\nA negative trend = basic proteins retained by the resin: a charge artefact, not biology.",
+                                rho, rho_p),
+             x = "predicted pI", y = "log2(apparent / expected MW)", colour = NULL) +
+        theme_bw() + theme(legend.position = "bottom")
+
+      .fpi <- file.path(fig_dir, "category_pI_charge.pdf")
+      tryCatch({ grDevices::pdf(.fpi, width = 8, height = 6); print(g_pi); print(g_pi2); grDevices::dev.off() },
+               error = function(e) { message("   !! could not write ", basename(.fpi), ": ", conditionMessage(e))
+                                     try(grDevices::dev.off(), silent = TRUE) })
+      message(sprintf("[%s] pI vs log2(apparent/expected): Spearman rho = %.3f (p = %.3g) over %d protein(s).",
+                      m, rho, rho_p, nrow(AP2)))
+    }
 
     # ---- GO enrichment per category x GO namespace ----
     for (cat in names(sets)) {
