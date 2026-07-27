@@ -160,9 +160,15 @@ run_qcs_wProtti <- T
 
 perform_normalization_cyclicloess <- T #(now it works :) Benni fixed it)   # cyclic-loess normalization ENABLED (was F)
 
-load_proteinFeatures.RData <- F
-load_normalized.RData <- F   # set T to skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData).
-load_protein_DiffExprPep_and_Protein <- F
+load_proteinFeatures.RData <- T   # T = reuse rdata/proteinFeatures.RData, the assembly test and the feature values from a previous run of THIS comparison (the ~1h findProteinFeatures step plus the serial extract/fillFeatureVals tail). Set F to force a fresh computation after changing upstream data or parameters.
+load_normalized.RData <- T   # T = skip the ~30min cyclic-loess normalization on re-runs (loads cached pepTracesNormalized.RData). Set F to force fresh after changing upstream data/filtering.
+load_protein_DiffExprPep_and_Protein <- T
+# The report scores protein features TWICE - once at feature FDR 0.05 (used everywhere downstream) and
+# once at 0.15, which only produces the *_0p15featurefdr differential objects that are saved but not used
+# in any figure. That second pass repeats the whole SERIAL CCprofiler tail (scoreFeatures ->
+# extractFeatureVals -> fillFeatureVals -> differential test), roughly DOUBLING the slowest part of the
+# render. Off by default; set T if you specifically want the looser-FDR comparison.
+run_feature_fdr015 <- F
 load_uniprot.RData <- T   # cache the UniProt fetch (per comparison + a shared accumulator) so a GOOD fetch is reused instead of re-hitting UniProt every render. fetch_uniprot is non-deterministic: a throttled response comes back WITHOUT the `mass` column and crashes trace annotation. Set F (or delete output/uniprot_annotation_shared.RData) to force a fresh fetch.
 ################### ordering the samples?
 
@@ -1475,6 +1481,16 @@ suppressMessages(
 .brk("findProteinFeatures DONE -> save + scoreFeatures (FDR 0.05) ...")
 save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
 
+# Reuse the whole serial tail if a previous run of this comparison already produced it. These three
+# CCprofiler steps (scoreFeatures, extractFeatureVals, fillFeatureVals) are single-threaded inside the
+# package and are the slowest part of the render after findProteinFeatures itself.
+.featvals_file <- file.path(out_dir, "rdata", "featureVals.RData")
+if (load_proteinFeatures.RData && file.exists(.featvals_file)) {
+  load(.featvals_file)   # -> proteinFeaturesFiltered, *_featureVals, *_featureValsFilled
+  message("Loaded cached feature values from ", .featvals_file,
+          " (skipped scoreFeatures / extractFeatureVals / fillFeatureVals).")
+} else {
+
 #' Score protein features and filter for a detection FDR of 5%
 proteinFeaturesFiltered <- scoreFeatures(proteinFeatures, FDR=0.05, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
 
@@ -1501,6 +1517,7 @@ proteinFeaturesFiltered_featureValsFilled <- fillFeatureVals(featureVals = prote
                                                 tracesList = pepTracesList_filtered_minN,
                                                 design_matrix = design_matrix)
 
+if (run_feature_fdr015) {
 .brk("second pass at FDR 0.15 (scoreFeatures + extractFeatureVals + fillFeatureVals AGAIN) ...")
 proteinFeaturesFiltered_0p15featurefdr <- scoreFeatures(proteinFeatures, FDR=0.15, PDF=TRUE, name=file.path(output_files_location, "qvalueStats_proteinFeatures"))
 
@@ -1524,7 +1541,17 @@ proteinFeaturesFiltered_featureVals_0p15featurefdr <- extractFeatureVals(traces 
 proteinFeaturesFiltered_featureValsFilled_0p15featurefdr <- fillFeatureVals(featureVals = proteinFeaturesFiltered_featureVals_0p15featurefdr,
                                                 tracesList = pepTracesList_filtered_minN,
                                                 design_matrix = design_matrix)
+} else message("Skipping the feature-FDR 0.15 second pass (run_feature_fdr015 = F): it repeats the whole serial tail and feeds only the unused *_0p15featurefdr objects.")
 .brk("findProteinFeatures chunk COMPLETE (feature values done)")
+
+# Cache the expensive results of this chunk so an interrupted or repeated render skips the serial
+# scoreFeatures -> extractFeatureVals -> fillFeatureVals tail as well as findProteinFeatures itself.
+.featvals_file <- file.path(out_dir, "rdata", "featureVals.RData")
+save(proteinFeaturesFiltered, proteinFeaturesFiltered_featureVals, proteinFeaturesFiltered_featureValsFilled,
+     file = .featvals_file)
+message("Saved feature values to ", .featvals_file, " (re-runs with load_proteinFeatures.RData = T skip the serial tail).")
+
+}   # end of the "compute the serial tail" branch
 
 # save(proteinFeaturesFiltered_featureVals, proteinFeaturesFiltered_featureValsFilled, file = "Anna_proteinFeaturesFiltered_featureValsFilled.RData")
 
@@ -1589,22 +1616,26 @@ if (load_protein_DiffExprPep_and_Protein && file.exists(.diff_file)) {
             #' ## Aggregate differential expression results to the protein level
             protein_DiffExprProtein <- aggregatePeptideTests(protein_DiffExprPep) 
             
+            # the looser-FDR pass only exists when run_feature_fdr015 = T (it repeats the whole serial tail)
+            if (exists("proteinFeaturesFiltered_featureValsFilled_0p15featurefdr")) {
             protein_DiffExprPep_0p15featurefdr <- testDifferentialExpression_beniFix(featureVals = proteinFeaturesFiltered_featureValsFilled_0p15featurefdr,
                                                               compare_between = "Condition",
                                                               level = "peptide",
                                                               measuredOnly = FALSE) #also considers the imputed fractions
             # Append the df to the list
 
-          
-            
+
+
             #' ## Aggregate differential expression results to the protein level
-            protein_DiffExprProtein_0p15featurefdr <- aggregatePeptideTests(protein_DiffExprPep_0p15featurefdr) 
-            
+            protein_DiffExprProtein_0p15featurefdr <- aggregatePeptideTests(protein_DiffExprPep_0p15featurefdr)
+            protein_DiffExprProtein_0p15featurefdr <- protein_DiffExprProtein_0p15featurefdr %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
+            }
+
 protein_DiffExprProtein <- protein_DiffExprProtein %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
 
-protein_DiffExprProtein_0p15featurefdr <- protein_DiffExprProtein_0p15featurefdr %>% left_join(select(uniprot, accession, protein_name, mass, gene_names, go_f, go_p, go_c, ft_act_site, ft_binding, cc_cofactor), by=join_by(feature_id == accession))
-          
-  save(protein_DiffExprPep, protein_DiffExprProtein, protein_DiffExprPep_0p15featurefdr, protein_DiffExprProtein_0p15featurefdr, file = .diff_file)
+  .diff_objs <- c("protein_DiffExprPep", "protein_DiffExprProtein")
+  if (exists("protein_DiffExprPep_0p15featurefdr")) .diff_objs <- c(.diff_objs, "protein_DiffExprPep_0p15featurefdr", "protein_DiffExprProtein_0p15featurefdr")
+  save(list = .diff_objs, file = .diff_file)
   message("Saved differential-test results to ", .diff_file, " (re-runs with load_protein_DiffExprPep_and_Protein = T skip the diff test).")
 }
 save(protein_DiffExprPep, file = file.path(out_dir, "rdata", "protein_DiffExprPep_list.RData"))
