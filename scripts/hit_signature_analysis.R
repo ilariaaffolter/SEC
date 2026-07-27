@@ -220,6 +220,9 @@ hit_signature_analysis <- function(metabolites   = NULL,
         scale_fill_manual(values = c(hits = "#E15759", background = "#9AA5B1"), name = NULL) +
         labs(title = paste0("Hit signature - PCM_ctrl_vs_", m, " (", length(hits), " hits)"),
              subtitle = paste0("specific = ligand / nucleotide-fold annotation | hydrotrope = disorder and net positive charge.\n",
+                               "NOTE: for a CHARGED ligand (ATP, ADP, NAD, PEP, PGP) the charge flags (basic_pI, net_positive) are ALSO\n",
+                               "expected for specific binders - a polyanion is bound by a basic pocket. DISORDER (idr_*) is the flag that\n",
+                               "actually discriminates hydrotropy. Judge on the BH-adjusted p values in hit_signature_summary.txt.\n",
                                "Ligand pattern (HEURISTIC, editable): ", substr(rgx, 1, 90)),
              x = NULL, y = "% of set") +
         theme_bw() + theme(legend.position = "top", axis.text.x = element_text(angle = 25, hjust = 1))
