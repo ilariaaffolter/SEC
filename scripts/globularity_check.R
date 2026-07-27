@@ -52,11 +52,41 @@
 #   tables/globularity_check.txt                    per protein: expected/apparent MW, ratio, f/f0, class
 #   figures/globularity_apparent_vs_expected.pdf    log-log scatter + monomer/oligomer reference lines
 #   figures/globularity_ffo_distribution.pdf        proteome-wide apparent f/f0 distribution
+#   figures/globularity_pies.pdf                    pie 1: globular-as-expected vs anomalous (headline)
+#                                                   pie 2: full elution-class breakdown
 # OUTPUT (pooled, output/globularity/):
 #   globularity_summary.csv                         one row per metabolite + the headline percentages
+#   globularity_pies_pooled.pdf                     the same two pies, pooled over all control sets
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
+
+# ---- pie-chart helpers ----------------------------------------------------------------------------
+# canonical class order (globular states first, then the anomalous subtypes) and a colour per class:
+# blues = compact/globular (monomer -> higher oligomers get lighter), warm/other = anomalous.
+.class_levels <- function(max_oligomer)
+  c("monomer", if (max_oligomer >= 2) paste0("oligomer_", 2:max_oligomer, "x"),
+    "sub_monomer", "above_range", "between_states", "void")
+.class_colours <- function(max_oligomer) {
+  olig <- if (max_oligomer >= 2) grDevices::colorRampPalette(c("#6B93C0", "#C6DBEF"))(max_oligomer - 1) else character(0)
+  cols <- c("#2C5F8A", olig, "#F28E2B", "#E15759", "#B07AA1", "#9C755F")
+  setNames(cols, .class_levels(max_oligomer))
+}
+# one pie from a table of (label, n); slices below label_min_pct are left unlabelled to avoid clutter
+.pie <- function(dt, fill_col, cols, title, subtitle, label_min_pct = 3) {
+  dt <- copy(dt); data.table::setnames(dt, fill_col, "grp")
+  dt[, pct := 100 * n / sum(n)]
+  ggplot(dt, aes(x = "", y = n, fill = grp)) +
+    geom_col(width = 1, colour = "white", linewidth = 0.3) +
+    coord_polar(theta = "y") +
+    scale_fill_manual(values = cols, drop = FALSE, name = NULL) +
+    geom_text(aes(label = ifelse(pct >= label_min_pct, sprintf("%.1f%%\n(%d)", pct, n), "")),
+              position = position_stack(vjust = 0.5), size = 3, colour = "white", fontface = "bold") +
+    labs(title = title, subtitle = subtitle) +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5, size = 8.5), legend.position = "right")
+}
 
 # traces_obj$traces -> numeric matrix (proteins x fractions), integer-named fraction columns
 .get_mat <- function(traces_obj) {
@@ -194,6 +224,7 @@ globularity_check <- function(metabolites   = NULL,
       n_oligomer     = sum(grepl("^oligomer_", d$class)),
       n_sub_monomer  = sum(d$class == "sub_monomer"),
       n_above_range  = sum(d$class == "above_range"),
+      n_between_states = sum(d$class == "between_states"),
       n_void         = sum(d$class == "void"),
       median_ffo_vs_monomer = round(stats::median(d$ffo_vs_monomer, na.rm = TRUE), 3),
       median_ffo_vs_state   = round(stats::median(d$ffo_vs_state,   na.rm = TRUE), 3))
@@ -224,13 +255,58 @@ globularity_check <- function(metabolites   = NULL,
            x = "apparent f/f0 (assuming monomer)", y = "proteins") +
       theme_bw()
     ggsave(file.path(fig_dir, "globularity_ffo_distribution.pdf"), g2, width = 7, height = 5)
+
+    # ---- plot 3: pie charts - headline split, and the full class breakdown ----
+    .cols <- .class_colours(max_oligomer)
+    hl <- data.table(group = factor(c("globular as expected", "anomalous"),
+                                    levels = c("globular as expected", "anomalous")),
+                     n = c(n_glob, n_test - n_glob))[n > 0]
+    p_head <- .pie(hl, "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
+                   paste0("Control globularity - PCM_ctrl_vs_", m),
+                   sprintf("%d proteins tested | literature expectation ~%.0f%% globular / ~%.0f%% not",
+                           n_test, expected_globular_pct, 100 - expected_globular_pct))
+    cls <- d[, .(n = .N), by = class]
+    cls[, class := factor(class, levels = .class_levels(max_oligomer))]
+    setorder(cls, class)
+    p_class <- .pie(cls, "class", .cols,
+                    paste0("Elution class breakdown - PCM_ctrl_vs_", m),
+                    paste0("blue = compact/globular states (monomer to ", max_oligomer,
+                           "x); warm = anomalous.\nSlices under 3% are left unlabelled."))
+    grDevices::pdf(file.path(fig_dir, "globularity_pies.pdf"), width = 6.5, height = 5.5)
+    print(p_head); print(p_class); grDevices::dev.off()
+    message("[", m, "]   pies -> ", file.path(fig_dir, "globularity_pies.pdf"))
   }
 
   if (length(summary_rows)) {
     S <- rbindlist(summary_rows, use.names = TRUE)
     out <- here("output", out_subdir); dir.create(out, recursive = TRUE, showWarnings = FALSE)
     fwrite(S, file.path(out, "globularity_summary.csv"))
+
+    # pooled pies across all metabolites' control sets (counts summed over metabolites; a protein tested
+    # in several ctrl sets is counted once per set - this is a pooled view, not a de-duplicated one)
+    .cols <- .class_colours(max_oligomer)
+    hlP <- data.table(group = factor(c("globular as expected", "anomalous"),
+                                     levels = c("globular as expected", "anomalous")),
+                      n = c(sum(S$n_globular), sum(S$n_tested) - sum(S$n_globular)))[n > 0]
+    pooled_class <- data.table(
+      class = factor(c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void"),
+                     levels = c("monomer", "oligomer (2-Nx)", "sub_monomer", "above_range", "between_states", "void")),
+      n = c(sum(S$n_monomer), sum(S$n_oligomer), sum(S$n_sub_monomer),
+            sum(S$n_above_range), sum(S$n_between_states), sum(S$n_void)))[n > 0]
+    pooled_cols <- c("monomer" = "#2C5F8A", "oligomer (2-Nx)" = "#8CB3D9", "sub_monomer" = "#F28E2B",
+                     "above_range" = "#E15759", "between_states" = "#B07AA1", "void" = "#9C755F")
+    grDevices::pdf(file.path(out, "globularity_pies_pooled.pdf"), width = 6.5, height = 5.5)
+    print(.pie(hlP, "group", c("globular as expected" = "#2C5F8A", "anomalous" = "#E15759"),
+               "Control globularity - all metabolites pooled",
+               sprintf("%d protein-observations across %d control set(s) | literature expectation ~%.0f%% globular",
+                       sum(S$n_tested), nrow(S), expected_globular_pct)))
+    print(.pie(pooled_class, "class", pooled_cols,
+               "Elution class breakdown - all metabolites pooled",
+               "blue = compact/globular states; warm = anomalous. Slices under 3% are left unlabelled."))
+    grDevices::dev.off()
+
     cat("\n==== control-condition globularity summary ====\n"); print(S)
+    cat("Pooled pies -> ", file.path(out, "globularity_pies_pooled.pdf"), "\n", sep = "")
     cat(sprintf("\nPooled: median %.1f%% of tested proteins elute as expected for a globular species; median %.1f%% anomalous (literature expectation ~%.0f%% globular).\n",
                 stats::median(S$pct_globular), stats::median(S$pct_anomalous), expected_globular_pct))
     cat("Reminder: SEC apparent MW conflates assembly and shape - 'anomalous' proteins are CANDIDATES for\n",
