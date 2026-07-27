@@ -54,6 +54,9 @@
 #   nucleic_acid_binders_all.csv             the same, combined
 #   nucleic_acid_binders.md                  readable list of the nucleic-acid binders that shift, with
 #                                            the matched terms and a note on how to follow them up
+#   known_interactors_<metabolite>.txt       proteins already annotated as interacting with that
+#   known_interactors_all.csv                metabolite - held out of the shortlist and used as (+)
+#                                            positive controls instead of counted as discoveries
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
@@ -130,6 +133,23 @@ source(here::here("scripts", "globularity_category_annotation.R"))
                          "ribonucleoprotein|sigma factor|nuclease|primase|recombinase|transposase|",
                          "chromosome|DNA repair|DNA replication|riboswitch|antitermination")
 
+# KNOWN INTERACTORS of each metabolite. Used to SEPARATE the already-known biology from the novel
+# candidates: a protein annotated as binding/using this very metabolite is not a discovery, it is a
+# POSITIVE CONTROL - useful to keep one or two (the assay should reproduce the known regulation), but the
+# testable hypotheses are the proteins that shift WITHOUT any annotated link to the compound.
+# Deliberately stricter than the hit-signature ligand pattern: it looks for the COMPOUND ITSELF in
+# binding-evidence fields (protein name, GO molecular function, ft_binding, catalytic activity, cofactor)
+# and NOT for pathway membership - being "in glycolysis" is not evidence of binding PEP.
+# HEURISTIC, and absence of annotation is not evidence of absence: override with `interactor_regex`, and
+# the matched terms are written out per protein so every call can be checked.
+.INTERACTOR_REGEX <- list(
+  ATP = "\\bATP\\b|adenosine.?5?.?.?triphosphate|ATP.?binding|adenylyl|AMP-PNP|ATPase",
+  ADP = "\\bADP\\b|adenosine.?5?.?.?diphosphate|ADP.?binding",
+  NAD = "\\bNAD\\b|NAD\\+|\\bNADH\\b|nicotinamide.?adenine.?dinucleotide",
+  aKG = "2-oxoglutarate|oxoglutarate|alpha-?ketoglutarate|2-ketoglutarate",
+  PEP = "phosphoenolpyruvate|\\bPEP\\b",
+  PGP = "6-phospho.?D?-?gluconate|phosphogluconate|gluconate.?6.?phosphate|\\bKDPG\\b|gluconolacton")
+
 # CURATED PRIOR - classic allosterically regulated E. coli enzymes (textbook knowledge; VERIFY, do not
 # treat as evidence from this dataset). Gene symbols as used by UniProt gene_names.
 .ALLOSTERIC_PRIOR <- c(
@@ -168,6 +188,9 @@ validation_candidates <- function(metabolites   = NULL,
                                   require_photometric = TRUE,
                                   exclude_nucleic_acid = TRUE,   # DNA/RNA binders -> their own list
                                   nucleic_acid_regex   = NULL,
+                                  exclude_known_interactors = TRUE,  # known binders -> positive controls
+                                  n_positive_controls  = 1L,     # how many known binders to keep, marked (+)
+                                  interactor_regex     = NULL,
                                   pBHadj_cut     = 0.05, log2fc_cut = 1,
                                   w_stat = 3, w_shift = 3, w_both = 2,
                                   w_central = 3, w_assay = 1, w_allosteric = 2,
@@ -208,11 +231,19 @@ validation_candidates <- function(metabolites   = NULL,
   if (!length(metabolites)) stop("No PCM_ctrl_vs_* output folders found.")
 
   out <- here("output", out_subdir); dir.create(out, recursive = TRUE, showWarnings = FALSE)
-  all_cand <- list(); all_nucleic <- list(); tops <- list(); md <- c("# Orthogonal validation shortlist", "",
+  all_cand <- list(); all_nucleic <- list(); all_known <- list(); tops <- list(); pos_ctrl <- list()
+  md <- c("# Orthogonal validation shortlist", "",
     "Annotation-driven candidates for photometric activity assays of allosteric regulation.",
     "Evidence = CCprofiler differential abundance (pBHadj < 0.05, |log2FC| > 1) and/or the top-ranked",
     paste0("proteins of the ", toupper(rank_source), " elution-shift screen (exploratory: no FDR-significant hits)."),
-    "", "**Verify every suggested assay against BRENDA / EcoCyc before use - the EC-to-assay mapping is a heuristic.**", "")
+    "",
+    "Proteins ALREADY ANNOTATED as interacting with the metabolite are held out and shown separately as",
+    "**(+) positive controls** - the assay should reproduce their known behaviour. The numbered candidates",
+    "are the actual hypotheses: they respond to the metabolite with NO annotated link to it.",
+    "DNA/RNA binders are in a separate list (nucleic_acid_binders.md).",
+    "",
+    "**Verify every suggested assay against BRENDA / EcoCyc before use - the EC-to-assay mapping is a heuristic.**",
+    "**Absence of an annotated interaction is not proof of novelty - check the literature for the ones you pick.**", "")
 
   for (m in metabolites) {
     cmp <- paste0("PCM_ctrl_vs_", m)
@@ -276,6 +307,25 @@ validation_candidates <- function(metabolites   = NULL,
     D[, suggested_assay := vapply(aa, function(x) x$assay, character(1))]
     D[, assay_weight    := vapply(aa, function(x) x$w,     numeric(1))]
     D[, is_central := grepl(.CENTRAL_REGEX, annot_text, ignore.case = TRUE)]
+    # KNOWN INTERACTOR of THIS metabolite? Searched only in binding-evidence fields - protein name, GO
+    # molecular function, binding sites, catalytic activity, cofactor - NOT in the pathway terms, since
+    # pathway membership is not evidence of binding the compound.
+    .bind_text <- paste(.col("protein_name"), .col("go_f"), .col("ft_binding"),
+                        .col("ft_act_site"), .col("cc_catalytic_activity"), .col("cc_cofactor"), sep = " ; ")
+    .irx <- if (!is.null(interactor_regex)) {
+              if (is.list(interactor_regex)) interactor_regex[[m]] else interactor_regex
+            } else .INTERACTOR_REGEX[[m]]
+    if (is.null(.irx) || !nzchar(.irx)) {
+      message("[", m, "] no known-interactor pattern defined - nothing can be marked as a positive ",
+              "control. Pass interactor_regex = list(", m, " = '...') to enable the split.")
+      D[, `:=`(known_interactor = FALSE, interactor_terms = NA_character_)]
+    } else {
+      D[, known_interactor := grepl(.irx, .bind_text, ignore.case = TRUE)]
+      D[, interactor_terms := vapply(.bind_text, function(s) {
+        tt <- trimws(unlist(strsplit(s, ";")))
+        paste(unique(tt[grepl(.irx, tt, ignore.case = TRUE)]), collapse = " | ") }, character(1), USE.NAMES = FALSE)]
+    }
+
     # DNA/RNA binders: flagged and set aside (see .NUCLEIC_REGEX for why), with the matched terms kept
     .nrx <- if (is.null(nucleic_acid_regex)) .NUCLEIC_REGEX else nucleic_acid_regex
     D[, nucleic_acid_binder := grepl(.nrx, annot_text, ignore.case = TRUE)]
@@ -320,17 +370,29 @@ validation_candidates <- function(metabolites   = NULL,
       fwrite(D_na, file.path(out, paste0("nucleic_acid_binders_", m, ".txt")), sep = "\t")
       all_nucleic[[m]] <- copy(D_na)[, metabolite := m]
     }
-    all_cand[[m]] <- copy(D)[, metabolite := m]
-    if (!nrow(D)) { message("[", m, "] no candidates left after the DNA/RNA-binder split."); next }
+    # ---- split KNOWN interactors (positive controls) from NOVEL candidates (the hypotheses) ----
+    D_known <- D[known_interactor == TRUE]
+    D_novel <- if (exclude_known_interactors) D[known_interactor == FALSE] else D
+    if (nrow(D_known)) {
+      fwrite(D_known, file.path(out, paste0("known_interactors_", m, ".txt")), sep = "\t")
+      all_known[[m]] <- copy(D_known)[, metabolite := m]
+    }
+    all_cand[[m]] <- copy(D_novel)[, metabolite := m]
+    if (!nrow(D_novel)) { message("[", m, "] no novel candidates left after the filters."); next }
 
-    top <- head(D, n_per_metabolite)
-    message("\n[", m, "] top ", nrow(top), " validation candidate(s)",
-            if (exclude_nucleic_acid) paste0("  [", nrow(D_na), " DNA/RNA binder(s) moved to their own list]") else "", ":")
+    top <- head(D_novel, n_per_metabolite)                       # the proteins to TEST
+    pcs <- head(D_known, n_positive_controls)                    # kept as (+) positive control(s)
+    message("\n[", m, "] ", nrow(top), " NOVEL candidate(s) to test",
+            if (nrow(D_known)) paste0("  + ", nrow(pcs), " positive control(s) of ", nrow(D_known), " known interactor(s)") else "",
+            if (exclude_nucleic_acid) paste0("  [", nrow(D_na), " DNA/RNA binder(s) set aside]") else "", ":")
+    if (nrow(pcs)) print(pcs[, .(gene, protein_id, evidence, ec, score)][, control := "(+)"][])
     print(top[, .(gene, protein_id, evidence, is_central, is_allosteric_prior, ec, score)])
 
     # the markdown is assembled AFTER the loop: whether a protein responds to several metabolites can
     # only be known once every metabolite has been scored
-    tops[[m]] <- copy(top)[, `:=`(metabolite = m, n_set_aside = nrow(D_na), n_scored = nrow(D))]
+    tops[[m]] <- copy(top)[, `:=`(metabolite = m, n_set_aside = nrow(D_na), n_scored = nrow(D_novel),
+                                  n_known = nrow(D_known))]
+    pos_ctrl[[m]] <- if (nrow(pcs)) copy(pcs)[, metabolite := m] else NULL
   }
 
   if (length(all_cand)) {
@@ -348,10 +410,13 @@ validation_candidates <- function(metabolites   = NULL,
     fwrite(AC, file.path(out, "validation_candidates_all.csv"))
 
     .lbl <- function(r) ifelse(is.na(r$gene) || !nzchar(r$gene), r$protein_id, r$gene)
-    # per-protein entry used by both the priority section and the per-metabolite sections
-    .entry <- function(r, idx, mm_n, mm_list) c(
-      paste0("**", idx, ". ", .lbl(r), "** (", r$protein_id, ") - score ", round(r$score, 2),
+    # per-protein entry used by the priority, positive-control and per-metabolite sections
+    .entry <- function(r, idx, mm_n, mm_list, pc = FALSE) c(
+      paste0("**", idx, ". ", if (pc) "(+) " else "", .lbl(r), "** (", r$protein_id, ") - score ", round(r$score, 2),
+             if (pc) "  -- **POSITIVE CONTROL: already annotated as interacting with this metabolite**" else "",
              if (!is.na(mm_n) && mm_n >= 2) paste0("  -- **PRIORITY: responds to ", mm_n, " metabolites (", mm_list, ")**") else ""),
+      if (pc && !is.na(r$interactor_terms) && nzchar(r$interactor_terms))
+        paste0("- Known link: ", substr(r$interactor_terms, 1, 200)) else NULL,
       paste0("- Protein: ", r$protein_name),
       paste0("- Evidence: ", r$evidence,
              ifelse(is.na(r$log2fc), "", sprintf("; log2FC = %.2f, BH p = %.3g", r$log2fc, r$stat_p)),
@@ -382,12 +447,23 @@ validation_candidates <- function(metabolites   = NULL,
       }
     }
 
-    # ---- section 2: per metabolite ----
+    # ---- section 2: per metabolite - positive control(s) first, then the novel candidates ----
     for (m in names(tops)) {
       tp <- tops[[m]]
-      md <- c(md, paste0("## ", m, "  (", tp$n_scored[1], " scored candidates",
+      md <- c(md, paste0("## ", m, "  (", tp$n_scored[1], " novel candidates",
+                         if (tp$n_known[1] > 0) paste0("; ", tp$n_known[1], " known interactor(s) held out as controls") else "",
                          if (exclude_nucleic_acid && tp$n_set_aside[1] > 0)
                            paste0("; ", tp$n_set_aside[1], " DNA/RNA binders set aside") else "", ")"), "")
+      pc <- pos_ctrl[[m]]
+      if (!is.null(pc) && nrow(pc)) {
+        md <- c(md, "### Positive control(s) - the assay should reproduce the known effect", "")
+        for (i in seq_len(nrow(pc))) {
+          r  <- pc[i]; mm <- MM[protein_id == r$protein_id]
+          md <- c(md, .entry(r, i, if (nrow(mm)) mm$n_metabolites[1] else NA_integer_,
+                             if (nrow(mm)) mm$metabolites[1] else "", pc = TRUE))
+        }
+        md <- c(md, "### To be tested - no annotated interaction with this metabolite", "")
+      }
       for (i in seq_len(nrow(tp))) {
         r  <- tp[i]
         mm <- MM[protein_id == r$protein_id]
@@ -397,6 +473,12 @@ validation_candidates <- function(metabolites   = NULL,
     }
     writeLines(md, file.path(out, "validation_shortlist.md"))
     message("\nShortlist written to ", file.path(out, "validation_shortlist.md"))
+    if (length(all_known)) {
+      AK <- rbindlist(all_known, use.names = TRUE, fill = TRUE)
+      fwrite(AK, file.path(out, "known_interactors_all.csv"))
+      message(nrow(AK), " known-interactor row(s) held out as positive controls -> ",
+              file.path(out, "known_interactors_all.csv"))
+    }
     message(nrow(MMc), " enzyme(s) respond to 2+ metabolites - listed first in the shortlist as PRIORITY.")
     if (nrow(MMc)) print(utils::head(MMc[, .(protein_id, n_metabolites, metabolites, best_score)], 15))
 
