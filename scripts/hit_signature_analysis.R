@@ -64,7 +64,9 @@ source(here::here("scripts", "globularity_category_annotation.R"))
   NAD = "NAD|nicotinamide|dinucleotide|dehydrogenase|oxidoreductase|redox",
   aKG = "2-oxoglutarate|oxoglutarate|alpha-ketoglutarate|ketoglutarate|tricarboxylic|citrate cycle|TCA",
   PEP = "phosphoenolpyruvate|pyruvate|glycoly|phosphotransferase",
-  PGP = "phosphoglycer|glycoly|phosphoglycolate|bisphosphoglycerate|mutase")
+  # PGP here = 6-phospho-D-gluconate (per the experiment), NOT phosphoglycerate: the Entner-Doudoroff /
+  # oxidative pentose-phosphate branch (zwf, pgl, gnd, edd, eda).
+  PGP = "gluconate|gluconolacton|pentose.?phosphate|Entner|Doudoroff|KDPG|2-dehydro-3-deoxy")
 .NUCLEOTIDE_REGEX <- "P-loop|nucleotide.?binding|ATP.?binding|GTP.?binding|NAD.?binding|nucleoside.?triphosphate"
 
 hit_signature_analysis <- function(metabolites   = NULL,
