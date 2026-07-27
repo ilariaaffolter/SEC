@@ -78,6 +78,16 @@ source(here::here("scripts", "globularity_category_annotation.R"))
   list(rx = "^5\\.",          assay = "isomerase/mutase: coupled NAD(P)H system at 340 nm",               w = 1.5),
   list(rx = "^6\\.",          assay = "ligase: ATP consumption via PK/LDH-coupled NADH at 340 nm",        w = 2.5))
 
+# first regex match per element, or NA - regmatches(x, regexpr(...)) returns ONLY the matched elements,
+# so it must be scattered back to the original positions rather than used directly.
+.extract_first <- function(x, pattern) {
+  x  <- as.character(x); x[is.na(x)] <- ""
+  mt <- regexpr(pattern, x)
+  out <- rep(NA_character_, length(x))
+  if (any(mt > 0)) out[mt > 0] <- regmatches(x, mt)
+  out
+}
+
 .assay_for <- function(ec, text) {
   if (!is.na(ec) && nzchar(ec)) for (a in .EC_ASSAY) if (grepl(a$rx, ec)) return(list(assay = a$assay, w = a$w))
   # no EC number: fall back on functional wording
@@ -226,17 +236,19 @@ validation_candidates <- function(metabolites   = NULL,
     ucols <- intersect(c("accession", "protein_name", "gene_names", "go_f", "go_p", "cc_catalytic_activity",
                          "ft_binding", "cc_cofactor"), names(U))
     D <- merge(D, U[, ..ucols], by.x = "protein_id", by.y = "accession", all.x = TRUE)
+    if (!"gene_names" %in% names(D))    D[, gene_names := NA_character_]
+    if (!"protein_name" %in% names(D))  D[, protein_name := NA_character_]
     D[, gene := toupper(trimws(sub(" .*$", "", as.character(gene_names))))]
     D[, gene_lc := tolower(gene)]
-    D[, annot_text := paste(as.character(protein_name), as.character(go_f), as.character(go_p),
-                            as.character(cc_catalytic_activity), sep = " ; ")]
-    D[, ec := {
-      mm <- regmatches(as.character(protein_name), regexpr("EC [0-9]+\\.[0-9-]+\\.[0-9-]+\\.[0-9-]+", as.character(protein_name)))
-      ifelse(lengths(mm) > 0, sub("^EC ", "", mm), NA_character_) }]
+    # column-safe accessor: any annotation column absent from the cache becomes ""
+    .col <- function(nm) if (nm %in% names(D)) { v <- as.character(D[[nm]]); v[is.na(v)] <- ""; v } else rep("", nrow(D))
+    D[, annot_text := paste(.col("protein_name"), .col("go_f"), .col("go_p"),
+                            .col("cc_catalytic_activity"), .col("ft_binding"), sep = " ; ")]
+    D[, ec := sub("^EC ", "", .extract_first(.col("protein_name"), "EC [0-9]+\\.[0-9-]+\\.[0-9-]+\\.[0-9-]+"))]
     # EC may also appear only in the catalytic-activity text
-    D[is.na(ec), ec := {
-      mm <- regmatches(as.character(cc_catalytic_activity), regexpr("[0-9]+\\.[0-9-]+\\.[0-9-]+\\.[0-9-]+", as.character(cc_catalytic_activity)))
-      ifelse(lengths(mm) > 0, mm, NA_character_) }]
+    D[, ec_alt := .extract_first(.col("cc_catalytic_activity"), "[0-9]+\\.[0-9-]+\\.[0-9-]+\\.[0-9-]+")]
+    D[is.na(ec), ec := ec_alt]
+    D[, ec_alt := NULL]
     aa <- lapply(seq_len(nrow(D)), function(i) .assay_for(D$ec[i], D$annot_text[i]))
     D[, suggested_assay := vapply(aa, function(x) x$assay, character(1))]
     D[, assay_weight    := vapply(aa, function(x) x$w,     numeric(1))]
