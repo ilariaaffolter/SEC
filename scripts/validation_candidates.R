@@ -519,14 +519,27 @@ validation_candidates <- function(metabolites   = NULL,
               " metabolite(s)) -> ", file.path(out, "nucleic_acid_binders.md"))
     }
 
+    # the plot shows the NOVEL candidates plus the (+) positive control(s) of each metabolite, so the
+    # panel is directly the experiment: n things to test alongside the control the assay must reproduce
     TOP <- AC[, head(.SD[order(-score)], n_per_metabolite), by = metabolite]
+    TOP[, is_pc := FALSE]
+    PC <- if (length(pos_ctrl)) rbindlist(pos_ctrl, use.names = TRUE, fill = TRUE) else NULL
+    if (!is.null(PC) && nrow(PC)) {
+      PC[, is_pc := TRUE]
+      TOP <- rbind(TOP, PC, use.names = TRUE, fill = TRUE)
+    }
     TOP[, label := ifelse(is.na(gene) | !nzchar(gene), protein_id, gene)]
     TOP[multi_metabolite %in% TRUE, label := paste0(label, " (", n_metabolites, ")*")]   # * = several metabolites
+    TOP[is_pc %in% TRUE, label := paste0("(+) ", label)]                                 # (+) = positive control
     g <- ggplot(TOP, aes(stats::reorder(label, score), score, fill = evidence)) +
-      geom_col() + coord_flip() +
+      geom_col(aes(colour = is_pc), linewidth = 0.6) + coord_flip() +
+      scale_colour_manual(values = c(`FALSE` = NA, `TRUE` = "black"), na.value = NA, guide = "none") +
       facet_wrap(~ metabolite, scales = "free_y") +
       labs(title = "Orthogonal validation candidates", x = NULL, y = "priority score", fill = NULL,
-           subtitle = "Score combines evidence (abundance and/or elution shift), central-metabolism annotation,\nphotometric assayability and a curated allosteric prior. Annotation-driven: verify before use.\n* = also a candidate for other metabolites (number in brackets) - start with these: one purification, several assays.") +
+           subtitle = paste0("Score combines evidence (abundance and/or elution shift), central-metabolism annotation,\n",
+                             "photometric assayability and a curated allosteric prior. Annotation-driven: verify before use.\n",
+                             "(+) black-outlined = POSITIVE CONTROL, already annotated to interact with that metabolite; all others have no annotated link.\n",
+                             "* = also a candidate for other metabolites (number in brackets) - start with these: one purification, several assays.")) +
       theme_bw() + theme(legend.position = "top")
     .fo <- file.path(out, "validation_shortlist.pdf")
     tryCatch(ggsave(.fo, g, width = 11, height = 8),
