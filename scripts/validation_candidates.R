@@ -43,8 +43,12 @@
 # OUTPUT (output/validation_candidates/):
 #   validation_candidates_<metabolite>.txt   the full scored table for that metabolite
 #   validation_candidates_all.csv            every candidate, every metabolite
-#   validation_shortlist.md                  the readable shortlist: per metabolite, the top N with
-#                                            gene, evidence, suggested assay and partner requirements
+#   validation_shortlist.md                  the readable shortlist. Opens with a "START HERE" section of
+#                                            the enzymes that respond to 2+ metabolites (one purification,
+#                                            then each metabolite added separately to the same assay),
+#                                            followed by the per-metabolite top N with gene, evidence,
+#                                            suggested assay and partner requirements. Multi-metabolite
+#                                            entries are marked PRIORITY wherever they appear.
 #   validation_shortlist.pdf                 score composition of the shortlisted proteins
 #   nucleic_acid_binders_<metabolite>.txt    DNA/RNA binders, set aside from the shortlist
 #   nucleic_acid_binders_all.csv             the same, combined
@@ -204,7 +208,7 @@ validation_candidates <- function(metabolites   = NULL,
   if (!length(metabolites)) stop("No PCM_ctrl_vs_* output folders found.")
 
   out <- here("output", out_subdir); dir.create(out, recursive = TRUE, showWarnings = FALSE)
-  all_cand <- list(); all_nucleic <- list(); md <- c("# Orthogonal validation shortlist", "",
+  all_cand <- list(); all_nucleic <- list(); tops <- list(); md <- c("# Orthogonal validation shortlist", "",
     "Annotation-driven candidates for photometric activity assays of allosteric regulation.",
     "Evidence = CCprofiler differential abundance (pBHadj < 0.05, |log2FC| > 1) and/or the top-ranked",
     paste0("proteins of the ", toupper(rank_source), " elution-shift screen (exploratory: no FDR-significant hits)."),
@@ -324,30 +328,77 @@ validation_candidates <- function(metabolites   = NULL,
             if (exclude_nucleic_acid) paste0("  [", nrow(D_na), " DNA/RNA binder(s) moved to their own list]") else "", ":")
     print(top[, .(gene, protein_id, evidence, is_central, is_allosteric_prior, ec, score)])
 
-    md <- c(md, paste0("## ", m, "  (", nrow(D), " scored candidates",
-                       if (exclude_nucleic_acid && nrow(D_na)) paste0("; ", nrow(D_na), " DNA/RNA binders set aside") else "", ")"), "")
-    for (i in seq_len(nrow(top))) {
-      r <- top[i]
-      md <- c(md,
-        paste0("**", i, ". ", ifelse(is.na(r$gene) || !nzchar(r$gene), r$protein_id, r$gene), "** (", r$protein_id, ") - score ", round(r$score, 2)),
-        paste0("- Protein: ", r$protein_name),
-        paste0("- Evidence: ", r$evidence,
-               ifelse(is.na(r$log2fc), "", sprintf("; log2FC = %.2f, BH p = %.3g", r$log2fc, r$stat_p)),
-               ifelse(is.na(r$shift_rank), "", sprintf("; shift-screen rank %d (q = %.3g)", r$shift_rank, r$shift_q))),
-        paste0("- Central metabolism: ", ifelse(isTRUE(r$is_central), "yes", "not by annotation"),
-               ifelse(is.na(r$ec), "", paste0("; EC ", r$ec))),
-        paste0("- Suggested photometric assay: ", ifelse(is.na(r$suggested_assay), "none obvious", r$suggested_assay)),
-        if (isTRUE(r$needs_partners)) paste0("- HETEROMER: ", r$complex_name, " - co-purify/add: ", r$partners) else "- Assayable as a single purified protein (no curated obligate partners)",
-        if (!is.na(r$allosteric_note)) paste0("- Known allosteric regulation (textbook prior, verify): ", r$allosteric_note) else NULL,
-        "")
-    }
+    # the markdown is assembled AFTER the loop: whether a protein responds to several metabolites can
+    # only be known once every metabolite has been scored
+    tops[[m]] <- copy(top)[, `:=`(metabolite = m, n_set_aside = nrow(D_na), n_scored = nrow(D))]
   }
 
   if (length(all_cand)) {
     AC <- rbindlist(all_cand, use.names = TRUE, fill = TRUE)
+
+    # ---- which proteins respond to SEVERAL metabolites ----
+    # These are the efficient place to start: one expression/purification, then the metabolites added one
+    # at a time to the same assay. Counted over the SCORED candidates of every metabolite (DNA/RNA
+    # binders already removed), so it reflects the list actually being prioritised.
+    MM <- AC[, .(n_metabolites = uniqueN(metabolite),
+                 metabolites   = paste(sort(unique(metabolite)), collapse = ", "),
+                 best_score    = max(score, na.rm = TRUE)), by = protein_id]
+    AC <- merge(AC, MM[, .(protein_id, n_metabolites, metabolites)], by = "protein_id", all.x = TRUE)
+    AC[, multi_metabolite := n_metabolites >= 2]
     fwrite(AC, file.path(out, "validation_candidates_all.csv"))
+
+    .lbl <- function(r) ifelse(is.na(r$gene) || !nzchar(r$gene), r$protein_id, r$gene)
+    # per-protein entry used by both the priority section and the per-metabolite sections
+    .entry <- function(r, idx, mm_n, mm_list) c(
+      paste0("**", idx, ". ", .lbl(r), "** (", r$protein_id, ") - score ", round(r$score, 2),
+             if (!is.na(mm_n) && mm_n >= 2) paste0("  -- **PRIORITY: responds to ", mm_n, " metabolites (", mm_list, ")**") else ""),
+      paste0("- Protein: ", r$protein_name),
+      paste0("- Evidence: ", r$evidence,
+             ifelse(is.na(r$log2fc), "", sprintf("; log2FC = %.2f, BH p = %.3g", r$log2fc, r$stat_p)),
+             ifelse(is.na(r$shift_rank), "", sprintf("; shift-screen rank %d (q = %.3g)", r$shift_rank, r$shift_q))),
+      paste0("- Central metabolism: ", ifelse(isTRUE(r$is_central), "yes", "not by annotation"),
+             ifelse(is.na(r$ec), "", paste0("; EC ", r$ec))),
+      paste0("- Suggested photometric assay: ", ifelse(is.na(r$suggested_assay), "none obvious", r$suggested_assay)),
+      if (isTRUE(r$needs_partners)) paste0("- HETEROMER: ", r$complex_name, " - co-purify/add: ", r$partners) else "- Assayable as a single purified protein (no curated obligate partners)",
+      if (!is.na(r$allosteric_note)) paste0("- Known allosteric regulation (textbook prior, verify): ", r$allosteric_note) else NULL,
+      "")
+
+    # ---- section 1: the multi-metabolite enzymes, best first ----
+    MMc <- MM[n_metabolites >= 2][order(-n_metabolites, -best_score)]
+    md <- c(md,
+      "## START HERE - enzymes responding to 2 or more metabolites", "",
+      if (!nrow(MMc)) "_No enzyme was a candidate for more than one metabolite._" else
+        paste0("These ", nrow(MMc), " enzymes appear in the scored candidate list of several metabolites. ",
+               "One expression and purification then serves multiple experiments: add each metabolite ",
+               "separately to the same assay and compare against the no-metabolite control. Note that a ",
+               "protein responding to many chemically unrelated metabolites may reflect a general effect ",
+               "(abundance, stability, nucleoprotein association) rather than several distinct allosteric ",
+               "events - the trace plots are the check."), "")
+    if (nrow(MMc)) {
+      for (i in seq_len(nrow(MMc))) {
+        pid <- MMc$protein_id[i]
+        r   <- AC[protein_id == pid][order(-score)][1]
+        md  <- c(md, .entry(r, i, MMc$n_metabolites[i], MMc$metabolites[i]))
+      }
+    }
+
+    # ---- section 2: per metabolite ----
+    for (m in names(tops)) {
+      tp <- tops[[m]]
+      md <- c(md, paste0("## ", m, "  (", tp$n_scored[1], " scored candidates",
+                         if (exclude_nucleic_acid && tp$n_set_aside[1] > 0)
+                           paste0("; ", tp$n_set_aside[1], " DNA/RNA binders set aside") else "", ")"), "")
+      for (i in seq_len(nrow(tp))) {
+        r  <- tp[i]
+        mm <- MM[protein_id == r$protein_id]
+        md <- c(md, .entry(r, i, if (nrow(mm)) mm$n_metabolites[1] else NA_integer_,
+                           if (nrow(mm)) mm$metabolites[1] else ""))
+      }
+    }
     writeLines(md, file.path(out, "validation_shortlist.md"))
     message("\nShortlist written to ", file.path(out, "validation_shortlist.md"))
+    message(nrow(MMc), " enzyme(s) respond to 2+ metabolites - listed first in the shortlist as PRIORITY.")
+    if (nrow(MMc)) print(utils::head(MMc[, .(protein_id, n_metabolites, metabolites, best_score)], 15))
 
     # ---- the DNA/RNA-binder list: separate table + its own readable summary ----
     if (length(all_nucleic)) {
@@ -388,11 +439,12 @@ validation_candidates <- function(metabolites   = NULL,
 
     TOP <- AC[, head(.SD[order(-score)], n_per_metabolite), by = metabolite]
     TOP[, label := ifelse(is.na(gene) | !nzchar(gene), protein_id, gene)]
+    TOP[multi_metabolite %in% TRUE, label := paste0(label, " (", n_metabolites, ")*")]   # * = several metabolites
     g <- ggplot(TOP, aes(stats::reorder(label, score), score, fill = evidence)) +
       geom_col() + coord_flip() +
       facet_wrap(~ metabolite, scales = "free_y") +
       labs(title = "Orthogonal validation candidates", x = NULL, y = "priority score", fill = NULL,
-           subtitle = "Score combines evidence (abundance and/or elution shift), central-metabolism annotation,\nphotometric assayability and a curated allosteric prior. Annotation-driven: verify before use.") +
+           subtitle = "Score combines evidence (abundance and/or elution shift), central-metabolism annotation,\nphotometric assayability and a curated allosteric prior. Annotation-driven: verify before use.\n* = also a candidate for other metabolites (number in brackets) - start with these: one purification, several assays.") +
       theme_bw() + theme(legend.position = "top")
     .fo <- file.path(out, "validation_shortlist.pdf")
     tryCatch(ggsave(.fo, g, width = 11, height = 8),
