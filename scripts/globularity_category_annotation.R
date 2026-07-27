@@ -403,7 +403,9 @@ globularity_category_annotation <- function(
                  hjust = 0, vjust = -0.5, size = 3, colour = "grey35") +
         labs(title = paste0("Isoelectric point by elution category - PCM_ctrl_vs_", m),
              subtitle = paste0("Proteins above the dashed line are net POSITIVE in the running buffer.\n",
-                               "sub_monomer enriched for high pI => cation-exchange-like retention on the column (artefact), not biology."),
+                               "Read with the Wilcoxon p values in category_annotation_summary.txt. High pI in a LATE-eluting class\n",
+                               "(sub_monomer) suggests cation-exchange-like retention (artefact); high pI in an EARLY-eluting class\n",
+                               "(beyond_calibration / void) instead suggests nucleic-acid / ribosomal association, i.e. real complexes."),
              x = NULL, y = "predicted pI (EMBOSS pKa set)") +
         theme_bw() + theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
 
