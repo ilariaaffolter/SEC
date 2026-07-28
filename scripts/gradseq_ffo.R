@@ -341,17 +341,32 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
       data.table(ffo = J$ffo_sec_absolute, src = paste0("SEC (this study, x", globular_ffo, ")")),
       data.table(ffo = J$ffo_gradseq,      src = "Grad-seq (sedimentation)"),
       data.table(ffo = J$ffo_true,         src = "combined (Siegel-Monty)")))[is.finite(ffo) & ffo > 0]
-    refs <- data.table(x = c(1.2, 1.5, 2.0), lab = c("globular", "elongated", "extended"))
+    # f/f0 < 1 is physically impossible (the sphere is the minimum-friction shape), so a curve sitting
+    # below 1 is proof that its calibration is wrong - stamp that on the figure rather than let it be read
+    # as "very compact".
+    .bad <- c(SEC = stats::median(J$ffo_sec_absolute, na.rm = TRUE),
+              `Grad-seq` = mgrd, combined = mtru)
+    .bad <- names(.bad)[is.finite(.bad) & .bad < 1]
+    refs <- data.table(x = c(1.0, 1.2, 1.5, 2.0), lab = c("SPHERE (hard floor)", "globular", "elongated", "extended"))
     g1 <- ggplot(L, aes(ffo, fill = src)) +
+      annotate("rect", xmin = 0, xmax = 1, ymin = -Inf, ymax = Inf, fill = "grey55", alpha = 0.22) +
       geom_density(alpha = 0.4, colour = NA) +
-      geom_vline(data = refs, aes(xintercept = x), linetype = 2, colour = "grey35") +
-      geom_text(data = refs, aes(x = x, y = Inf, label = lab), vjust = 1.4, size = 3, colour = "grey25", inherit.aes = FALSE) +
+      geom_vline(data = refs, aes(xintercept = x), linetype = 2, colour = "grey35", inherit.aes = FALSE) +
+      geom_text(data = refs, aes(x = x, y = Inf, label = lab), vjust = 1.4, hjust = -0.05, angle = 90,
+                size = 2.7, colour = "grey25", inherit.aes = FALSE) +
       scale_x_log10() +
       labs(title = paste0("How compact is the proteome? Two independent techniques (", metabolite, " control)"),
            subtitle = paste0("All on the ABSOLUTE scale. The SEC curve is the relative f/f0 multiplied by ", globular_ffo,
-                             " (the absolute f/f0 of the globular calibrants).\nOligomers inflate the SEC estimate (n^1/3) and deflate the sedimentation one (n^2/3); the combined curve removes both."),
+                             " (the absolute f/f0 of the globular calibrants).\n",
+                             "Oligomers inflate the SEC estimate (n^1/3) and deflate the sedimentation one (n^2/3); the combined curve removes both.\n",
+                             "SHADED REGION IS PHYSICALLY IMPOSSIBLE: f/f0 >= 1 always, since a sphere has the least friction for a given mass.",
+                             if (length(.bad)) paste0("\n*** ", paste(.bad, collapse = " and "),
+                                                      " sits below 1 -> that calibration is WRONG, not the proteins. Do not interpret it; use gradseq_vs_sec_deviation(). ***") else ""),
            x = "absolute f/f0", y = "density", fill = NULL) +
       theme_bw() + theme(legend.position = "top")
+    if (length(.bad))
+      message("!! ", paste(.bad, collapse = " and "), " median f/f0 is below 1, which is physically impossible - ",
+              "the sedimentation calibration is unusable. Use gradseq_vs_sec_deviation() instead.")
     tryCatch(ggsave(.gs_dir("sec_vs_gradseq_distribution.pdf"), g1, width = 8, height = 5.5), error = function(e) NULL)
 
     P <- J[is.finite(ffo_sec_absolute) & is.finite(ffo_gradseq) & ffo_sec_absolute > 0 & ffo_gradseq > 0]
