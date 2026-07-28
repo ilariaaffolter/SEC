@@ -53,8 +53,10 @@
 #   gs <- gradseq_load("data/raw/Hor2020_gradseq_proteins.xlsx")   # inspect what was parsed
 #   cal <- gradseq_calibrate(gs)                                   # LOOK at the calibration plot
 #   #   gradseq_calibrate(gs, model = "power")        or "free_linear" (the old, unconstrained fit)
-#   #   gradseq_calibrate(gs, extra_anchors = data.table(name = "X", s = 21, fraction = 8))
-#   #                                                 any further particle of KNOWN s, if you have one
+#   #   gradseq_calibrate(gs, extra_anchors = data.table(name = "GroEL", s = 22, gene = "grol"))
+#   #                                                 any further particle whose s you know independently;
+#   #                                                 give `gene` and the peak fraction is read off the data
+#   #                                                 (give `fraction` too and the two are cross-checked)
 #   gradseq_compare_models(gs, cal)                                # which model does the proteome reject?
 #   # ribosomal anchors alone do NOT calibrate s for ordinary proteins (see gradseq_ffo's physical check);
 #   # when that fails, use the calibration-free comparison instead:
@@ -287,7 +289,37 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
   if (is.null(anchors)) {
     anchors <- data.table(name = c("30S", "50S"), s = c(30, 50), fraction = c(f30, f50))
   } else anchors <- as.data.table(anchors)
-  if (!is.null(extra_anchors)) anchors <- rbind(anchors, as.data.table(extra_anchors), fill = TRUE)
+  # Extra anchors may be given as a fraction, or as a gene symbol whose peak fraction is then read off
+  # THIS dataset - which is safer, because a hand-typed fraction can silently be wrong. When both are
+  # given, the two are compared and any disagreement is reported rather than quietly accepted.
+  if (!is.null(extra_anchors)) {
+    EA <- as.data.table(copy(extra_anchors))
+    if (!all(c("name", "s") %in% names(EA)))
+      stop("extra_anchors needs at least `name` and `s`, plus either `fraction` or `gene`. ",
+           "Example: data.table(name = 'GroEL', s = 22, gene = 'grol')")
+    if (!any(c("fraction", "gene") %in% names(EA)))
+      stop("extra_anchors needs either `fraction` (where the particle peaks) or `gene` (to look that up).")
+    if ("gene" %in% names(EA)) {
+      EA[, observed_fraction := vapply(tolower(as.character(gene)), function(g) {
+        h <- D[!is.na(gene) & gene == g]
+        if (nrow(h)) as.numeric(stats::median(h$peak_fraction)) else NA_real_ }, numeric(1))]
+      if (!"fraction" %in% names(EA)) EA[, fraction := observed_fraction]
+      for (i in seq_len(nrow(EA))) {
+        nm <- as.character(EA$name[i]); ob <- EA$observed_fraction[i]; gv <- as.character(EA$gene[i])
+        if (!is.finite(ob)) {
+          warning("Extra anchor '", nm, "': gene '", gv, "' was not found in this dataset, so its fraction could not be ",
+                  "verified. Check the gene symbol against the UniProt cache.", call. = FALSE)
+        } else if (abs(EA$fraction[i] - ob) > 1) {
+          warning(sprintf("Extra anchor '%s': you gave fraction %.2f, but '%s' actually peaks at fraction %.2f in this dataset. Using YOUR value - pass only `gene` to use the observed one.",
+                          nm, EA$fraction[i], gv, ob), call. = FALSE)
+        } else {
+          message(sprintf("Extra anchor '%s' (s = %g): supplied fraction %.2f agrees with the observed peak of '%s' at %.2f.",
+                          nm, EA$s[i], EA$fraction[i], gv, ob))
+        }
+      }
+    }
+    anchors <- rbind(anchors, EA, fill = TRUE)
+  }
   anchors <- anchors[is.finite(s) & is.finite(fraction) & s > 0]
   if (nrow(anchors) < 2) stop("Need at least two usable anchors.")
   setorder(anchors, s)
@@ -333,12 +365,16 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     }))
     err <- loo[, lapply(.SD, function(p) 100 * mean(abs(p - s_true) / s_true)),
                .SDcols = c("zero_anchored", "power", "free_linear")]
-    message("Leave-one-out validation (predict each anchor from the others) - mean |error|:")
+    message("Leave-one-out validation: each anchor is PREDICTED from the others (the s values below are predictions, not fits):")
     print(loo[, .(anchor, s_true, zero_anchored = round(zero_anchored, 1),
                   power = round(power, 1), free_linear = round(free_linear, 1))])
     best <- names(err)[which.min(unlist(err))]
-    message(sprintf("   zero_anchored %.1f%% | power %.1f%% | free_linear %.1f%%  -> best generalisation: %s",
-                    err$zero_anchored, err$power, err$free_linear, best))
+    message(sprintf("   Mean |error| - LOWER IS BETTER: zero_anchored %.1f%% | power %.1f%% | free_linear %.1f%%  -> best: %s (%.1f%%)",
+                    err$zero_anchored, err$power, err$free_linear, best, min(unlist(err))))
+    message("   Beware of judging this by eye on the calibration plot: free_linear has TWO free parameters and will always ",
+            "hug the anchors more closely than the one-parameter models. That is fit, not accuracy. Leave-one-out asks the ",
+            "harder question - can it predict an anchor it has never seen? - which is what matters when extrapolating to ",
+            "ordinary proteins far below every anchor.")
     if (identical(model, "auto")) {
       model <- best
       message("   model = 'auto': using '", model, "'. With few anchors each fit uses very few points, so ",
@@ -416,14 +452,24 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
       coord_cartesian(ylim = c(ylo, max(anchors$s) * 1.15)) + theme_bw() + theme(legend.position = "top")
     tryCatch(ggsave(.gs_dir("gradseq_calibration.pdf"), gp, width = 8, height = 5.5), error = function(e) NULL)
 
+    # Extra anchors are not ribosomal, so they contribute no bar to this histogram - only a dashed line.
+    # Where the anchor names a gene, its OBSERVED peak is drawn too (dotted, with a point on the axis), so
+    # a hand-typed fraction can be checked against the data at a glance.
     L <- rbindlist(list(cbind(small, subunit = "30S (rps*)"), cbind(large, subunit = "50S (rpl*)")))
+    obs <- if ("observed_fraction" %in% names(anchors)) anchors[is.finite(observed_fraction)] else anchors[0]
     gr <- ggplot(L, aes(peak_fraction, fill = subunit)) +
       geom_histogram(binwidth = 1, position = "identity", alpha = 0.6) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2) +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3,
                 colour = "grey20", inherit.aes = FALSE) +
+      { if (nrow(obs)) geom_vline(data = obs, aes(xintercept = observed_fraction), linetype = 3, colour = "#E15759") } +
+      { if (nrow(obs)) geom_point(data = obs, aes(x = observed_fraction, y = 0), colour = "#E15759",
+                                  size = 2.5, inherit.aes = FALSE) } +
       labs(title = "Ribosomal subunit peak fractions (sanity check)",
-           subtitle = "The two subunits should peak in clearly distinct fractions, as in the published A260 profile.",
+           subtitle = paste0("The two subunits should peak in clearly distinct fractions, as in the published A260 profile.\n",
+                             "Dashed lines are the anchor fractions used for the calibration. Anchors that are NOT ribosomal ",
+                             "contribute no bar\nhere - only a line; where one names a gene, its observed peak is marked in red ",
+                             "so the supplied value can be checked."),
            x = "peak fraction", y = "proteins", fill = NULL) + theme_bw()
     gc2 <- ggplot(data.table(fraction = rep(fr, 2),
                              value = c(ps, pl),
@@ -541,24 +587,46 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
                     100 * .huge))
   setorder(D, -ffo_gradseq)
   fwrite(D, .gs_dir("gradseq_ffo.csv"))
-  message(sprintf("Sedimentation-derived ABSOLUTE f/f0 for %d protein(s): median %.2f (IQR %.2f-%.2f).",
-                  nrow(D), stats::median(D$ffo_gradseq, na.rm = TRUE),
-                  stats::quantile(D$ffo_gradseq, .25, na.rm = TRUE), stats::quantile(D$ffo_gradseq, .75, na.rm = TRUE)))
+  Dq <- D[near_load_zone == FALSE]                    # the proteins whose s is actually a measurement
+  if (!nrow(Dq)) Dq <- D
+  message(sprintf("Sedimentation-derived ABSOLUTE f/f0 for %d protein(s), excluding the %d in the load zone: median %.2f (IQR %.2f-%.2f).",
+                  nrow(Dq), nrow(D) - nrow(Dq), stats::median(Dq$ffo_gradseq, na.rm = TRUE),
+                  stats::quantile(Dq$ffo_gradseq, .25, na.rm = TRUE), stats::quantile(Dq$ffo_gradseq, .75, na.rm = TRUE)))
   message("   Reference: ~1.2 = compact globular (hydrated), ~1.5 = moderately elongated, >2 = extended/disordered.")
   message("   NOTE the monomer assumption DEFLATES this estimate for oligomers (by n^(2/3)), so a high value is a strong claim.")
   message(sprintf("   Physical check: %.0f%% of values are below 1 (impossible). Above ~5%% the absolute scale should not be used - prefer gradseq_vs_sec_deviation().",
                   100 * .imposs))
   if (save_plots) {
-    refs <- data.table(x = c(1.0, 1.2, 1.5, 2.0), lab = c("sphere", "globular", "elongated", "extended"))
-    g <- ggplot(D[is.finite(ffo_gradseq) & ffo_gradseq > 0], aes(ffo_gradseq)) +
-      geom_histogram(bins = 80, fill = "darkorange", colour = "white") +
+    # This figure carries the same physical honesty as sec_vs_gradseq_distribution.pdf: f/f0 = 1 is a hard
+    # floor, so everything left of it is shaded as impossible rather than left to read as "very compact",
+    # the proteins sitting in the load zone are drawn separately because their s is not a measurement, and
+    # the model the numbers came from is named on the figure.
+    PL <- D[is.finite(ffo_gradseq) & ffo_gradseq > 0]
+    PL[, zone := ifelse(near_load_zone, "in the load zone (s not measurable)", "sedimented")]
+    Q  <- PL[near_load_zone == FALSE]
+    imp <- mean(Q$ffo_gradseq < 1, na.rm = TRUE); hug <- mean(Q$ffo_gradseq > 4, na.rm = TRUE)
+    med <- stats::median(Q$ffo_gradseq, na.rm = TRUE)
+    refs <- data.table(x = c(1.0, 1.2, 1.5, 2.0),
+                       lab = c("1.0 SPHERE - hard physical floor", "1.2 compact globular", "1.5 elongated", "2.0 extended"))
+    g <- ggplot(PL, aes(ffo_gradseq, fill = zone)) +
+      annotate("rect", xmin = 0, xmax = 1, ymin = -Inf, ymax = Inf, fill = "grey55", alpha = 0.25) +
+      geom_histogram(bins = 80, colour = NA, position = "stack") +
       geom_vline(data = refs, aes(xintercept = x), linetype = 2, colour = "grey35") +
-      geom_text(data = refs, aes(x = x, y = Inf, label = lab), vjust = 1.3, size = 3, colour = "grey25") +
+      geom_text(data = refs, aes(x = x, y = Inf, label = lab), vjust = 1.1, hjust = -0.02, angle = 90,
+                size = 2.6, colour = "grey25", inherit.aes = FALSE) +
+      geom_vline(xintercept = med, colour = "#E15759", linewidth = 0.7) +
+      scale_fill_manual(values = c(`sedimented` = "darkorange", `in the load zone (s not measurable)` = "grey70")) +
       scale_x_log10() +
       labs(title = "Absolute f/f0 from the glycerol gradient (monomer assumption)",
-           subtitle = "f/f0 = M(1-vbar*rho) / (N_A * s * 6*pi*eta*R_min). Oligomers are UNDER-estimated here by n^(2/3),\nso this is a conservative view of how extended the proteome is.",
-           x = "absolute f/f0", y = "proteins") + theme_bw()
-    tryCatch(ggsave(.gs_dir("gradseq_ffo_distribution.pdf"), g, width = 7, height = 5), error = function(e) NULL)
+           subtitle = sprintf(paste0("f/f0 = M(1-vbar*rho) / (N_A * s * 6*pi*eta*R_min), with s from the '%s' calibration.\n",
+                                     "SHADED REGION IS PHYSICALLY IMPOSSIBLE - a sphere has the least friction for a given mass, so f/f0 >= 1 always.\n",
+                                     "Sedimented proteins (n = %d): median %.2f (red line); %.0f%% fall in the impossible region and %.0f%% above 4.%s\n",
+                                     "Oligomers are UNDER-estimated here by n^(2/3), so this is a conservative view of how extended the proteome is."),
+                              cal$model, nrow(Q), med, 100 * imp, 100 * hug,
+                              if (imp > 0.05) " *** THAT IMPOSSIBLE POPULATION FALSIFIES THE CALIBRATION, NOT THE PROTEINS - do not interpret this axis; use gradseq_vs_sec_deviation(). ***" else ""),
+           x = "absolute f/f0", y = "proteins", fill = NULL) +
+      theme_bw() + theme(legend.position = "top")
+    tryCatch(ggsave(.gs_dir("gradseq_ffo_distribution.pdf"), g, width = 8.5, height = 5.5), error = function(e) NULL)
   }
   invisible(D)
 }
