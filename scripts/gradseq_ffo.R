@@ -28,8 +28,21 @@
 #   is about 49% of the proteome - the frequently quoted ~85% refers to TRANSCRIPTS).
 #   Save the supplementary protein table (xlsx/tsv/csv) somewhere and pass its path.
 #
-# HOW s IS OBTAINED: the gradient is calibrated from RIBOSOMAL anchors - the small subunit (30S, s = 30)
-# and the large subunit (50S, s = 50), located from the peak fractions of rps*/rpl* proteins.
+# WHAT THE SOURCE PAPER ACTUALLY DOES - READ THIS BEFORE QUOTING ANY ABSOLUTE NUMBER:
+#   Hor et al. use NO sedimentation-coefficient calibration at all. They run a linear 10-40% (w/v) glycerol
+#   gradient (SW40Ti, 17 h, 4 C, 100 000 rcf), fractionate into 20 x 590 ul fractions plus a pellet, and
+#   ANNOTATE that fraction axis with qualitative landmarks read off the A260 trace: a low-molecular-weight
+#   bulk peak at ~fraction 2, then the 30S and 50S subunit peaks. Those landmarks are validated
+#   orthogonally - RNA gels place tRNA, 16S and 5S/23S rRNA on the three UV peaks; SDS-PAGE and westerns
+#   against RpoB and RpoD place RNA polymerase - and every downstream conclusion is RELATIVE
+#   (co-sedimentation, profile correlation, clustering). Fractions are never converted to Svedbergs.
+#   Note also that fully assembled 70S and 100S ribosomes sediment INTO THE PELLET, so there is no 70S peak
+#   anywhere in the 20 fractions - which is why no 70S anchor is used here.
+#   Everything below therefore goes BEYOND the published analysis. That is legitimate, but it is an
+#   extension we are responsible for validating, not something inherited from the paper.
+#
+# HOW s IS OBTAINED HERE: the gradient is calibrated from RIBOSOMAL anchors - the small subunit (30S,
+# s = 30) and the large subunit (50S, s = 50), located from the peak fractions of rps*/rpl* proteins.
 # The curve is forced through s = 0 at the LOAD ZONE, because a particle that does not sediment does not
 # move. Leaving that constraint out - the old behaviour, still available as model = "free_linear" - gives
 # a large negative intercept, over-estimates s for ordinary proteins, and was the direct cause of the
@@ -252,10 +265,17 @@ gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, s
 # EXTRAPOLATION below the calibrated range. gradseq_vs_sec_deviation() avoids that entirely.
 gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors = NULL,
                               load_fraction = NULL, mass_map = NULL, globular_ffo_assumed = 1.25,
+                              position = c("peak", "com"),
                               model = c("auto", "proteome", "zero_anchored", "power", "free_linear"),
                               save_plots = TRUE) {
-  model <- match.arg(model)
+  model <- match.arg(model); position <- match.arg(position)
   D <- gs$meta
+  # ONE position measure, used for the anchors AND for every protein the calibration is later applied to.
+  # Mixing them is a silent, severe error: a protein's centre of mass sits further down the gradient than
+  # its peak whenever the profile has a tail, so calibrating on peaks and applying to centres of mass
+  # over-estimates s for every protein and drives the whole f/f0 distribution below the physical floor.
+  D[, pos_used := if (position == "com") com_fraction else as.numeric(peak_fraction)]
+  message("Position measure: '", position, "'. The same measure is stored on the calibration and reused downstream.")
   # protein -> gene symbol, from the shared UniProt cache unless supplied. `alias_map` keeps EVERY synonym
   # (UniProt lists e.g. "groL groEL mopA b4143"), because an anchor is easily named by a synonym and a
   # first-token-only map would silently fail to find it.
@@ -286,8 +306,8 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     stop("Too few ribosomal proteins matched to calibrate. Check the gene mapping, or pass explicit anchors.")
 
   fr  <- gs$fractions
-  f30 <- stats::median(small$peak_fraction)
-  f50 <- stats::median(large$peak_fraction)
+  f30 <- stats::median(small$pos_used)
+  f50 <- stats::median(large$pos_used)
   # mean normalised profile of each subunit group, each scaled to its own maximum
   ps <- colMeans(gs$profiles[i_small, , drop = FALSE]); ps <- ps / max(ps)
   pl <- colMeans(gs$profiles[i_large, , drop = FALSE]); pl <- pl / max(pl)
@@ -329,7 +349,7 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
       }
       anchor_rows[[nm]] <- ix
       if (length(ix)) {
-        EA$observed_fraction[i] <- as.numeric(stats::median(D$peak_fraction[ix]))
+        EA$observed_fraction[i] <- as.numeric(stats::median(D$pos_used[ix]))
         message(sprintf("Extra anchor '%s' (s = %g): matched %d protein(s) by %s; observed peak fraction %.2f.",
                         nm, EA$s[i], length(ix), how, EA$observed_fraction[i]))
       } else {
@@ -410,10 +430,10 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
   #        construction. Do not present the median as a measurement; the SPREAD and the outliers are real.
   fit_prot <- NULL; cprot <- NULL; n_prot <- 0L
   if (!is.null(mass_map) && "mw_Da" %in% names(D)) {
-    Dp <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(peak_fraction) & peak_fraction > load_fraction]
+    Dp <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(pos_used) & pos_used > load_fraction]
     if (nrow(Dp) >= 50) {
       Dp[, s_expected := .s_from_ffo(mw_Da, globular_ffo_assumed)]
-      Dp[, dd := peak_fraction - load_fraction]
+      Dp[, dd := pos_used - load_fraction]
       fit_prot <- if (requireNamespace("MASS", quietly = TRUE))
                     MASS::rlm(log(s_expected) ~ log(dd), data = Dp)
                   else stats::lm(log(s_expected) ~ log(dd), data = Dp)
@@ -433,6 +453,18 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
         message(sprintf("   => mean |error| %.0f%%: the proteome curve does NOT extrapolate to the ribosomal particles. That is expected in part - the ribosome is ~2/3 RNA, so its partial specific volume is ~0.60 rather than the 0.73 assumed for protein, and it sediments faster than a protein of the same mass. Treat the two regimes as separately calibrated.", 100 * aerr))
     } else message("   proteome      : skipped, only ", nrow(Dp), " protein(s) have both a mass and a peak fraction below the load zone.")
   } else message("   proteome      : skipped, no monomer masses available (pass mass_map, or render a comparison to build the UniProt cache).")
+
+  # ---- the paper's OWN landmark: where the low-molecular-weight bulk sediments -------------------
+  # Hor et al. report "one bulk peak around low molecular weight (LMW) fraction 2" from the A260 trace.
+  # That is a genuine low-s landmark and the only one anywhere near the range ordinary proteins occupy,
+  # so it is worth checking even though it is too soft to fit to: if the bulk of THIS parse does not peak
+  # near there, the fraction numbering or the parse is off before any calibration question arises.
+  bulk_obs <- stats::median(D$pos_used, na.rm = TRUE)
+  message(sprintf("Bulk of the proteome peaks at fraction %.1f (median over %d proteins). Hor et al. 2020 report the LMW bulk peak at fraction ~2.",
+                  bulk_obs, sum(is.finite(D$pos_used))))
+  if (bulk_obs > 6)
+    message("   That is well below their fraction ~2. If you are using position = 'com', note that a centre of mass ",
+            "is dragged down-gradient by the tail of the profile; 'peak' is the measure comparable to a UV trace.")
 
   # ---- leave-one-out validation, if enough anchors were supplied to make it possible -------------
   loo <- NULL
@@ -474,8 +506,8 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
   if (identical(model, "auto")) {
     .try_ffo <- function(pf) {
       if (!"mw_Da" %in% names(D)) return(NA_real_)
-      dd <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(peak_fraction)]
-      ss <- pf(dd$peak_fraction); ok <- is.finite(ss) & ss > 0
+      dd <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(pos_used)]
+      ss <- pf(dd$pos_used); ok <- is.finite(ss) & ss > 0
       if (!any(ok)) return(1)
       mean(.ffo_from_s(ss[ok], dd$mw_Da[ok]) < 1, na.rm = TRUE)
     }
@@ -581,8 +613,8 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     # checked against where that particle actually sediments.
     # `anchor_rows` was resolved when the anchor set was built (by accession, gene symbol or synonym), so
     # an extra anchor appears here as REAL DATA whatever identifier it was named by.
-    L <- rbindlist(list(cbind(small[, .(peak_fraction)], anchor = "30S (rps*)"),
-                        cbind(large[, .(peak_fraction)], anchor = "50S (rpl*)")))
+    L <- rbindlist(list(cbind(small[, .(pos_used)], anchor = "30S (rps*)"),
+                        cbind(large[, .(pos_used)], anchor = "50S (rpl*)")))
     extra_tr <- list(); arows <- attr(anchors, "rows")
     for (nm in intersect(names(arows), anchors$name)) {
       ix <- arows[[nm]]
@@ -591,12 +623,12 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
         next
       }
       lab <- paste0(nm, " (n = ", length(ix), ")")
-      L <- rbind(L, data.table(peak_fraction = D$peak_fraction[ix], anchor = lab))
+      L <- rbind(L, data.table(pos_used = D$pos_used[ix], anchor = lab))
       pe <- colMeans(gs$profiles[ix, , drop = FALSE]); pe <- pe / max(pe)
       extra_tr[[lab]] <- pe
     }
     obs <- if ("observed_fraction" %in% names(anchors)) anchors[is.finite(observed_fraction)] else anchors[0]
-    gr <- ggplot(L, aes(peak_fraction, fill = anchor)) +
+    gr <- ggplot(L, aes(pos_used, fill = anchor)) +
       geom_histogram(binwidth = 1, position = "identity", alpha = 0.6) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2) +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3,
@@ -613,7 +645,7 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
                              "height 1, so its observed peak is also marked with a red triangle. Dashed lines are the fractions fed into\n",
                              "the calibration, red dotted lines the OBSERVED peaks, so a hand-typed fraction can be checked. The two\n",
                              "ribosomal subunits should peak in clearly distinct fractions, as in the published A260 profile."),
-           x = "peak fraction", y = "proteins", fill = NULL) + theme_bw() + theme(legend.position = "top")
+           x = paste0(position, " fraction"), y = "proteins", fill = NULL) + theme_bw() + theme(legend.position = "top")
     trn <- c(list(`30S proteins (rps*)` = ps, `50S proteins (rpl*)` = pl), extra_tr)
     gc2 <- ggplot(rbindlist(lapply(names(trn), function(n)
                     data.table(fraction = fr, value = trn[[n]], trace = n))),
@@ -630,11 +662,26 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
                print(gr); print(gc2); grDevices::dev.off() },
              error = function(e) try(grDevices::dev.off(), silent = TRUE))
   }
-  invisible(list(fit = fit_free, predict_s = predict_s, model = model, anchors = anchors,
+  invisible(list(fit = fit_free, predict_s = predict_s, model = model, position = position, anchors = anchors,
                  load_fraction = load_fraction, loo = loo, gene_map = gene_map, mass_map = mass_map,
                  globular_ffo_assumed = globular_ffo_assumed, coef_proteome = cprot, n_proteome = n_prot,
                  fits = list(zero_anchored = fit_zero, power = fit_pow, free_linear = fit_free,
                              proteome = fit_prot)))
+}
+
+# Resolve the position measure downstream: ALWAYS inherit the one the calibration was built with, unless
+# the caller explicitly overrides it - and say so loudly if they do, because a mismatch silently corrupts
+# every s value.
+.resolve_position <- function(position, cal) {
+  cp <- if (!is.null(cal) && !is.null(cal$position)) cal$position else "peak"
+  if (is.null(position)) return(cp)
+  position <- match.arg(position, c("peak", "com"))
+  if (!identical(position, cp))
+    warning("You are applying a calibration built on '", cp, "' fractions to '", position, "' fractions. ",
+            "These are different quantities - a centre of mass sits further down the gradient than a peak - ",
+            "so every s will be biased and f/f0 with it. Re-run gradseq_calibrate(position = '", position,
+            "') instead.", call. = FALSE, immediate. = TRUE)
+  position
 }
 
 # ---- 2b. which calibration model does the PROTEOME reject? -----------------------------------------
@@ -644,8 +691,8 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
 # proteome sub-spherical has been falsified, whatever its anchor residuals look like.
 # It cuts both ways: values above ~4 are implausible for folded proteins, so a model producing many of
 # those is under-estimating s just as badly.
-gradseq_compare_models <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, vbar = .VBAR) {
-  position <- match.arg(position)
+gradseq_compare_models <- function(gs, cal, position = NULL, mass_map = NULL, vbar = .VBAR) {
+  position <- .resolve_position(position, cal)
   D <- copy(gs$meta)
   if (is.null(mass_map)) {
     sf <- here("output", "uniprot_annotation_shared.RData")
@@ -694,8 +741,8 @@ gradseq_compare_models <- function(gs, cal, position = c("com", "peak"), mass_ma
 }
 
 # ---- 3. per-protein absolute f/f0 from sedimentation -----------------------------------------------
-gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, vbar = .VBAR, save_plots = TRUE) {
-  position <- match.arg(position)
+gradseq_ffo <- function(gs, cal, position = NULL, mass_map = NULL, vbar = .VBAR, save_plots = TRUE) {
+  position <- .resolve_position(position, cal)
   D <- copy(gs$meta)
   if (is.null(mass_map)) {
     sf <- here("output", "uniprot_annotation_shared.RData")
@@ -948,7 +995,7 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
 # Sedimentation and SEC weight mass and shape differently (s ~ M^(2/3)/(f/f0) versus R_s ~ (f/f0)M^(1/3)),
 # so the two deviations are NOT the same quantity and their magnitudes should not be equated - but a
 # protein that is anomalous for its mass should be anomalous in both, and that is what is tested here.
-gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position = c("com", "peak"),
+gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position = c("peak", "com"),
                                      restrict_to_calibrated = TRUE, dev_cut = log10(2),
                                      mass_map = NULL, save_plots = TRUE) {
   position <- match.arg(position)
