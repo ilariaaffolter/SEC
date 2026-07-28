@@ -28,17 +28,17 @@
 #   is about 49% of the proteome - the frequently quoted ~85% refers to TRANSCRIPTS).
 #   Save the supplementary protein table (xlsx/tsv/csv) somewhere and pass its path.
 #
-# HOW s IS OBTAINED: the gradient is calibrated from RIBOSOMAL anchors - the small subunit (30S, s = 30),
-# the large subunit (50S, s = 50) and the 70S monosome (s = 70), located from the profiles of rps*/rpl*
-# proteins. Because s is NOT additive (30 + 50 = 80, but the monosome sediments at 70), the 70S anchor is
-# genuinely independent, and it is the first anchor that lets the model be tested at all: each anchor is
-# predicted from the others (leave-one-out) and the errors are reported.
+# HOW s IS OBTAINED: the gradient is calibrated from RIBOSOMAL anchors - the small subunit (30S, s = 30)
+# and the large subunit (50S, s = 50), located from the peak fractions of rps*/rpl* proteins.
 # The curve is forced through s = 0 at the LOAD ZONE, because a particle that does not sediment does not
 # move. Leaving that constraint out - the old behaviour, still available as model = "free_linear" - gives
 # a large negative intercept, over-estimates s for ordinary proteins, and was the direct cause of the
 # impossible f/f0 < 1 seen earlier.
-# THE CALIBRATION REMAINS THE WEAKEST LINK: every anchor is at s = 30-70 while ordinary proteins are at
-# s = 2-10, so all protein values are extrapolations. Inspect the diagnostic plot first.
+# THE CALIBRATION IS THE WEAKEST LINK. With two anchors every model fits them exactly and none can be
+# validated against them, so the model is chosen instead by gradseq_compare_models(), which asks how much
+# of the proteome each one pushes below the physical floor f/f0 = 1. And both anchors sit at s = 30-50
+# while ordinary proteins are at s = 2-10, so every protein value is an extrapolation. Inspect the
+# diagnostic plot first, and prefer gradseq_vs_sec_deviation(), which needs no calibration at all.
 #
 # WHAT IS DEFENSIBLE AND WHAT IS NOT:
 #   population level  comparing the two f/f0 DISTRIBUTIONS is a fair sanity check;
@@ -52,10 +52,9 @@
 #   gradseq_selftest()                                             # verify the hydrodynamics first
 #   gs <- gradseq_load("data/raw/Hor2020_gradseq_proteins.xlsx")   # inspect what was parsed
 #   cal <- gradseq_calibrate(gs)                                   # LOOK at the calibration plot
-#   # 70S is detected automatically; override or disable it, and switch the model, with:
-#   #   gradseq_calibrate(gs, anchor_70S = 18.5)      known fraction (e.g. from the published A260 trace)
-#   #   gradseq_calibrate(gs, anchor_70S = "none")    two anchors only
 #   #   gradseq_calibrate(gs, model = "power")        or "free_linear" (the old, unconstrained fit)
+#   #   gradseq_calibrate(gs, extra_anchors = data.table(name = "X", s = 21, fraction = 8))
+#   #                                                 any further particle of KNOWN s, if you have one
 #   gradseq_compare_models(gs, cal)                                # which model does the proteome reject?
 #   # ribosomal anchors alone do NOT calibrate s for ordinary proteins (see gradseq_ffo's physical check);
 #   # when that fails, use the calibration-free comparison instead:
@@ -68,7 +67,8 @@
 #   gradseq_profiles.csv          parsed, normalised sedimentation profiles + peak fraction
 #   gradseq_calibration.pdf       all three fraction -> s models, the anchors, the load zone and where
 #                                 compact proteins of known mass should elute under the model in use
-#   gradseq_ribosome_check.pdf    rps* vs rpl* peak fractions, plus the co-migration trace used to place 70S
+#   gradseq_ribosome_check.pdf    rps* vs rpl* peak fractions and mean subunit profiles - do the subunits
+#                                 separate as published?
 #   gradseq_ffo.csv               per protein: peak fraction, s, absolute f/f0 (monomer assumption)
 #   gradseq_ffo_distribution.pdf  the f/f0 distribution with 1.0 / 1.2 / 1.5 / 2.0 reference lines
 #   sec_vs_gradseq_distribution.pdf   THE HEADLINE: both distributions on one absolute axis
@@ -228,15 +228,10 @@ gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, s
 }
 
 # ---- 2. calibrate fraction -> sedimentation coefficient --------------------------------------------
-# Anchors: the ribosomal particles. Their positions come from the median peak of the rps*/rpl* protein
-# groups, which is far more robust than any single protein.
-#
-# THE 70S MONOSOME IS A GENUINELY INDEPENDENT THIRD ANCHOR, not a redundant one: sedimentation
-# coefficients are NOT additive (30 + 50 = 80, but the assembled particle sediments at 70), because
-# joining the subunits buries surface and the friction per unit mass drops. So 70S carries information
-# the two subunits do not, and it is the first anchor that lets the fraction -> s model be TESTED.
-# It is located as the fraction where rps* AND rpl* proteins co-migrate most strongly, below the 50S
-# peak - free 30S has no rpl*, free 50S has no rps*, only the monosome has both.
+# Anchors: the ribosomal subunits. Their positions come from the median peak of the rps*/rpl* protein
+# groups, which is far more robust than any single protein, and are cross-checked against the
+# differential profiles (free 30S is where rps* exceeds rpl*, free 50S the other way round).
+# Any further particle whose s is known independently can be added through `extra_anchors`.
 #
 # THE MODEL MATTERS MORE THAN THE ANCHORS. Rate-zonal migration starts at the load zone: a particle with
 # s = 0 does not move, so the curve MUST pass through s = 0 at the top of the gradient. An unconstrained
@@ -246,16 +241,14 @@ gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, s
 #   model = "zero_anchored"  s = b * (fraction - load_fraction)          standard rate-zonal treatment
 #   model = "power"          s = c * (fraction - load_fraction)^p        allows the gradient to compress
 #   model = "free_linear"    s = a + b * fraction                        the old, unconstrained fit
-#   model = "auto"           <- DEFAULT: chosen by leave-one-out when there are three anchors,
+#   model = "auto"           <- DEFAULT: chosen by leave-one-out if three or more anchors are supplied,
 #                               otherwise "zero_anchored" (the only one carrying a physical constraint)
-# With three anchors each model is validated by leave-one-out and the errors are reported; because each
-# such fit uses only two points, confirm the choice with gradseq_compare_models(), which asks the harder
-# question - how much of the proteome does this model push below the physical floor f/f0 = 1? Even so, all
-# anchors sit at s = 30-70 while ordinary proteins are at s = 2-10, so every protein value is an
-# EXTRAPOLATION below the calibrated range. That limitation is not removed by adding 70S; it is only
-# measured. gradseq_vs_sec_deviation() avoids it entirely.
-gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
-                              anchor_70S = "auto", s_70S = 70, extra_anchors = NULL,
+# With only the two subunit anchors NONE of these can be validated against the anchors - every model fits
+# two points exactly. The choice is therefore settled by gradseq_compare_models(), which asks the harder
+# question: how much of the proteome does this model push below the physical floor f/f0 = 1? And both
+# anchors sit at s = 30-50 while ordinary proteins are at s = 2-10, so every protein value is an
+# EXTRAPOLATION below the calibrated range. gradseq_vs_sec_deviation() avoids that entirely.
+gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors = NULL,
                               load_fraction = NULL,
                               model = c("auto", "zero_anchored", "power", "free_linear"),
                               save_plots = TRUE) {
@@ -286,39 +279,13 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
   # mean normalised profile of each subunit group, each scaled to its own maximum
   ps <- colMeans(gs$profiles[i_small, , drop = FALSE]); ps <- ps / max(ps)
   pl <- colMeans(gs$profiles[i_large, , drop = FALSE]); pl <- pl / max(pl)
-  co <- sqrt(pmax(ps, 0) * pmax(pl, 0))    # co-migration: high ONLY where both subunits are present
   # independent cross-check of the two subunit anchors: free 30S is where rps* exceeds rpl*, and vice versa
   message(sprintf("Subunit anchors: 30S at fraction %g, 50S at %g (median peak). Cross-check from the differential profiles: %g and %g.",
                   f30, f50, fr[which.max(ps - pl)], fr[which.max(pl - ps)]))
 
-  # ---- locate the 70S monosome -----------------------------------------------------------------
-  f70 <- NA_real_; how70 <- ""
-  if (is.numeric(anchor_70S)) { f70 <- as.numeric(anchor_70S)[1]; how70 <- "supplied by the user" }
-  else if (identical(anchor_70S, "auto")) {
-    cand <- which(fr > f50 + 0.5)                       # the monosome sediments FURTHER than the 50S
-    isloc <- if (length(cand)) vapply(cand, function(j) {
-      lo <- if (j > 1L) co[j - 1L] else -Inf
-      hi <- if (j < length(co)) co[j + 1L] else -Inf
-      is.finite(co[j]) && co[j] >= lo && co[j] >= hi }, logical(1)) else logical(0)
-    pick <- cand[isloc]
-    pick <- if (length(pick)) pick[which.max(co[pick])] else integer(0)
-    if (length(pick) == 1L && co[pick] >= 0.2 * max(co, na.rm = TRUE)) {
-      w <- which(abs(fr - fr[pick]) <= 1.5)             # sub-fraction refinement: local centroid
-      f70 <- sum(fr[w] * co[w]) / sum(co[w])
-      how70 <- sprintf("detected automatically (co-migration peak at fraction %g, centroid %.2f, score %.2f of max)",
-                       fr[pick], f70, co[pick] / max(co, na.rm = TRUE))
-    } else {
-      message("70S NOT detected: no clear rps*/rpl* co-migration peak below the 50S anchor. ",
-              "Either the monosome was dissociated, or the subunits are not resolved. ",
-              "Pass anchor_70S = <fraction> if you can read it off the published A260 profile.")
-    }
-  }
-  if (is.finite(f70)) message("70S monosome anchor: fraction ", round(f70, 2), " - ", how70, ".")
-
   # ---- assemble and sanity-check the anchor set -------------------------------------------------
   if (is.null(anchors)) {
     anchors <- data.table(name = c("30S", "50S"), s = c(30, 50), fraction = c(f30, f50))
-    if (is.finite(f70)) anchors <- rbind(anchors, data.table(name = "70S", s = s_70S, fraction = f70))
   } else anchors <- as.data.table(anchors)
   if (!is.null(extra_anchors)) anchors <- rbind(anchors, as.data.table(extra_anchors), fill = TRUE)
   anchors <- anchors[is.finite(s) & is.finite(fraction) & s > 0]
@@ -328,14 +295,6 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
   if (all(c("30S", "50S") %in% anchors$name) && anchors[name == "50S"]$fraction <= anchors[name == "30S"]$fraction)
     warning("The 50S anchor does not sediment further than the 30S anchor - the gradient orientation or the ",
             "fraction numbering may be reversed. Inspect gradseq_ribosome_check.pdf before continuing.", call. = FALSE)
-  if ("70S" %in% anchors$name) {
-    if (anchors[name == "70S"]$fraction <= anchors[name == "50S"]$fraction)
-      warning("The 70S anchor does not sediment further than the 50S - it cannot be the monosome. Drop it with anchor_70S = 'none'.", call. = FALSE)
-    # if the 'free 50S' median peak sits on top of the monosome, that anchor is mislabelled
-    if (abs(anchors[name == "50S"]$fraction - anchors[name == "70S"]$fraction) < 1)
-      warning("The 50S median peak coincides with the detected 70S position: most rpl* protein is probably in the ",
-              "MONOSOME, so the '50S' anchor is really 70S. Set the 50S fraction explicitly via `anchors`.", call. = FALSE)
-  }
 
   # ---- the physical zero: a particle with s = 0 stays in the load zone ---------------------------
   if (is.null(load_fraction)) load_fraction <- min(fr) - 0.5
@@ -361,7 +320,7 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
     message("   -> free_linear puts a strongly NEGATIVE s at the load zone, which is unphysical and over-estimates s for ",
             "ordinary proteins (hence f/f0 < 1). This is why it is no longer the default.")
 
-  # ---- leave-one-out validation: the whole point of having a third anchor ------------------------
+  # ---- leave-one-out validation, if enough anchors were supplied to make it possible -------------
   loo <- NULL
   if (nrow(anchors) >= 3) {
     loo <- rbindlist(lapply(seq_len(nrow(anchors)), function(i) {
@@ -382,15 +341,17 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
                     err$zero_anchored, err$power, err$free_linear, best))
     if (identical(model, "auto")) {
       model <- best
-      message("   model = 'auto': using '", model, "'. Note that with three anchors each fit uses two points, so ",
+      message("   model = 'auto': using '", model, "'. With few anchors each fit uses very few points, so ",
               "this test is suggestive rather than decisive - confirm with gradseq_compare_models().")
     } else if (best != model) {
       message("   You asked for model = '", model, "'. Re-run with model = '", best,
               "' to use the best-generalising one, and compare the resulting f/f0 distributions.")
     }
   } else {
-    message("Only ", nrow(anchors), " anchors: every model fits them exactly and NONE can be validated. ",
-            "Supply a 70S fraction (anchor_70S = <n>) to make the fit testable.")
+    message("Only ", nrow(anchors), " anchors: every model fits them exactly and NONE can be validated against them. ",
+            "The choice is settled instead by gradseq_compare_models(), on how much of the proteome each model ",
+            "pushes below the physical floor f/f0 = 1. Add a further particle of known s via extra_anchors to make ",
+            "the fit testable against the anchors themselves.")
     if (identical(model, "auto")) {
       model <- "zero_anchored"
       message("   model = 'auto' with fewer than three anchors: falling back to 'zero_anchored', the only one carrying a physical constraint.")
@@ -462,17 +423,17 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL,
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3,
                 colour = "grey20", inherit.aes = FALSE) +
       labs(title = "Ribosomal subunit peak fractions (sanity check)",
-           subtitle = "The two subunits should peak in clearly distinct fractions, as in the published A260 profile.\nThe 70S anchor should sit below both - it is where rps* and rpl* co-migrate.",
+           subtitle = "The two subunits should peak in clearly distinct fractions, as in the published A260 profile.",
            x = "peak fraction", y = "proteins", fill = NULL) + theme_bw()
-    gc2 <- ggplot(data.table(fraction = rep(fr, 3),
-                             value = c(ps, pl, co),
-                             trace = rep(c("30S proteins (rps*)", "50S proteins (rpl*)", "co-migration = sqrt(rps* x rpl*)"), each = length(fr))),
+    gc2 <- ggplot(data.table(fraction = rep(fr, 2),
+                             value = c(ps, pl),
+                             trace = rep(c("30S proteins (rps*)", "50S proteins (rpl*)"), each = length(fr))),
                   aes(fraction, value, colour = trace)) +
       geom_line(linewidth = 0.8) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2, colour = "grey40") +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3, colour = "grey20", inherit.aes = FALSE) +
-      labs(title = "Locating the 70S monosome",
-           subtitle = "Free 30S carries no rpl*, free 50S carries no rps*; only the monosome carries both, so the co-migration\ntrace peaks at 70S. Each subunit trace is the mean normalised profile, scaled to its own maximum.",
+      labs(title = "Mean ribosomal subunit profiles",
+           subtitle = "Each trace is the mean normalised profile of that subunit's proteins, scaled to its own maximum.\nThe dashed lines are the anchor fractions actually used for the calibration.",
            x = "fraction", y = "relative signal", colour = NULL) + theme_bw() + theme(legend.position = "top")
     tryCatch({ grDevices::pdf(.gs_dir("gradseq_ribosome_check.pdf"), width = 7.5, height = 5)
                print(gr); print(gc2); grDevices::dev.off() },
@@ -568,7 +529,7 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
   .imposs <- mean(D$ffo_gradseq < 1, na.rm = TRUE)
   if (.imposs > 0.05)
     warning(sprintf(paste0("%.0f%% of proteins get f/f0 < 1, which is PHYSICALLY IMPOSSIBLE (a sphere is the minimum). ",
-                           "The calibration over-estimates s for ordinary proteins: the ribosomal anchors sit at s = 30-70 ",
+                           "The calibration over-estimates s for ordinary proteins: the ribosomal anchors sit at s = 30-50 ",
                            "while ordinary proteins are at s = 2-10, so the fit is extrapolated far below its anchors. ",
                            "Try the other models (gradseq_calibrate(gs, model = 'power') or 'zero_anchored'), compare their ",
                            "leave-one-out errors, add a low-s anchor of known s via extra_anchors, or use the calibration-free ",
@@ -781,10 +742,10 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
 }
 
 gradseq_all <- function(file, metabolite, id_col = NULL, fraction_cols = NULL, globular_ffo = 1.2,
-                        anchor_70S = "auto", model = "auto", load_fraction = NULL) {
+                        model = "auto", load_fraction = NULL, extra_anchors = NULL) {
   gradseq_selftest()
   gs  <- gradseq_load(file, id_col = id_col, fraction_cols = fraction_cols)
-  cal <- gradseq_calibrate(gs, anchor_70S = anchor_70S, model = model, load_fraction = load_fraction)
+  cal <- gradseq_calibrate(gs, model = model, load_fraction = load_fraction, extra_anchors = extra_anchors)
   try(gradseq_compare_models(gs, cal), silent = TRUE)
   ff  <- gradseq_ffo(gs, cal)
   gradseq_vs_sec(ff, metabolite = metabolite, globular_ffo = globular_ffo)
