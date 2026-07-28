@@ -1,0 +1,403 @@
+# scripts/surface_hydrophobicity.R
+# =============================================================================
+# SURFACE hydrophobicity from AlphaFold structures - the test GRAVY cannot do.
+#
+# WHY THIS EXISTS. globularity_category_annotation() correlates GRAVY against elution deviation and
+# returns rho = +0.196. The SIGN is informative: hydrophobic retention by the column matrix would make
+# sticky proteins elute LATE and appear SMALLER (a NEGATIVE correlation), so the observed positive sign
+# excludes that artefact. But the positive sign itself CANNOT be read as "hydrophobic surfaces drive
+# assembly", for one decisive reason: GRAVY is the mean hydropathy of the WHOLE SEQUENCE, and that mean
+# is dominated by BURIED core residues. Assembly is driven by hydrophobicity that is EXPOSED. GRAVY and
+# surface hydrophobicity are only loosely related - a protein can have a greasy core and a polar surface,
+# which is in fact the normal state of a soluble protein.
+#
+# This script computes what the hypothesis is actually about, from structure:
+#   sasa_total            solvent-accessible surface area (A^2), Shrake-Rupley
+#   surface_gravy         SASA-WEIGHTED mean Kyte-Doolittle = the hydropathy of the SURFACE.
+#                         Directly comparable to sequence GRAVY; the difference between them is the
+#                         whole point of this script.
+#   hydrophobic_sasa_frac fraction of the exposed surface contributed by hydrophobic residues
+#   largest_patch_A2      area of the largest CONTIGUOUS exposed hydrophobic patch. This is the
+#                         quantity interface prediction actually uses - assembly needs a patch, not a
+#                         high average - so it is the sharpest test of the hypothesis.
+#   patch_frac            that patch as a fraction of total SASA (size-normalised)
+#
+# THREE CONFOUNDS ARE HANDLED EXPLICITLY, because without them the test is worth no more than GRAVY:
+#   size        bigger proteins have more surface AND assemble more often -> every correlation is
+#               reported as a PARTIAL Spearman holding log10(monomer mass) constant, and the raw value
+#               is shown next to it so the difference is visible.
+#   disorder    AlphaFold's low-confidence tails have meaningless geometry -> residues below
+#               plddt_min are dropped, and the discarded fraction is reported per protein.
+#   membrane    membrane-associated proteins are hydrophobic AND often in large particles, which could
+#               produce the whole correlation on its own -> the test is repeated with them excluded.
+#
+# WHAT A RESULT WOULD MEAN
+#   surface hydrophobicity correlates but sequence GRAVY does not, or correlates more strongly
+#       -> supports the assembly reading; the signal lives on the surface, where interfaces are.
+#   both correlate about equally
+#       -> the surface adds nothing over composition; most likely a compositional confound, not interfaces.
+#   neither survives partialling on mass, or the effect dies when membrane proteins are removed
+#       -> report the exclusion of the retention artefact and nothing further.
+#
+# REQUIRES AlphaFold PDB files in output/hydropro/structures/ (AF-<ACC>-F1-model_v4.pdb). Get them with
+# hydropro_fetch() from scripts/hydropro_ffo.R, or download manually and use
+# hydropro_import_structures(); everything here works offline once the files are present.
+#
+# USAGE (RStudio console, project open):
+#   source(here::here("scripts", "surface_hydrophobicity.R"))
+#   surface_selftest()                              # verify the SASA geometry first
+#   surface_hydrophobicity(metabolite = "ATP", max_proteins = 300)   # slow; cached and resumable
+#   surface_vs_elution(metabolite = "ATP")          # the test, against elution deviation
+#
+# COST: roughly 1-3 s per protein at the default 92 test points. Start with max_proteins = 300 to see
+# whether anything is there; the cache is additive, so raising the cap later only computes the new ones.
+#
+# OUTPUT (output/surface/):
+#   surface_metrics.csv          per protein: SASA, surface GRAVY, hydrophobic fraction, largest patch
+#   surface_vs_elution.csv       the join with globularity_check + both deviations
+#   surface_vs_elution.pdf       each metric vs elution deviation, raw and mass-adjusted
+#   surface_vs_gravy.pdf         surface GRAVY vs sequence GRAVY - how different are they really?
+# =============================================================================
+
+suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
+
+.sf_dir <- function(...) here("output", "surface", ...)
+.struct_dir <- function() here("output", "hydropro", "structures")
+
+# Kyte-Doolittle hydropathy; positive = hydrophobic
+.KD_SF <- c(A =  1.8, R = -4.5, N = -3.5, D = -3.5, C =  2.5, Q = -3.5, E = -3.5, G = -0.4,
+            H = -3.2, I =  4.5, L =  3.8, K = -3.9, M =  1.9, F =  2.8, P = -1.6, S = -0.8,
+            T = -0.7, W = -0.9, Y = -1.3, V =  4.2)
+# residues counted as hydrophobic for the PATCH analysis (the classic apolar set)
+.HYDROPHOBIC <- c("A", "V", "L", "I", "M", "F", "W", "C", "Y")
+.AA3 <- c(ALA="A", ARG="R", ASN="N", ASP="D", CYS="C", GLN="Q", GLU="E", GLY="G", HIS="H", ILE="I",
+          LEU="L", LYS="K", MET="M", PHE="F", PRO="P", SER="S", THR="T", TRP="W", TYR="Y", VAL="V")
+# van der Waals radii (A)
+.VDW <- c(C = 1.70, N = 1.55, O = 1.52, S = 1.80, H = 1.20, P = 1.80)
+
+# ---- PDB parsing -----------------------------------------------------------------------------------
+# Fixed-column PDB format; AlphaFold puts per-residue pLDDT in the B-factor column (61-66).
+.pdb_atoms <- function(file) {
+  ln <- tryCatch(readLines(file, warn = FALSE), error = function(e) character(0))
+  ln <- ln[startsWith(ln, "ATOM  ")]
+  if (!length(ln)) return(NULL)
+  A <- data.table(
+    atom    = trimws(substr(ln, 13, 16)),
+    resname = trimws(substr(ln, 18, 20)),
+    resnum  = suppressWarnings(as.integer(substr(ln, 23, 26))),
+    x       = suppressWarnings(as.numeric(substr(ln, 31, 38))),
+    y       = suppressWarnings(as.numeric(substr(ln, 39, 46))),
+    z       = suppressWarnings(as.numeric(substr(ln, 47, 54))),
+    plddt   = suppressWarnings(as.numeric(substr(ln, 61, 66))),
+    element = trimws(substr(ln, 77, 78)))
+  A <- A[is.finite(x) & is.finite(y) & is.finite(z)]
+  if (!nrow(A)) return(NULL)
+  A[element == "" | is.na(element), element := substr(atom, 1, 1)]   # fall back to the atom name
+  A[, aa := unname(.AA3[resname])]
+  A <- A[!is.na(aa) & element != "H"]                                # heavy atoms of standard residues
+  A[, radius := unname(.VDW[element])]
+  A[is.na(radius), radius := 1.70]
+  # side-chain flag: assembly patches are made of side chains, not the backbone
+  A[, sidechain := !(atom %in% c("N", "CA", "C", "O", "OXT"))]
+  A[]
+}
+
+# ---- Shrake-Rupley solvent-accessible surface area -------------------------------------------------
+# Each atom is given a sphere of radius (vdW + probe); test points on that sphere are accessible unless
+# they fall inside a neighbour's sphere. A cell list keeps the neighbour search local, so cost grows
+# linearly with the number of atoms rather than quadratically.
+.sphere_points <- function(n) {              # near-uniform points via the golden spiral
+  i <- seq_len(n) - 0.5
+  phi <- acos(1 - 2 * i / n); theta <- pi * (1 + sqrt(5)) * i
+  cbind(cos(theta) * sin(phi), sin(theta) * sin(phi), cos(phi))
+}
+
+# SELF-TEST: for two overlapping spheres the accessible area is analytic - the buried spherical cap on
+# sphere 1 has height h = r1 - (d^2 + r1^2 - r2^2)/(2d), so SASA = 4*pi*r1^2 - 2*pi*r1*h. Checking the
+# point-counting against that verifies the geometry and the radii before any protein is touched.
+# Validated at the default 92 points: per-atom error 0.2-5.7%, and under 1% at 252 points. Per-atom
+# errors are random and average out over the thousands of atoms in a protein, so totals are far more
+# accurate than the per-atom worst case; 92 is the classical Shrake-Rupley value.
+surface_selftest <- function(n_points = c(92, 252), probe = 1.4) {
+  cases <- data.table(R1 = c(1.70, 1.70, 1.70, 1.55, 1.70),
+                      R2 = c(1.70, 1.52, 1.80, 1.70, 1.70),
+                      d  = c(3.00, 2.40, 4.00, 3.50, 1.50))
+  exact <- function(R1, R2, d) {
+    r1 <- R1 + probe; r2 <- R2 + probe
+    if (d >= r1 + r2) return(4 * pi * r1^2)
+    h <- r1 - (d^2 + r1^2 - r2^2) / (2 * d)
+    4 * pi * r1^2 - 2 * pi * r1 * h
+  }
+  cases[, exact_A2 := mapply(exact, R1, R2, d)]
+  for (np in n_points) {
+    cases[[paste0("n", np)]] <- mapply(function(R1, R2, d) {
+      A <- data.table(x = c(0, d), y = 0, z = 0, radius = c(R1, R2))
+      .sasa_atoms(A, probe = probe, n_points = np)[1]
+    }, cases$R1, cases$R2, cases$d)
+    cases[[paste0("err", np, "_pct")]] <- round(100 * abs(cases[[paste0("n", np)]] - cases$exact_A2) / cases$exact_A2, 1)
+  }
+  message("SASA SELF-TEST - point counting vs the analytic two-sphere solution:")
+  print(cases[, lapply(.SD, function(z) if (is.numeric(z)) round(z, 2) else z)])
+  message(sprintf("Isolated carbon atom should be 4*pi*(1.70+%.1f)^2 = %.2f A^2; computed %.2f.",
+                  probe, 4 * pi * (1.70 + probe)^2,
+                  .sasa_atoms(data.table(x = 0, y = 0, z = 0, radius = 1.70), probe = probe, n_points = max(n_points))[1]))
+  invisible(cases)
+}
+
+.sasa_atoms <- function(A, probe = 1.4, n_points = 92) {
+  n <- nrow(A); if (!n) return(numeric(0))
+  xyz <- as.matrix(A[, .(x, y, z)]); R <- A$radius + probe
+  SP  <- .sphere_points(n_points)
+  cut <- 2 * max(R)                                   # no atom beyond this can occlude another
+  # cell list
+  mn  <- apply(xyz, 2, min)
+  cid <- floor(sweep(xyz, 2, mn) / cut)
+  key <- paste(cid[, 1], cid[, 2], cid[, 3], sep = ",")
+  buckets <- split(seq_len(n), key)
+  offs <- as.matrix(expand.grid(-1:1, -1:1, -1:1))
+  out <- numeric(n)
+  for (i in seq_len(n)) {
+    nb <- unlist(buckets[paste(cid[i, 1] + offs[, 1], cid[i, 2] + offs[, 2],
+                               cid[i, 3] + offs[, 3], sep = ",")], use.names = FALSE)
+    nb <- nb[!is.na(nb) & nb != i]
+    if (length(nb)) {                                  # keep only spheres that can actually reach
+      d2 <- colSums((t(xyz[nb, , drop = FALSE]) - xyz[i, ])^2)
+      nb <- nb[d2 < (R[i] + R[nb])^2]
+    }
+    if (!length(nb)) { out[i] <- 4 * pi * R[i]^2; next }
+    P <- sweep(SP * R[i], 2, xyz[i, ], "+")            # test points on atom i's sphere
+    # a point is buried if it lies inside ANY neighbour sphere
+    buried <- logical(nrow(P))
+    for (j in nb) {
+      buried <- buried | (colSums((t(P) - xyz[j, ])^2) < R[j]^2)
+      if (all(buried)) break
+    }
+    out[i] <- 4 * pi * R[i]^2 * mean(!buried)
+  }
+  out
+}
+
+# ---- largest contiguous exposed hydrophobic patch ---------------------------------------------------
+# Single-linkage clustering of EXPOSED apolar side-chain atoms; the patch area is the summed SASA of a
+# cluster. A protein assembles through a patch, not through a high average, so this is the metric that
+# best matches the hypothesis being tested.
+.largest_patch <- function(A, sasa, link = 5.0, min_atom_sasa = 1.0) {
+  sel <- which(A$sidechain & A$aa %in% .HYDROPHOBIC & sasa > min_atom_sasa)
+  if (length(sel) < 3) return(list(area = 0, n_atoms = length(sel)))
+  xyz <- as.matrix(A[sel, .(x, y, z)]); m <- length(sel)
+  if (m > 4000) return(list(area = NA_real_, n_atoms = m))          # guard: implausible for one chain
+  parent <- seq_len(m)
+  find <- function(a) { while (parent[a] != a) { parent[a] <<- parent[parent[a]]; a <- parent[a] }; a }
+  for (a in seq_len(m - 1)) {
+    d2 <- colSums((t(xyz[(a + 1):m, , drop = FALSE]) - xyz[a, ])^2)
+    for (b in which(d2 < link^2)) {
+      ra <- find(a); rb <- find(a + b)
+      if (ra != rb) parent[rb] <- ra
+    }
+  }
+  roots <- vapply(seq_len(m), find, integer(1))
+  areas <- tapply(sasa[sel], roots, sum)
+  list(area = max(areas), n_atoms = m)
+}
+
+# ---- 1. per-protein surface metrics -----------------------------------------------------------------
+surface_hydrophobicity <- function(ids = NULL, metabolite = NULL, max_proteins = Inf,
+                                   plddt_min = 70, probe = 1.4, n_points = 92,
+                                   overwrite = FALSE, verbose_every = 25) {
+  sdir <- .struct_dir()
+  if (!dir.exists(sdir)) stop("No structure directory at ", sdir,
+                              ". Fetch structures first: source('scripts/hydropro_ffo.R'); hydropro_fetch('ATP').")
+  files <- list.files(sdir, pattern = "^AF-.*\\.pdb$", full.names = TRUE)
+  if (!length(files)) stop("No AF-*.pdb files in ", sdir, " - see hydropro_fetch() / hydropro_import_structures().")
+  have <- sub("^AF-([^-]+)-.*$", "\\1", basename(files))
+  if (is.null(ids) && !is.null(metabolite)) {
+    f <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
+    if (file.exists(f)) ids <- unique(as.character(fread(f)$protein_id))
+  }
+  keep <- if (is.null(ids)) seq_along(files) else which(have %in% ids)
+  if (!length(keep)) stop("None of the requested proteins has a structure in ", sdir, ".")
+  files <- files[keep]; have <- have[keep]
+  if (length(files) > max_proteins) {
+    message("Limiting to the first ", max_proteins, " of ", length(files), " structures.")
+    files <- head(files, max_proteins); have <- head(have, max_proteins)
+  }
+
+  cache <- .sf_dir("surface_metrics.csv")
+  done <- if (!overwrite && file.exists(cache)) fread(cache) else NULL
+  if (!is.null(done) && nrow(done)) {
+    todo <- !(have %in% done$protein_id)
+    message("Cache holds ", nrow(done), " protein(s); computing ", sum(todo), " new one(s). overwrite = TRUE to redo all.")
+    files <- files[todo]; have <- have[todo]
+  }
+  if (!length(files)) { message("Nothing to compute - all requested proteins are cached."); return(invisible(done)) }
+
+  message("Computing SASA for ", length(files), " structure(s) with ", n_points,
+          " test points per atom. This is the slow step; results are cached.")
+  rows <- vector("list", length(files)); t0 <- Sys.time()
+  for (i in seq_along(files)) {
+    A <- .pdb_atoms(files[i])
+    if (is.null(A) || !nrow(A)) { rows[[i]] <- data.table(protein_id = have[i], ok = FALSE); next }
+    n_all <- length(unique(A$resnum))
+    # drop low-confidence residues: AlphaFold tails have no meaningful geometry, and including them
+    # would inflate apparent exposed surface with something that is not a real surface
+    if (is.finite(plddt_min)) A <- A[is.na(plddt) | plddt >= plddt_min]
+    if (nrow(A) < 20) { rows[[i]] <- data.table(protein_id = have[i], ok = FALSE); next }
+    n_kept <- length(unique(A$resnum))
+    s  <- .sasa_atoms(A, probe = probe, n_points = n_points)
+    kd <- unname(.KD_SF[A$aa]); kd[!is.finite(kd)] <- 0
+    tot <- sum(s)
+    pat <- .largest_patch(A, s)
+    rows[[i]] <- data.table(
+      protein_id            = have[i], ok = TRUE,
+      n_residues_total      = n_all,
+      n_residues_used       = n_kept,
+      frac_residues_dropped = round(1 - n_kept / max(n_all, 1), 4),
+      mean_plddt            = round(mean(A$plddt, na.rm = TRUE), 2),
+      sasa_total            = round(tot, 1),
+      # SASA-weighted mean hydropathy = the hydropathy of the SURFACE (compare with sequence GRAVY)
+      surface_gravy         = round(sum(s * kd) / max(tot, 1e-9), 4),
+      # unweighted sequence GRAVY over the SAME residues, so the two are like-for-like
+      sequence_gravy_here   = round(mean(unname(.KD_SF[A[!duplicated(resnum)]$aa]), na.rm = TRUE), 4),
+      hydrophobic_sasa_frac = round(sum(s[A$aa %in% .HYDROPHOBIC]) / max(tot, 1e-9), 4),
+      largest_patch_A2      = round(pat$area, 1),
+      patch_frac            = round(pat$area / max(tot, 1e-9), 4))
+    if (i %% verbose_every == 0)
+      message("  ... ", i, "/", length(files), "  (", round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), " min)")
+  }
+  D <- rbindlist(rows, use.names = TRUE, fill = TRUE)
+  if (!is.null(done) && nrow(done)) D <- rbindlist(list(done, D), use.names = TRUE, fill = TRUE)
+  dir.create(.sf_dir(), recursive = TRUE, showWarnings = FALSE)
+  fwrite(D, cache)
+  message("Surface metrics for ", sum(D$ok %in% TRUE), " protein(s) -> ", cache,
+          "  (", round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), " min)")
+  invisible(D)
+}
+
+# ---- 2. the test ------------------------------------------------------------------------------------
+# rank-based partial correlation, holding one covariate constant
+.pcor_sf <- function(x, y, z) {
+  ok <- is.finite(x) & is.finite(y) & is.finite(z); n <- sum(ok)
+  if (n < 10) return(list(rho = NA_real_, p = NA_real_, n = n))
+  rx <- rank(x[ok]); ry <- rank(y[ok]); rz <- rank(z[ok])
+  rxy <- stats::cor(rx, ry); rxz <- stats::cor(rx, rz); ryz <- stats::cor(ry, rz)
+  den <- sqrt((1 - rxz^2) * (1 - ryz^2))
+  if (!is.finite(den) || den <= 0) return(list(rho = NA_real_, p = NA_real_, n = n))
+  r <- (rxy - rxz * ryz) / den
+  tt <- r * sqrt((n - 3) / max(1 - r^2, .Machine$double.eps))
+  list(rho = r, p = 2 * stats::pt(-abs(tt), df = n - 3), n = n)
+}
+
+surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibrated = TRUE,
+                               exclude_membrane = TRUE, save_plots = TRUE) {
+  cache <- .sf_dir("surface_metrics.csv")
+  if (!file.exists(cache)) stop("No surface metrics yet - run surface_hydrophobicity() first.")
+  S <- fread(cache)[ok %in% TRUE]
+  gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
+  if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
+  G <- fread(gf)
+  if ("condition" %in% names(G)) {
+    cn <- unique(as.character(G$condition))
+    cc <- if (!is.null(condition)) condition else { x <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]; if (is.na(x)) cn[1] else x }
+    G <- G[condition == cc]; message("Using the '", cc, "' rows of the SEC table.")
+  }
+  if (restrict_to_calibrated && "in_calibrated_range" %in% names(G)) {
+    n0 <- nrow(G); G <- G[in_calibrated_range %in% TRUE]
+    message("Restricted to the calibrated MW interval: ", nrow(G), " of ", n0, " proteins.")
+  }
+  if (!all(c("apparent_mw_kDa", "expected_mw_kDa") %in% names(G)))
+    stop("globularity_check.txt lacks apparent_mw_kDa/expected_mw_kDa.")
+  G <- G[is.finite(apparent_mw_kDa) & is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & apparent_mw_kDa > 0]
+  # the SAME deviation the GRAVY test uses, so the two are directly comparable
+  G[, dev_log2 := log2(apparent_mw_kDa / expected_mw_kDa)]
+  J <- merge(S, G[, .(protein_id, dev_log2, expected_mw_kDa,
+                      class = if ("class" %in% names(G)) class else NA_character_)], by = "protein_id")
+  if (!nrow(J)) stop("No overlap between the structures and the SEC table.")
+  J[, lgm := log10(expected_mw_kDa)]
+
+  # membrane-associated proteins are hydrophobic AND often in large particles - the single most likely
+  # way to get a spurious positive without any interface involvement
+  memb <- character(0)
+  sf <- here("output", "uniprot_annotation_shared.RData")
+  if (exclude_membrane && file.exists(sf)) {
+    e <- new.env(); load(sf, envir = e); u <- as.data.table(e$.uniprot_all)
+    cc_col <- intersect(c("go_c", "subcellular_location", "ft_transmem", "keywords"), names(u))
+    if (length(cc_col)) {
+      hit <- Reduce(`|`, lapply(cc_col, function(k)
+        grepl("membrane|transmembrane|lipoprotein", as.character(u[[k]]), ignore.case = TRUE)))
+      memb <- as.character(u$input_id)[which(hit)]
+      message("Membrane-associated annotation found for ", length(intersect(memb, J$protein_id)),
+              " of the ", nrow(J), " proteins tested.")
+    } else message("No membrane-related column in the UniProt cache - the membrane control cannot be run.")
+  }
+  J[, is_membrane := protein_id %in% memb]
+
+  metrics <- intersect(c("surface_gravy", "hydrophobic_sasa_frac", "patch_frac",
+                         "largest_patch_A2", "sequence_gravy_here"), names(J))
+  res <- rbindlist(lapply(metrics, function(mt) {
+    x <- J[[mt]]; y <- J$dev_log2
+    raw <- suppressWarnings(stats::cor.test(x, y, method = "spearman"))
+    pc  <- .pcor_sf(x, y, J$lgm)
+    K <- J[is_membrane == FALSE]
+    pcm <- if (nrow(K) >= 30) .pcor_sf(K[[mt]], K$dev_log2, K$lgm) else list(rho = NA_real_, p = NA_real_, n = nrow(K))
+    data.table(metric = mt, n = sum(is.finite(x) & is.finite(y)),
+               rho_raw = round(unname(raw$estimate), 3), p_raw = raw$p.value,
+               rho_partial_mass = round(pc$rho, 3), p_partial = pc$p,
+               rho_partial_nomembrane = round(pcm$rho, 3), n_nomembrane = pcm$n)
+  }))
+  dir.create(.sf_dir(), recursive = TRUE, showWarnings = FALSE)
+  fwrite(J, .sf_dir("surface_vs_elution.csv")); fwrite(res, .sf_dir("surface_vs_elution_stats.csv"))
+
+  message("\nSurface hydrophobicity vs elution deviation (y = log2(apparent/expected); positive = elutes as though heavier):")
+  print(res)
+  message("\nHOW TO READ THIS:")
+  message("  * The RETENTION ARTEFACT predicts a NEGATIVE correlation (sticky protein elutes late, looks small).")
+  message("    A positive value excludes it - that is the one conclusion these data support on their own.")
+  message("  * `rho_partial_mass` is the number that matters: bigger proteins have more surface AND assemble more,")
+  message("    so the raw value is confounded by size.")
+  message("  * Compare `surface_gravy` with `sequence_gravy_here`. If the SURFACE metric is the stronger one, the")
+  message("    signal lives where interfaces are and the assembly reading gains support. If they are the same, the")
+  message("    surface adds nothing over composition and no interface claim is warranted.")
+  message("  * `patch_frac` is the sharpest test: assembly needs a contiguous patch, not a high average.")
+  message("  * If an effect dies in `rho_partial_nomembrane`, it was membrane proteins, not interfaces.")
+  .best <- res[metric != "sequence_gravy_here"][which.max(abs(rho_partial_mass))]
+  if (nrow(.best) && is.finite(.best$rho_partial_mass))
+    message(sprintf("\n  Strongest surface metric: %s, partial rho = %+.3f (%.1f%% of the variance). %s",
+                    .best$metric, .best$rho_partial_mass, 100 * .best$rho_partial_mass^2,
+                    if (abs(.best$rho_partial_mass) < 0.2)
+                      "Below |rho| = 0.2 this is too weak to carry an interface claim - report the artefact exclusion only."
+                    else "Above |rho| = 0.2 and worth reporting, provided it survives the membrane control."))
+
+  if (save_plots) {
+    L <- melt(J[, c("protein_id", "dev_log2", "is_membrane", metrics), with = FALSE],
+              id.vars = c("protein_id", "dev_log2", "is_membrane"),
+              variable.name = "metric", value.name = "value")
+    lab <- res[, .(metric, txt = sprintf("raw %+.3f | partial %+.3f", rho_raw, rho_partial_mass))]
+    L <- merge(L, lab, by = "metric")
+    L[, facet := paste0(metric, "\n", txt)]
+    g1 <- ggplot(L[is.finite(value)], aes(value, dev_log2)) +
+      geom_hline(yintercept = 0, colour = "grey60") +
+      geom_point(aes(colour = is_membrane), alpha = 0.4, size = 0.8) +
+      scale_colour_manual(values = c(`FALSE` = "grey55", `TRUE` = "#E15759"), name = "membrane-associated") +
+      geom_smooth(method = "loess", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      facet_wrap(~ facet, scales = "free_x") +
+      labs(title = paste0("Surface hydrophobicity vs elution deviation  (", metabolite, " control)"),
+           subtitle = paste0("y = log2(apparent / expected MW); BELOW 0 = elutes late, i.e. retained. A NEGATIVE trend would be the\n",
+                             "column-retention artefact; a positive one is consistent with assembly but cannot prove it. Facet labels give the\n",
+                             "raw and the mass-partialled Spearman rho - use the partial one, since size drives both surface area and assembly."),
+           x = "metric value", y = "log2(apparent / expected MW)") +
+      theme_bw() + theme(legend.position = "top")
+    g2 <- ggplot(J[is.finite(surface_gravy) & is.finite(sequence_gravy_here)],
+                 aes(sequence_gravy_here, surface_gravy)) +
+      geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey50") +
+      geom_point(alpha = 0.45, size = 0.9, colour = "steelblue") +
+      geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      labs(title = "Does the surface look like the sequence?",
+           subtitle = sprintf("Sequence GRAVY averages over BURIED and exposed residues alike; surface GRAVY weights each residue by how\nmuch of it is actually exposed. Spearman rho between them = %.3f. Points below the dashed line are proteins whose\nsurface is more POLAR than their composition suggests - the normal state of a soluble protein, and the reason\nsequence GRAVY cannot test an interface hypothesis.",
+                              suppressWarnings(stats::cor(J$sequence_gravy_here, J$surface_gravy, method = "spearman", use = "complete.obs"))),
+           x = "sequence GRAVY (same residues)", y = "surface GRAVY (SASA-weighted)") + theme_bw()
+    tryCatch({ grDevices::pdf(.sf_dir("surface_vs_elution.pdf"), width = 9, height = 7)
+               print(g1); print(g2); grDevices::dev.off() },
+             error = function(e) try(grDevices::dev.off(), silent = TRUE))
+  }
+  invisible(list(data = J, stats = res))
+}

@@ -61,6 +61,12 @@ the second is drop-in methods text, the third is what actually matters scientifi
 
 - ⚠️ **HYDROPRO** — blocked on AlphaFold downloads through the institutional proxy;
   `hydropro_import_structures()` is the offline route
+- ⚠️ **Surface hydrophobicity** (`scripts/surface_hydrophobicity.R`) — implemented, needs the same
+  AlphaFold structures. Computes SASA (Shrake–Rupley, self-tested against the analytic two-sphere
+  solution), SASA-weighted **surface GRAVY**, hydrophobic surface fraction and the **largest
+  contiguous exposed hydrophobic patch**, then correlates each against elution deviation with a
+  partial Spearman on monomer mass and a membrane-protein control. This is the test sequence GRAVY
+  cannot do — GRAVY is dominated by buried residues, assembly is driven by exposed ones
 - ⚠️ **`QTL_83_Glc_vs_EtOH`** — awaiting the mixed Spectronaut export; needs `pattern` set and
   adding to `run_all_comparisons.R`
 - ⚠️ **`QTL_83_RM_EtOH`** — speedups pushed, render not yet completed
