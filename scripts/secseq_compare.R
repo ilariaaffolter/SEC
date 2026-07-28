@@ -204,7 +204,10 @@ secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak")
 
 # ---- 4. the cross-lab comparison -------------------------------------------------------------------
 secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
-                          restrict_to_calibrated = TRUE, save_plots = TRUE) {
+                          restrict_to_calibrated = FALSE, save_plots = TRUE) {
+  # restrict_to_calibrated defaults to FALSE because the deviation below is computed from a fit of mass
+  # against elution POSITION and never touches the standards curve - so proteins outside the calibrated
+  # MW interval are perfectly usable here, and excluding them would only discard data.
   S <- secseq_selfcheck(sq, save_plots = FALSE)
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
@@ -214,7 +217,8 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
     cc <- if (!is.null(condition)) condition else { x <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]; if (is.na(x)) cn[1] else x }
     G <- G[condition == cc]; message("Using the '", cc, "' rows of this project's SEC table.")
   }
-  if (!all(c("protein_id", "ratio", "apex_fraction") %in% names(G))) stop("globularity_check.txt lacks protein_id/ratio/apex_fraction.")
+  if (!all(c("protein_id", "expected_mw_kDa", "apex_fraction") %in% names(G)))
+    stop("globularity_check.txt lacks protein_id/expected_mw_kDa/apex_fraction.")
   # Restrict to proteins whose apex falls INSIDE the calibrated MW interval. Outside it this project's
   # apparent MW - and therefore its deviation - is an extrapolation of the standards curve, so including
   # those proteins would compare a measurement against an extrapolation.
@@ -226,10 +230,23 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
     } else message("No in_calibrated_range column - re-run globularity_check() to get it; using all proteins.")
   }
   if (!nrow(G)) stop("No proteins left after restricting to the calibrated range.")
-  # same quantity, same units, in this project's data
-  G[, deviation_log10_ours := log10(ratio)]
 
-  keepcols <- intersect(c("protein_id", "apex_fraction", "ratio", "deviation_log10_ours",
+  # THE DEVIATION MUST BE COMPUTED THE SAME WAY ON BOTH SIDES. It is the residual from a robust fit of
+  # monomer mass against elution position WITHIN each dataset - so each is referenced to its own bulk
+  # behaviour and NO calibration is used on either side. (Using log10(apparent/expected) here instead
+  # would import this project's standards calibration onto one axis only, making the two axes different
+  # quantities: the calibration-derived ratio runs to 10^6 on extrapolated proteins while a residual is
+  # bounded, and correlating the two is meaningless.)
+  # This project's fraction axis runs the other way (fraction 1 = void), which the fitted slope absorbs;
+  # the sign convention - positive = migrates as though HEAVIER than its monomer - is preserved.
+  G <- G[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & is.finite(apex_fraction)]
+  fitG <- if (requireNamespace("MASS", quietly = TRUE))
+            MASS::rlm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+          else stats::lm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+  G[, deviation_log10_ours := stats::predict(fitG, G) - log10(expected_mw_kDa)]
+  if ("ratio" %in% names(G)) G[, calibration_ratio_log10 := log10(ratio)]   # kept for reference only
+
+  keepcols <- intersect(c("protein_id", "apex_fraction", "deviation_log10_ours", "calibration_ratio_log10",
                           "expected_mw_kDa", "apparent_mw_kDa", "class"), names(G))
   J <- merge(G[, ..keepcols],
              S[, .(protein_id, gene, mw_kDa, pos_published = pos, deviation_log10_published = deviation_log10)],
@@ -269,7 +286,7 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
       labs(title = paste0("Do two independent SEC experiments agree on which proteins elute anomalously?  (", metabolite, " control)"),
            subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nEach dataset is referenced to its OWN bulk behaviour, so no calibration is transferred. Spearman rho = %+.3f (p = %.3g, n = %d).%s",
                               unname(ct$estimate), ct$p.value, nrow(P),
-                              if (restrict_to_calibrated) "\nThis study is restricted to proteins eluting INSIDE its calibrated MW interval, where apparent mass is interpolated." else ""),
+                              "\nBOTH axes are residuals from a within-dataset fit of mass against elution position - neither uses a standards calibration."),
            x = "deviation, published SEC-seq", y = "deviation, this study") + theme_bw()
     g2 <- ggplot(melt(P[, .(protein_id, `this study` = deviation_log10_ours, `published` = deviation_log10_published)],
                       id.vars = "protein_id", variable.name = "dataset", value.name = "deviation"),
