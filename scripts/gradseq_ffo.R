@@ -251,21 +251,31 @@ gradseq_load <- function(file, id_col = NULL, fraction_cols = NULL, sheet = 1, s
 # anchors sit at s = 30-50 while ordinary proteins are at s = 2-10, so every protein value is an
 # EXTRAPOLATION below the calibrated range. gradseq_vs_sec_deviation() avoids that entirely.
 gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors = NULL,
-                              load_fraction = NULL,
-                              model = c("auto", "zero_anchored", "power", "free_linear"),
+                              load_fraction = NULL, mass_map = NULL, globular_ffo_assumed = 1.25,
+                              model = c("auto", "proteome", "zero_anchored", "power", "free_linear"),
                               save_plots = TRUE) {
   model <- match.arg(model)
   D <- gs$meta
-  # protein -> gene symbol, from the shared UniProt cache unless supplied
-  if (is.null(gene_map)) {
+  # protein -> gene symbol, from the shared UniProt cache unless supplied. `alias_map` keeps EVERY synonym
+  # (UniProt lists e.g. "groL groEL mopA b4143"), because an anchor is easily named by a synonym and a
+  # first-token-only map would silently fail to find it.
+  alias_map <- NULL
+  if (is.null(gene_map) || is.null(mass_map)) {
     sf <- here("output", "uniprot_annotation_shared.RData")
     if (file.exists(sf)) { e <- new.env(); load(sf, envir = e)
       u <- as.data.table(e$.uniprot_all)
-      if (all(c("input_id", "gene_names") %in% names(u)))
-        gene_map <- setNames(tolower(sub(" .*$", "", as.character(u$gene_names))), as.character(u$input_id)) }
+      if (is.null(gene_map) && all(c("input_id", "gene_names") %in% names(u))) {
+        gene_map <- setNames(tolower(sub(" .*$", "", as.character(u$gene_names))), as.character(u$input_id))
+        alias_map <- setNames(strsplit(tolower(trimws(as.character(u$gene_names))), "[ ;,/]+"),
+                              as.character(u$input_id))
+      }
+      if (is.null(mass_map) && all(c("input_id", "mass") %in% names(u)))
+        mass_map <- setNames(as.numeric(u$mass), as.character(u$input_id))
+    }
   }
   if (is.null(gene_map)) stop("No gene symbols available - render a comparison first (UniProt cache), or pass gene_map.")
   D[, gene := unname(gene_map[protein_id])]
+  if (!is.null(mass_map)) D[, mw_Da := unname(mass_map[protein_id])]
 
   # row indices, because gs$profiles and gs$meta share row order (profile rownames are made unique)
   i_small <- which(grepl("^rps[a-z]$", D$gene))
@@ -297,32 +307,62 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     if (!all(c("name", "s") %in% names(EA)))
       stop("extra_anchors needs at least `name` and `s`, plus either `fraction` or `gene`. ",
            "Example: data.table(name = 'GroEL', s = 22, gene = 'grol')")
-    if (!any(c("fraction", "gene") %in% names(EA)))
-      stop("extra_anchors needs either `fraction` (where the particle peaks) or `gene` (to look that up).")
-    if ("gene" %in% names(EA)) {
-      EA[, observed_fraction := vapply(tolower(as.character(gene)), function(g) {
-        h <- D[!is.na(gene) & gene == g]
-        if (nrow(h)) as.numeric(stats::median(h$peak_fraction)) else NA_real_ }, numeric(1))]
-      if (!"fraction" %in% names(EA)) EA[, fraction := observed_fraction]
-      for (i in seq_len(nrow(EA))) {
-        nm <- as.character(EA$name[i]); ob <- EA$observed_fraction[i]; gv <- as.character(EA$gene[i])
-        if (!is.finite(ob)) {
-          warning("Extra anchor '", nm, "': gene '", gv, "' was not found in this dataset, so its fraction could not be ",
-                  "verified. Check the gene symbol against the UniProt cache.", call. = FALSE)
-        } else if (abs(EA$fraction[i] - ob) > 1) {
-          warning(sprintf("Extra anchor '%s': you gave fraction %.2f, but '%s' actually peaks at fraction %.2f in this dataset. Using YOUR value - pass only `gene` to use the observed one.",
-                          nm, EA$fraction[i], gv, ob), call. = FALSE)
-        } else {
-          message(sprintf("Extra anchor '%s' (s = %g): supplied fraction %.2f agrees with the observed peak of '%s' at %.2f.",
-                          nm, EA$s[i], EA$fraction[i], gv, ob))
+    if (!any(c("fraction", "gene", "protein_id") %in% names(EA)))
+      stop("extra_anchors needs `fraction`, or `gene`, or `protein_id` so the fraction can be looked up.")
+    if (!"gene" %in% names(EA)) EA[, gene := NA_character_]
+    # Resolve each extra anchor to the ROWS of this dataset it belongs to, by accession or by any gene
+    # synonym. `anchor_rows` is kept so the plots can show the anchor as data rather than a bare line.
+    EA[, observed_fraction := NA_real_]
+    anchor_rows <- vector("list", nrow(EA)); names(anchor_rows) <- as.character(EA$name)
+    for (i in seq_len(nrow(EA))) {
+      nm <- as.character(EA$name[i]); ix <- integer(0); how <- ""
+      if ("protein_id" %in% names(EA) && !is.na(EA$protein_id[i])) {
+        ix <- which(D$protein_id == as.character(EA$protein_id[i])); how <- "accession"
+      }
+      gv <- if (!is.na(EA$gene[i])) tolower(trimws(as.character(EA$gene[i]))) else NA_character_
+      if (!length(ix) && !is.na(gv)) {
+        ix <- which(!is.na(D$gene) & D$gene == gv); how <- "primary gene symbol"
+        if (!length(ix) && !is.null(alias_map)) {          # fall back to ANY UniProt synonym
+          hit <- names(alias_map)[vapply(alias_map, function(a) gv %in% a, logical(1))]
+          if (length(hit)) { ix <- which(D$protein_id %in% hit); how <- "gene synonym" }
         }
       }
+      anchor_rows[[nm]] <- ix
+      if (length(ix)) {
+        EA$observed_fraction[i] <- as.numeric(stats::median(D$peak_fraction[ix]))
+        message(sprintf("Extra anchor '%s' (s = %g): matched %d protein(s) by %s; observed peak fraction %.2f.",
+                        nm, EA$s[i], length(ix), how, EA$observed_fraction[i]))
+      } else {
+        warning("Extra anchor '", nm, "': could not be matched to any protein in this dataset by ",
+                "protein_id or gene ('", if (is.na(gv)) "-" else gv, "'). Its fraction cannot be verified, and if you ",
+                "did not supply one this anchor WILL BE DROPPED. Check the identifier, or pass fraction = <n> directly.",
+                call. = FALSE)
+      }
+    }
+    if (!"fraction" %in% names(EA)) EA[, fraction := observed_fraction]
+    EA[!is.finite(fraction), fraction := observed_fraction]     # fill only the gaps
+    for (i in seq_len(nrow(EA))) {
+      ob <- EA$observed_fraction[i]
+      if (is.finite(ob) && is.finite(EA$fraction[i]) && abs(EA$fraction[i] - ob) > 1)
+        warning(sprintf("Extra anchor '%s': you gave fraction %.2f, but it actually peaks at %.2f in this dataset. Using YOUR value - omit `fraction` to use the observed one.",
+                        as.character(EA$name[i]), EA$fraction[i], ob), call. = FALSE)
     }
     anchors <- rbind(anchors, EA, fill = TRUE)
+    attr(anchors, "rows") <- anchor_rows
   }
-  anchors <- anchors[is.finite(s) & is.finite(fraction) & s > 0]
+  # NEVER drop an anchor silently - that is how an anchor disappears from every figure with no explanation.
+  .keep <- is.finite(anchors$s) & is.finite(anchors$fraction) & anchors$s > 0
+  if (any(!.keep))
+    warning("DROPPING anchor(s) with no usable s or fraction: ",
+            paste(anchors$name[!.keep], collapse = ", "),
+            ". They will not appear in the calibration or in any figure.", call. = FALSE)
+  .rows <- attr(anchors, "rows")
+  anchors <- anchors[.keep]
   if (nrow(anchors) < 2) stop("Need at least two usable anchors.")
   setorder(anchors, s)
+  attr(anchors, "rows") <- .rows
+  message("Anchor set actually used for the calibration:")
+  print(anchors[, intersect(c("name", "s", "fraction", "observed_fraction", "gene"), names(anchors)), with = FALSE])
 
   if (all(c("30S", "50S") %in% anchors$name) && anchors[name == "50S"]$fraction <= anchors[name == "30S"]$fraction)
     warning("The 50S anchor does not sediment further than the 30S anchor - the gradient orientation or the ",
@@ -352,6 +392,48 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     message("   -> free_linear puts a strongly NEGATIVE s at the load zone, which is unphysical and over-estimates s for ",
             "ordinary proteins (hence f/f0 < 1). This is why it is no longer the default.")
 
+  # ---- the PROTEOME calibration: anchored where the proteins actually are ------------------------
+  # Every anchor above sits at s = 22-50 while ordinary proteins are at s = 2-10, so all three models are
+  # pure extrapolation there - and they over-estimate s so badly that the whole f/f0 distribution lands
+  # below the physical floor of 1. This model removes the extrapolation instead of arguing about it.
+  #
+  # The bulk of any proteome is small, monomeric-to-modestly-oligomeric and roughly compact, so a typical
+  # protein's s is PREDICTABLE from its mass alone (the prediction is verified against published standards
+  # by gradseq_selftest()). Fitting observed fraction against that predicted s, robustly so the minority of
+  # genuinely anomalous proteins cannot drag the line, gives a calibration built entirely INSIDE the range
+  # where the measurement is made. The ribosomal anchors then become a TEST rather than an input: does a
+  # curve fitted to ordinary proteins predict where the ribosome lands?
+  #
+  # WHAT IT CAN AND CANNOT CLAIM - state this whenever the numbers are used:
+  #   CAN  rank proteins by shape, and quantify how far each one departs from bulk behaviour;
+  #   CANNOT independently establish the ABSOLUTE median f/f0, which is fixed at globular_ffo_assumed by
+  #        construction. Do not present the median as a measurement; the SPREAD and the outliers are real.
+  fit_prot <- NULL; cprot <- NULL; n_prot <- 0L
+  if (!is.null(mass_map) && "mw_Da" %in% names(D)) {
+    Dp <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(peak_fraction) & peak_fraction > load_fraction]
+    if (nrow(Dp) >= 50) {
+      Dp[, s_expected := .s_from_ffo(mw_Da, globular_ffo_assumed)]
+      Dp[, dd := peak_fraction - load_fraction]
+      fit_prot <- if (requireNamespace("MASS", quietly = TRUE))
+                    MASS::rlm(log(s_expected) ~ log(dd), data = Dp)
+                  else stats::lm(log(s_expected) ~ log(dd), data = Dp)
+      cprot <- stats::coef(fit_prot); n_prot <- nrow(Dp)
+      message(sprintf("   proteome      : s = %.3f * d^%.3f                 (robust fit over %d protein(s), assuming the BULK is compact at f/f0 = %.2f)",
+                      exp(cprot[1]), cprot[2], n_prot, globular_ffo_assumed))
+      # the test she asked for: does a curve fitted to ordinary proteins reach the ribosome?
+      apred <- exp(cprot[1]) * anchors$d^cprot[2]
+      message("   Anchor test - what the PROTEOME curve predicts for each anchor particle (it never saw them):")
+      print(data.table(anchor = anchors$name, fraction = round(anchors$fraction, 2), s_true = anchors$s,
+                       s_predicted = round(apred, 1),
+                       error_pct = round(100 * (apred - anchors$s) / anchors$s, 1)))
+      aerr <- mean(abs(apred - anchors$s) / anchors$s)
+      if (aerr < 0.25)
+        message(sprintf("   => mean |error| %.0f%%: the proteome curve reaches the ribosomal particles. One law describes both regimes, which is strong evidence the calibration is sound.", 100 * aerr))
+      else
+        message(sprintf("   => mean |error| %.0f%%: the proteome curve does NOT extrapolate to the ribosomal particles. That is expected in part - the ribosome is ~2/3 RNA, so its partial specific volume is ~0.60 rather than the 0.73 assumed for protein, and it sediments faster than a protein of the same mass. Treat the two regimes as separately calibrated.", 100 * aerr))
+    } else message("   proteome      : skipped, only ", nrow(Dp), " protein(s) have both a mass and a peak fraction below the load zone.")
+  } else message("   proteome      : skipped, no monomer masses available (pass mass_map, or render a comparison to build the UniProt cache).")
+
   # ---- leave-one-out validation, if enough anchors were supplied to make it possible -------------
   loo <- NULL
   if (nrow(anchors) >= 3) {
@@ -375,29 +457,66 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
             "hug the anchors more closely than the one-parameter models. That is fit, not accuracy. Leave-one-out asks the ",
             "harder question - can it predict an anchor it has never seen? - which is what matters when extrapolating to ",
             "ordinary proteins far below every anchor.")
-    if (identical(model, "auto")) {
-      model <- best
-      message("   model = 'auto': using '", model, "'. With few anchors each fit uses very few points, so ",
-              "this test is suggestive rather than decisive - confirm with gradseq_compare_models().")
-    } else if (best != model) {
-      message("   You asked for model = '", model, "'. Re-run with model = '", best,
-              "' to use the best-generalising one, and compare the resulting f/f0 distributions.")
-    }
+    if (best != model && !identical(model, "auto") && !identical(model, "proteome"))
+      message("   You asked for model = '", model, "'. '", best, "' generalises better across the anchors.")
+    anchor_best <- best
   } else {
     message("Only ", nrow(anchors), " anchors: every model fits them exactly and NONE can be validated against them. ",
-            "The choice is settled instead by gradseq_compare_models(), on how much of the proteome each model ",
-            "pushes below the physical floor f/f0 = 1. Add a further particle of known s via extra_anchors to make ",
-            "the fit testable against the anchors themselves.")
-    if (identical(model, "auto")) {
-      model <- "zero_anchored"
-      message("   model = 'auto' with fewer than three anchors: falling back to 'zero_anchored', the only one carrying a physical constraint.")
+            "The choice is settled instead by the physical floor - see below and gradseq_compare_models(). ",
+            "Add a further particle of known s via extra_anchors to make the fit testable against the anchors themselves.")
+    anchor_best <- "zero_anchored"
+  }
+
+  # ---- resolve model = "auto" -------------------------------------------------------------------
+  # The deciding criterion is NOT which model fits the anchors best, but whether a model produces
+  # physically possible answers for real proteins. f/f0 >= 1 is a hard floor, so a model that pushes a
+  # large share of the proteome below it has been falsified no matter how well it fits the ribosome.
+  if (identical(model, "auto")) {
+    .try_ffo <- function(pf) {
+      if (!"mw_Da" %in% names(D)) return(NA_real_)
+      dd <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(peak_fraction)]
+      ss <- pf(dd$peak_fraction); ok <- is.finite(ss) & ss > 0
+      if (!any(ok)) return(1)
+      mean(.ffo_from_s(ss[ok], dd$mw_Da[ok]) < 1, na.rm = TRUE)
+    }
+    cand <- list(zero_anchored = function(f) pmax(bz * (f - load_fraction), 0),
+                 power = function(f) { d <- f - load_fraction; o <- rep(0, length(d))
+                                       k <- is.finite(d) & d > 0; o[k] <- exp(cp[1]) * d[k]^cp[2]; o },
+                 free_linear = function(f) unname(cf[1] + cf[2] * f))
+    if (!is.null(cprot)) cand$proteome <- function(f) { d <- f - load_fraction; o <- rep(0, length(d))
+                                                       k <- is.finite(d) & d > 0; o[k] <- exp(cprot[1]) * d[k]^cprot[2]; o }
+    imp <- vapply(cand, .try_ffo, numeric(1))
+    if (all(is.na(imp))) {
+      model <- anchor_best
+      message("model = 'auto': no masses available to test the physical floor, so falling back to the anchor-based choice '", model, "'.")
+    } else {
+      message("model = 'auto': share of the proteome each model pushes below the physical floor f/f0 = 1:")
+      print(data.table(model = names(imp), pct_impossible = round(100 * imp, 1)))
+      viable <- names(imp)[is.finite(imp) & imp <= 0.05]
+      if (length(viable)) {
+        model <- if (anchor_best %in% viable) anchor_best else viable[which.min(imp[viable])]
+        message("   => using '", model, "': it keeps the proteome physically possible.")
+      } else {
+        model <- names(imp)[which.min(imp)]
+        message("   => EVERY model violates the floor; using the least-bad, '", model, "' (", round(100 * min(imp)), "% impossible).")
+        message("      The anchor-based models are extrapolated far below every anchor and over-estimate s there. ",
+                "If 'proteome' is not among the options, supply masses so it can be fitted; otherwise the absolute ",
+                "scale is not recoverable from this data and gradseq_vs_sec_deviation() is the result to report.")
+      }
     }
   }
+  if (identical(model, "proteome") && is.null(cprot))
+    stop("model = 'proteome' needs monomer masses, which are not available. Pass mass_map, or render a comparison to build the UniProt cache.")
+  if (identical(model, "proteome"))
+    message("NOTE ON THE PROTEOME CALIBRATION: the median f/f0 is fixed at ", globular_ffo_assumed,
+            " by construction, so it is NOT a measurement. The SPREAD, the ranking and the outliers are.")
 
   predict_s <- switch(model,
     zero_anchored = function(f) pmax(bz * (f - load_fraction), 0),
     power = function(f) { d <- f - load_fraction; out <- rep(0, length(d))
                           ok <- is.finite(d) & d > 0; out[ok] <- exp(cp[1]) * d[ok]^cp[2]; out },
+    proteome = function(f) { d <- f - load_fraction; out <- rep(0, length(d))
+                             ok <- is.finite(d) & d > 0; out[ok] <- exp(cprot[1]) * d[ok]^cprot[2]; out },
     free_linear = function(f) unname(stats::predict(fit_free, data.frame(fraction = f))))
 
   # ---- plausibility: where SHOULD ordinary globular proteins land under this calibration? --------
@@ -423,7 +542,9 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     curves <- rbindlist(list(
       data.table(fraction = gridf, s = pmax(bz * (gridf - load_fraction), 0), model = "zero_anchored"),
       data.table(fraction = gridf, s = ifelse(gridf > load_fraction, exp(cp[1]) * pmax(gridf - load_fraction, 0)^cp[2], 0), model = "power"),
-      data.table(fraction = gridf, s = cf[1] + cf[2] * gridf, model = "free_linear")))
+      data.table(fraction = gridf, s = cf[1] + cf[2] * gridf, model = "free_linear"),
+      if (!is.null(cprot))
+        data.table(fraction = gridf, s = ifelse(gridf > load_fraction, exp(cprot[1]) * pmax(gridf - load_fraction, 0)^cprot[2], 0), model = "proteome")))
     mdl <- model                                  # the column is also called `model`; keep them apart
     curves[, in_use := model == mdl]
     ylo <- max(-20, min(-5, min(curves$s, na.rm = TRUE)))
@@ -444,10 +565,13 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
                 hjust = -0.15, size = 2.5, colour = "grey25", inherit.aes = FALSE) +
       scale_linewidth_manual(values = c(`FALSE` = 0.4, `TRUE` = 1.1), guide = "none") +
       labs(title = "Gradient calibration: sedimentation coefficient vs fraction",
-           subtitle = paste0("Anchors (filled) are the ribosomal particles; the cross at fraction ", round(load_fraction, 2),
+           subtitle = paste0("Anchors (filled) are the known particles; the cross at fraction ", round(load_fraction, 2),
                              " is the physical s = 0 point - a particle that does not sediment stays in the load zone.\n",
                              "Open circles mark where a COMPACT protein of that mass should peak. The bold curve is the model in use ('", model, "').\n",
-                             "EVERY protein value is an extrapolation into the shaded band, where there is no anchor at all - this remains the weakest step."),
+                             if (!is.null(cprot))
+                               paste0("The 'proteome' curve is fitted INSIDE the shaded band, to the mass-predicted s of ", n_prot,
+                                      " ordinary proteins; the other three are\nfitted only to the anchors and extrapolated into it, which is why they can put the whole proteome below f/f0 = 1.")
+                             else "EVERY protein value is an extrapolation into the shaded band, where there is no anchor at all - this remains the weakest step."),
            x = "fraction", y = "s (Svedberg)", colour = NULL) +
       coord_cartesian(ylim = c(ylo, max(anchors$s) * 1.15)) + theme_bw() + theme(legend.position = "top")
     tryCatch(ggsave(.gs_dir("gradseq_calibration.pdf"), gp, width = 8, height = 5.5), error = function(e) NULL)
@@ -455,32 +579,40 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
     # EVERY anchor is shown as data here, not just the ribosomal ones: a non-ribosomal anchor such as
     # GroEL gets its own bar and its own profile trace, so the fraction fed into the calibration can be
     # checked against where that particle actually sediments.
+    # `anchor_rows` was resolved when the anchor set was built (by accession, gene symbol or synonym), so
+    # an extra anchor appears here as REAL DATA whatever identifier it was named by.
     L <- rbindlist(list(cbind(small[, .(peak_fraction)], anchor = "30S (rps*)"),
                         cbind(large[, .(peak_fraction)], anchor = "50S (rpl*)")))
-    extra_tr <- list(); obs <- anchors[0]
-    if ("gene" %in% names(anchors)) {
-      obs <- anchors[!is.na(gene)]
-      for (i in seq_len(nrow(obs))) {
-        g <- tolower(as.character(obs$gene[i])); ix <- which(!is.na(D$gene) & D$gene == g)
-        if (!length(ix)) next
-        lab <- paste0(obs$name[i], " (", g, ")")
-        L <- rbind(L, data.table(peak_fraction = D$peak_fraction[ix], anchor = lab))
-        pe <- colMeans(gs$profiles[ix, , drop = FALSE]); pe <- pe / max(pe)
-        extra_tr[[lab]] <- pe
+    extra_tr <- list(); arows <- attr(anchors, "rows")
+    for (nm in intersect(names(arows), anchors$name)) {
+      ix <- arows[[nm]]
+      if (!length(ix)) {
+        message("Anchor '", nm, "' has no matching protein in this dataset, so it appears in the figures as a line only.")
+        next
       }
+      lab <- paste0(nm, " (n = ", length(ix), ")")
+      L <- rbind(L, data.table(peak_fraction = D$peak_fraction[ix], anchor = lab))
+      pe <- colMeans(gs$profiles[ix, , drop = FALSE]); pe <- pe / max(pe)
+      extra_tr[[lab]] <- pe
     }
+    obs <- if ("observed_fraction" %in% names(anchors)) anchors[is.finite(observed_fraction)] else anchors[0]
     gr <- ggplot(L, aes(peak_fraction, fill = anchor)) +
       geom_histogram(binwidth = 1, position = "identity", alpha = 0.6) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2) +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3,
                 colour = "grey20", inherit.aes = FALSE) +
-      { if (nrow(obs) && "observed_fraction" %in% names(obs))
-          geom_vline(data = obs[is.finite(observed_fraction)], aes(xintercept = observed_fraction),
-                     linetype = 3, colour = "#E15759") } +
+      { if (nrow(obs)) geom_vline(data = obs, aes(xintercept = observed_fraction), linetype = 3, colour = "#E15759") } +
+      # an anchor made of one protein gives a bar of height 1, easily missed next to the ribosomal
+      # subunits - mark it explicitly so it can never disappear from this figure again
+      { if (nrow(obs)) geom_point(data = obs, aes(x = observed_fraction, y = 0), colour = "#E15759",
+                                  size = 3, shape = 17, inherit.aes = FALSE) } +
+      { if (nrow(obs)) geom_text(data = obs, aes(x = observed_fraction, y = 0, label = name), colour = "#E15759",
+                                 size = 3, vjust = -1.2, inherit.aes = FALSE) } +
       labs(title = "Anchor check: where each calibration anchor actually sediments",
-           subtitle = paste0("Bars are the proteins belonging to each anchor particle. Dashed lines are the fractions fed into the\n",
-                             "calibration; a red dotted line marks the OBSERVED peak of a named gene, so a hand-typed fraction can be\n",
-                             "checked. The two ribosomal subunits should peak in clearly distinct fractions, as in the published A260 profile."),
+           subtitle = paste0("Bars are the proteins belonging to each anchor particle - an anchor made of a single protein gives a bar of\n",
+                             "height 1, so its observed peak is also marked with a red triangle. Dashed lines are the fractions fed into\n",
+                             "the calibration, red dotted lines the OBSERVED peaks, so a hand-typed fraction can be checked. The two\n",
+                             "ribosomal subunits should peak in clearly distinct fractions, as in the published A260 profile."),
            x = "peak fraction", y = "proteins", fill = NULL) + theme_bw() + theme(legend.position = "top")
     trn <- c(list(`30S proteins (rps*)` = ps, `50S proteins (rpl*)` = pl), extra_tr)
     gc2 <- ggplot(rbindlist(lapply(names(trn), function(n)
@@ -499,8 +631,10 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
              error = function(e) try(grDevices::dev.off(), silent = TRUE))
   }
   invisible(list(fit = fit_free, predict_s = predict_s, model = model, anchors = anchors,
-                 load_fraction = load_fraction, loo = loo, gene_map = gene_map,
-                 fits = list(zero_anchored = fit_zero, power = fit_pow, free_linear = fit_free)))
+                 load_fraction = load_fraction, loo = loo, gene_map = gene_map, mass_map = mass_map,
+                 globular_ffo_assumed = globular_ffo_assumed, coef_proteome = cprot, n_proteome = n_prot,
+                 fits = list(zero_anchored = fit_zero, power = fit_pow, free_linear = fit_free,
+                             proteome = fit_prot)))
 }
 
 # ---- 2b. which calibration model does the PROTEOME reject? -----------------------------------------
@@ -530,6 +664,10 @@ gradseq_compare_models <- function(gs, cal, position = c("com", "peak"), mass_ma
     zero_anchored = pmax(bz * (D$frac_used - lf), 0),
     power         = ifelse(D$frac_used > lf, exp(cp[1]) * pmax(D$frac_used - lf, 0)^cp[2], 0),
     free_linear   = cf[1] + cf[2] * D$frac_used)
+  if (!is.null(cal$coef_proteome)) {
+    kk <- cal$coef_proteome
+    preds$proteome <- ifelse(D$frac_used > lf, exp(kk[1]) * pmax(D$frac_used - lf, 0)^kk[2], 0)
+  }
   R <- rbindlist(lapply(names(preds), function(nm) {
     s <- preds[[nm]]; ok <- is.finite(s) & s > 0
     f <- .ffo_from_s(s[ok], D$mw_Da[ok], vbar)
@@ -548,6 +686,10 @@ gradseq_compare_models <- function(gs, cal, position = c("com", "peak"), mass_ma
   message("   In use: '", cal$model, "'. Choose the model with the smallest impossible AND implausible population,")
   message("   then re-run gradseq_calibrate(gs, model = '<name>'). If none is usable, the anchors cannot calibrate")
   message("   this mass range at all - say so, and use gradseq_vs_sec_deviation(), which needs no calibration.")
+  if ("proteome" %in% R$model)
+    message("   'proteome' will always look good on pct_impossible - it is fitted to ordinary proteins, so it CANNOT ",
+            "put them below the floor. That is not evidence it is right; it is why the median f/f0 it yields is an ",
+            "assumption rather than a measurement. Judge it instead by the anchor test printed by gradseq_calibrate().")
   invisible(R)
 }
 
@@ -835,22 +977,84 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
     n0 <- nrow(G); G <- G[in_calibrated_range %in% TRUE]
     message("Restricted to the calibrated MW interval: ", nrow(G), " of ", n0, " proteins.")
   }
-  G[, deviation_log10_ours := log10(ratio)]
-  J <- merge(G[, .(protein_id, deviation_log10_ours, class)],
-             D[, .(protein_id, mw_kDa, pos, deviation_log10_gradseq)], by = "protein_id")
+  # THE DEVIATION MUST BE THE SAME QUANTITY ON BOTH SIDES - a residual from a robust fit of monomer mass
+  # against migration position WITHIN each dataset. Using log10(apparent/expected) here instead would put
+  # this project's standards calibration on one axis only: that ratio runs to 10^6 on extrapolated proteins
+  # while a residual is bounded, so correlating the two would be meaningless. (Same defect, same fix, as in
+  # secseq_compare.R.)
+  if (!all(c("expected_mw_kDa", "apex_fraction") %in% names(G)))
+    stop("globularity_check.txt lacks expected_mw_kDa/apex_fraction - re-run globularity_check().")
+  G <- G[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & is.finite(apex_fraction)]
+  fitG <- if (requireNamespace("MASS", quietly = TRUE))
+            MASS::rlm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+          else stats::lm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+  G[, deviation_log10_ours := stats::predict(fitG, G) - log10(expected_mw_kDa)]
+
+  keep <- intersect(c("protein_id", "deviation_log10_ours", "expected_mw_kDa", "apex_fraction", "class"), names(G))
+  J <- merge(G[, ..keep], D[, .(protein_id, mw_kDa, pos, deviation_log10_gradseq)], by = "protein_id")
   J <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_gradseq)]
   if (!nrow(J)) stop("No shared proteins.")
   ct <- suppressWarnings(stats::cor.test(J$deviation_log10_ours, J$deviation_log10_gradseq, method = "spearman"))
+
+  # PARTIAL correlation controlling for monomer mass. Both deviations are fitted(position) - log10(mass),
+  # so they SHARE the -log10(mass) term; when position predicts mass poorly - the very phenomenon under
+  # study - each collapses towards -(log10 mass - mean) and the raw correlation approaches 1 for that
+  # reason alone. Removing the shared mass leaves the question actually being asked.
+  .pcor <- function(x, y, z) {
+    ok <- is.finite(x) & is.finite(y) & is.finite(z); n <- sum(ok)
+    if (n < 10) return(list(rho = NA_real_, p = NA_real_, n = n))
+    rx <- rank(x[ok]); ry <- rank(y[ok]); rz <- rank(z[ok])
+    rxy <- stats::cor(rx, ry); rxz <- stats::cor(rx, rz); ryz <- stats::cor(ry, rz)
+    den <- sqrt((1 - rxz^2) * (1 - ryz^2))
+    if (!is.finite(den) || den <= 0) return(list(rho = NA_real_, p = NA_real_, n = n))
+    r <- (rxy - rxz * ryz) / den
+    tt <- r * sqrt((n - 3) / max(1 - r^2, .Machine$double.eps))
+    list(rho = r, p = 2 * stats::pt(-abs(tt), df = n - 3), n = n)
+  }
+  .resid_on <- function(y, z) {
+    out <- rep(NA_real_, length(y)); ok <- is.finite(y) & is.finite(z)
+    if (sum(ok) >= 3L) out[ok] <- stats::residuals(stats::lm(y[ok] ~ z[ok]))
+    out
+  }
+  J[, lgm := log10(expected_mw_kDa)]
+  pc <- .pcor(J$deviation_log10_ours, J$deviation_log10_gradseq, J$lgm)
+  J[, dev_ours_adj := .resid_on(deviation_log10_ours,     lgm)]
+  J[, dev_grad_adj := .resid_on(deviation_log10_gradseq,  lgm)]
+  r2o <- suppressWarnings(stats::cor(J$deviation_log10_ours,    J$lgm, use = "complete.obs")^2)
+  r2g <- suppressWarnings(stats::cor(J$deviation_log10_gradseq, J$lgm, use = "complete.obs")^2)
+
   message("Proteins in both datasets: ", nrow(J))
-  message(sprintf("Deviation agreement (SEC vs sedimentation), Spearman rho = %+.3f (p = %.3g).",
+  message(sprintf("Deviation agreement (SEC vs sedimentation): raw Spearman rho = %+.3f (p = %.3g)",
                   unname(ct$estimate), ct$p.value))
-  message("   The two techniques weight mass and shape differently, so only the AGREEMENT is meaningful, not the magnitudes.")
+  message(sprintf("   PARTIAL Spearman rho, monomer mass held constant = %+.3f (p = %.3g)  <- this is the honest number",
+                  pc$rho, pc$p))
+  message(sprintf("   (monomer mass alone explains %.0f%% of the SEC deviation and %.0f%% of the sedimentation one; equivalently, migration position explains %.0f%% and %.0f%% of the variance in monomer mass)",
+                  100 * r2o, 100 * r2g, 100 * (1 - r2o), 100 * (1 - r2g)))
+  if (is.finite(pc$rho) && abs(unname(ct$estimate)) > 0.6 && abs(pc$rho) < 0.3)
+    warning("The raw correlation is largely an artefact of the shared -log10(monomer mass) term; with mass held ",
+            "constant the agreement drops to ", sprintf("%+.3f", pc$rho), ". Report the PARTIAL value.",
+            call. = FALSE, immediate. = TRUE)
+  message("   The two techniques weight mass and shape differently (s ~ M^(2/3)/(f/f0) versus R_s ~ (f/f0)M^(1/3)), ",
+          "so only the AGREEMENT is meaningful, not the magnitudes.")
+
   J[, reproducible := abs(deviation_log10_ours) > dev_cut & abs(deviation_log10_gradseq) > dev_cut &
                       sign(deviation_log10_ours) == sign(deviation_log10_gradseq)]
+  # The mass-adjusted axes are not fold-changes - they are (slope of that dataset's mass-position fit) x
+  # (residual position) - so a fold-change threshold would never be met. Each gets its own robust spread.
+  so <- stats::mad(J$dev_ours_adj, na.rm = TRUE); sg <- stats::mad(J$dev_grad_adj, na.rm = TRUE)
+  if (!is.finite(so) || so <= 0) so <- stats::sd(J$dev_ours_adj, na.rm = TRUE)
+  if (!is.finite(sg) || sg <= 0) sg <- stats::sd(J$dev_grad_adj, na.rm = TRUE)
+  J[, reproducible_massadj := is.finite(dev_ours_adj) & is.finite(dev_grad_adj) &
+        abs(dev_ours_adj) > 2 * so & abs(dev_grad_adj) > 2 * sg &
+        sign(dev_ours_adj) == sign(dev_grad_adj)]
   message(sprintf("Anomalous (>%.1f-fold) and in the SAME direction in both: %d protein(s) (%.1f%%).",
                   10^dev_cut, sum(J$reproducible), 100 * mean(J$reproducible)))
+  message(sprintf("   after removing the shared monomer-mass term (cutoff = 2 x robust SD, %.3f and %.3f log10 units): %d protein(s) (%.1f%%) - use THIS set.",
+                  2 * so, 2 * sg, sum(J$reproducible_massadj), 100 * mean(J$reproducible_massadj)))
   dir.create(.gs_dir(), recursive = TRUE, showWarnings = FALSE)
   fwrite(J, .gs_dir("sec_vs_gradseq_deviation.csv"))
+  fwrite(J[reproducible_massadj == TRUE][order(-abs(dev_ours_adj))],
+         .gs_dir("sec_vs_gradseq_deviation_reproducible_massadj.csv"))
   if (save_plots) {
     g <- ggplot(J, aes(deviation_log10_gradseq, deviation_log10_ours)) +
       geom_hline(yintercept = 0, colour = "grey60") + geom_vline(xintercept = 0, colour = "grey60") +
@@ -858,11 +1062,23 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
       scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both") +
       geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       labs(title = paste0("SEC vs sedimentation: do the same proteins migrate anomalously?  (", metabolite, ")"),
-           subtitle = sprintf("Calibration-free: each dataset is referenced to its own bulk trend of mass against migration position.\nSpearman rho = %+.3f (p = %.3g, n = %d). Magnitudes are NOT comparable between techniques - only the agreement is.",
-                              unname(ct$estimate), ct$p.value, nrow(J)),
+           subtitle = sprintf("Calibration-free: BOTH axes are residuals from a within-dataset robust fit of monomer mass against migration\nposition, so neither uses a standards curve. Raw Spearman rho = %+.3f (p = %.3g, n = %d) - but both axes contain\nthe same -log10(monomer mass) term, so read the PARTIAL rho instead: %+.3f (p = %.3g). See the next panel.",
+                              unname(ct$estimate), ct$p.value, nrow(J), pc$rho, pc$p),
            x = "deviation, Grad-seq (sedimentation)", y = "deviation, this study (SEC)") + theme_bw()
-    tryCatch(ggsave(.gs_dir("sec_vs_gradseq_deviation.pdf"), g, width = 7.5, height = 5.5), error = function(e) NULL)
+    gb <- ggplot(J[is.finite(dev_ours_adj) & is.finite(dev_grad_adj)], aes(dev_grad_adj, dev_ours_adj)) +
+      geom_hline(yintercept = 0, colour = "grey60") + geom_vline(xintercept = 0, colour = "grey60") +
+      geom_point(aes(colour = reproducible_massadj), alpha = 0.45, size = 0.9) +
+      scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both\n(mass-adjusted)") +
+      geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      labs(title = "The same comparison with monomer mass removed from both axes",
+           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass): what the separation adds beyond what the\nprotein's mass already dictates. THE UNITS ARE NOT FOLD-CHANGES. Partial Spearman rho = %+.3f (p = %.3g, n = %d).\nMass alone explains %.0f%% of the SEC deviation and %.0f%% of the sedimentation one - that shared term is what\ninflates the raw correlation in the previous panel.",
+                              pc$rho, pc$p, pc$n, 100 * r2o, 100 * r2g),
+           x = "mass-adjusted deviation, Grad-seq", y = "mass-adjusted deviation, this study") + theme_bw()
+    tryCatch({ grDevices::pdf(.gs_dir("sec_vs_gradseq_deviation.pdf"), width = 7.5, height = 6)
+               print(g); print(gb); grDevices::dev.off() },
+             error = function(e) try(grDevices::dev.off(), silent = TRUE))
   }
+  attr(J, "rho_raw") <- unname(ct$estimate); attr(J, "rho_partial") <- pc$rho
   invisible(J)
 }
 
@@ -872,6 +1088,9 @@ gradseq_all <- function(file, metabolite, id_col = NULL, fraction_cols = NULL, g
   gs  <- gradseq_load(file, id_col = id_col, fraction_cols = fraction_cols)
   cal <- gradseq_calibrate(gs, model = model, load_fraction = load_fraction, extra_anchors = extra_anchors)
   try(gradseq_compare_models(gs, cal), silent = TRUE)
+  # the calibration-free comparison always runs: it is the result that survives even when no fraction -> s
+  # model is usable, so it should never be something you have to remember to call separately
+  try(gradseq_vs_sec_deviation(gs, metabolite = metabolite), silent = FALSE)
   ff  <- gradseq_ffo(gs, cal)
   gradseq_vs_sec(ff, metabolite = metabolite, globular_ffo = globular_ffo)
 }
