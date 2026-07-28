@@ -72,7 +72,28 @@ the second is drop-in methods text, the third is what actually matters scientifi
 
 ---
 
-## 2. Methods
+## 2. Methods — SCOPE NOTE FIRST
+
+**This is a SUPPLEMENTARY methods block, not the main one.** It covers only the statistics
+layer, the calibration/globularity assessment and the cross-dataset validation — i.e. what
+was built or corrected in this round. The main Methods must still describe the core pipeline,
+which is upstream of everything below:
+
+| Stage | Implementation | Who supplies it |
+|---|---|---|
+| Culture, metabolite treatment, lysis, SEC run | — | **you** |
+| LC-MS/MS acquisition, Spectronaut search settings | — | **you** |
+| MW calibration and trace annotation | `calibrateMW`, `annotateMolecularWeight` | code |
+| Protein feature finding | `findProteinFeatures`, `collapse_method = "apex_only"`, `perturb_cutoff = "5%"`; `corr_cutoff`, `window_size`, `rt_height`, `smoothing_length` chosen by grid search | code |
+| Feature scoring / quantification | `scoreFeatures` (FDR 0.05; 0.15 variant), `extractFeatureVals`, `fillFeatureVals` | code |
+| Differential expression | `testDifferentialExpression_beniFix` → `aggregatePeptideTests`; hit = `pBHadj < 0.05 & abs(medianLog2FC) > 1` | code |
+| Assembly-state change | `getMassAssemblyChange_aljazfix` (beta regression per protein) | code |
+| GO enrichment | hypergeometric (`phyper`, upper tail) with Benjamini–Hochberg | code |
+| Complex-level analysis | `findComplexFeatures`, `corr_cutoff = 0.9`, `window_size = 7`, `collapse_method = "apex_network"`, target + decoy complex hypotheses | code |
+
+The two paragraphs below slot in **after** that description.
+
+---
 
 Differential elution was tested by label permutation with an abundance-stratified null:
 proteins were binned by median intensity and permuted within bins, so that a protein is
@@ -148,3 +169,16 @@ model selection is made on that criterion rather than on fit to the ribosomal an
 - **Metabolite-induced shifts are not a charge artefact.** Proteome-wide, no metabolite shows
   a shift-charge dependence (baseline ρ = 0.057, wrong-signed), and PEP's nucleotide
   enrichment (21% vs 21%) is a clean internal negative control against ATP's (38% vs 20%).
+
+- **Nor a hydrophobic-retention artefact — but only the exclusion is claimable.** GRAVY vs
+  log₂(apparent/expected) gives ρ = +0.196 (n = 2399). Column retention by hydrophobic
+  interaction would make sticky proteins elute *late* and appear *smaller*, i.e. a **negative**
+  correlation; the observed sign is the opposite, so that artefact is excluded. The positive
+  sign itself should **not** be interpreted as assembly: GRAVY averages over buried core
+  residues while assembly is driven by *surface* hydrophobicity, aggregation would produce the
+  same sign as genuine complexes, and membrane-associated proteins are both hydrophobic and
+  often in large particles. With ρ² = 3.8% and those confounds, report the exclusion only.
+
+- **At n ≈ 2400, p-values stop being informative about effect size.** |ρ| > 0.04 already gives
+  p < 0.05, so p = 4e-22 reports the sample size. Judge these tests on ρ² and on the *sign*
+  predicted by the competing explanations, never on significance.
