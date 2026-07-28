@@ -28,7 +28,7 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-rmd <- here("analysis", "DiffAnalysis_Ecoli_PCM.Rmd")
+rmd <- here("analysis", "DiffAnalysis_Ecoli_PMC.Rmd")
 
 # Keep this list in sync with scripts/run_all_metabolites.R.
 metabolites <- c("PEP", "ADP", "aKG", "NAD", "PGP", "ATP")
