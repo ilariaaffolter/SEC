@@ -169,6 +169,10 @@ load_protein_DiffExprPep_and_Protein <- T
 # extractFeatureVals -> fillFeatureVals -> differential test), roughly DOUBLING the slowest part of the
 # render. Off by default; set T if you specifically want the looser-FDR comparison.
 run_feature_fdr015 <- F
+# The assembly test (getMassAssemblyChange) can draw ONE PLOT PER PROTEIN. On a few thousand proteins
+# those plots, not the beta regression, dominate that chunk's runtime - they are diagnostics, and none of
+# the reported results depend on them. Off by default; set T only to inspect individual proteins.
+plot_individual_traces <- F
 load_uniprot.RData <- T   # cache the UniProt fetch (per comparison + a shared accumulator) so a GOOD fetch is reused instead of re-hitting UniProt every render. fetch_uniprot is non-deterministic: a throttled response comes back WITHOUT the `mass` column and crashes trace annotation. Set F (or delete output/uniprot_annotation_shared.RData) to force a fresh fetch.
 ################### ordering the samples?
 
@@ -218,6 +222,14 @@ out_dir <- here::here("output", comparison_id)
 
 output_files_location <- file.path(out_dir, "output_files")
 RData_for_further_plotting_and_analysis_location <- file.path(out_dir, "RData_for_further_plotting_and_analysis")
+
+# Progress breadcrumbs. knitr buffers chunk messages, so under rmarkdown::render you cannot see which
+# step a long chunk is on. .brk() appends a timestamped line to out_dir/render_progress.log (file writes
+# are not buffered): open that file while the render runs and the LAST line is the current step.
+# Defined here in SETUP so every chunk can use it.
+.brk <- function(msg) { try({ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  cat(format(Sys.time(), "%H:%M:%S"), "|", msg, "\n",
+      file = file.path(out_dir, "render_progress.log"), append = TRUE) }, silent = TRUE) }
 DistinctAssembly_hits_location <- file.path(out_dir, "DistinctAssembly_hits")
 DistinctAssembly_hits_nolog2FC_location <- file.path(out_dir, "DistinctAssembly_hits_nolog2FC")
 
@@ -1112,14 +1124,29 @@ proteins_withAssemblyChanges_list <- list()
 
 # compare the treatmets to the ref (the list is specified in the vectors treatment_conditions and ref_condition in the Analysis SETUP section)
 
-diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assembly,    
-                                             design_matrix= design_matrix, 
+# Cache the (slow) assembly test - getMassAssemblyChange runs betareg per protein, so cache it the same
+# way as proteinFeatures/diff: when diffAssemblyState.RData exists and load_proteinFeatures.RData is
+# TRUE, load it and skip the recompute. The categorisation below always re-runs on diffAssemblyState, so
+# the cutoffs stay adjustable without recomputing betareg. Set load_proteinFeatures.RData <- F (or delete
+# the file) to force a fresh assembly test.
+.assembly_file <- file.path(out_dir, "rdata", "diffAssemblyState.RData")
+.brk("assembly test (getMassAssemblyChange, betareg per protein) ...")
+if (load_proteinFeatures.RData && file.exists(.assembly_file)) {
+  load(.assembly_file)   # restores diffAssemblyState from a previous run
+  message("Loaded cached diffAssemblyState from ", .assembly_file, " (skipped getMassAssemblyChange).")
+} else {
+diffAssemblyState <- getMassAssemblyChange_aljazfix(tracesList=protTraces_assembly,
+                                             design_matrix= design_matrix,
                                              compare_between = "Condition",
                                              quantLevel = "protein_id",
-                                             plot=T,
+                                             plot=plot_individual_traces,   # was T: one plot PER PROTEIN dominated this chunk's runtime
                                              PDF=F #,
                                              #name = paste0("beta_pvalue_histogram_"ref_condition,"_",i)
                                              )
+  save(diffAssemblyState, file = .assembly_file)
+  message("Saved diffAssemblyState to ", .assembly_file, " (re-runs with load_proteinFeatures.RData=T skip getMassAssemblyChange).")
+}
+.brk("assembly test DONE")
 
 # ---- categorize proteins by assembly change (treatment vs reference) ----
 # FIX: more_assembled_proteins_list / less_assembled_proteins_list were declared
