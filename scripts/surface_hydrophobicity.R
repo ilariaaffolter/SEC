@@ -39,7 +39,8 @@
 #   neither survives partialling on mass, or the effect dies when membrane proteins are removed
 #       -> report the exclusion of the retention artefact and nothing further.
 #
-# REQUIRES AlphaFold PDB files in output/hydropro/structures/ (AF-<ACC>-F1-model_v4.pdb). Get them with
+# REQUIRES AlphaFold structures in output/hydropro/structures/, as AF-<ACC>-F1-model_vN.pdb or .cif
+# (both formats are read). Get them with alphafold_import_tar() for a whole proteome, or with
 # hydropro_fetch() from scripts/hydropro_ffo.R, or download manually and use
 # hydropro_import_structures(); everything here works offline once the files are present.
 #
@@ -47,7 +48,7 @@
 #   source(here::here("scripts", "surface_hydrophobicity.R"))
 #   surface_selftest()                              # verify the SASA geometry first
 #   # --- getting structures, easiest first ---
-#   alphafold_import_tar("~/Downloads/UP000000625_83333_ECOLI_v4.tar")   # whole proteome, ONE download
+#   alphafold_import_tar("C:/Users/<you>/Downloads/UP000000625_83333_ECOLI_v6.tar")  # whole proteome, ONE download
 #   surface_priority_list("ATP", n = 200)           # or: a short, defensibly chosen accession list
 #   surface_hydrophobicity(metabolite = "ATP", max_proteins = 300)   # slow; cached and resumable
 #   surface_vs_elution(metabolite = "ATP")          # the test, against elution deviation
@@ -78,23 +79,57 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 # van der Waals radii (A)
 .VDW <- c(C = 1.70, N = 1.55, O = 1.52, S = 1.80, H = 1.20, P = 1.80)
 
-# ---- PDB parsing -----------------------------------------------------------------------------------
-# Fixed-column PDB format; AlphaFold puts per-residue pLDDT in the B-factor column (61-66).
-.pdb_atoms <- function(file) {
+# ---- structure parsing -----------------------------------------------------------------------------
+# Both AlphaFold formats are supported: the legacy fixed-column PDB, and mmCIF, which newer AlphaFold DB
+# releases ship instead. In both, the per-residue pLDDT lives in the B-factor field.
+.cif_atoms <- function(file) {
   ln <- tryCatch(readLines(file, warn = FALSE), error = function(e) character(0))
-  ln <- ln[startsWith(ln, "ATOM  ")]
   if (!length(ln)) return(NULL)
+  # the atom_site loop: the "_atom_site.<field>" lines give the column order for the rows beneath
+  hdr <- grep("^_atom_site\\.", ln)
+  if (!length(hdr)) return(NULL)
+  fields <- sub("^_atom_site\\.", "", trimws(ln[hdr]))
+  body <- ln[(max(hdr) + 1):length(ln)]
+  body <- body[grepl("^(ATOM|HETATM)\\s", body)]
+  if (!length(body)) return(NULL)
+  M <- do.call(rbind, strsplit(trimws(body), "[ \t]+"))
+  if (is.null(M) || ncol(M) < length(fields)) return(NULL)
+  cn <- function(...) { h <- intersect(c(...), fields); if (length(h)) which(fields == h[1])[1] else NA_integer_ }
+  i_el <- cn("type_symbol"); i_at <- cn("label_atom_id", "auth_atom_id")
+  i_rn <- cn("label_comp_id", "auth_comp_id"); i_sq <- cn("label_seq_id", "auth_seq_id")
+  i_x  <- cn("Cartn_x"); i_y <- cn("Cartn_y"); i_z <- cn("Cartn_z"); i_b <- cn("B_iso_or_equiv")
+  if (anyNA(c(i_at, i_rn, i_sq, i_x, i_y, i_z))) return(NULL)
   A <- data.table(
-    atom    = trimws(substr(ln, 13, 16)),
-    resname = trimws(substr(ln, 18, 20)),
-    resnum  = suppressWarnings(as.integer(substr(ln, 23, 26))),
-    x       = suppressWarnings(as.numeric(substr(ln, 31, 38))),
-    y       = suppressWarnings(as.numeric(substr(ln, 39, 46))),
-    z       = suppressWarnings(as.numeric(substr(ln, 47, 54))),
-    plddt   = suppressWarnings(as.numeric(substr(ln, 61, 66))),
-    element = trimws(substr(ln, 77, 78)))
-  A <- A[is.finite(x) & is.finite(y) & is.finite(z)]
-  if (!nrow(A)) return(NULL)
+    atom    = gsub('"', "", M[, i_at]),
+    resname = M[, i_rn],
+    resnum  = suppressWarnings(as.integer(M[, i_sq])),
+    x       = suppressWarnings(as.numeric(M[, i_x])),
+    y       = suppressWarnings(as.numeric(M[, i_y])),
+    z       = suppressWarnings(as.numeric(M[, i_z])),
+    plddt   = if (is.na(i_b)) NA_real_ else suppressWarnings(as.numeric(M[, i_b])),
+    element = if (is.na(i_el)) "" else M[, i_el])
+  A[is.finite(x) & is.finite(y) & is.finite(z)]
+}
+
+.pdb_atoms <- function(file) {
+  if (grepl("\\.(cif|mmcif)$", file, ignore.case = TRUE)) {
+    A <- .cif_atoms(file)
+  } else {
+    ln <- tryCatch(readLines(file, warn = FALSE), error = function(e) character(0))
+    ln <- ln[startsWith(ln, "ATOM  ")]
+    if (!length(ln)) return(NULL)
+    A <- data.table(
+      atom    = trimws(substr(ln, 13, 16)),
+      resname = trimws(substr(ln, 18, 20)),
+      resnum  = suppressWarnings(as.integer(substr(ln, 23, 26))),
+      x       = suppressWarnings(as.numeric(substr(ln, 31, 38))),
+      y       = suppressWarnings(as.numeric(substr(ln, 39, 46))),
+      z       = suppressWarnings(as.numeric(substr(ln, 47, 54))),
+      plddt   = suppressWarnings(as.numeric(substr(ln, 61, 66))),
+      element = trimws(substr(ln, 77, 78)))
+    A <- A[is.finite(x) & is.finite(y) & is.finite(z)]
+  }
+  if (is.null(A) || !nrow(A)) return(NULL)
   A[element == "" | is.na(element), element := substr(atom, 1, 1)]   # fall back to the atom name
   A[, aa := unname(.AA3[resname])]
   A <- A[!is.na(aa) & element != "H"]                                # heavy atoms of standard residues
@@ -208,37 +243,83 @@ surface_selftest <- function(n_points = c(92, 252), probe = 1.4) {
 # no need to pick proteins by hand at all. For E. coli K-12 MG1655 (UniProt proteome UP000000625,
 # taxid 83333) that is roughly 4300 structures in one download:
 #
-#   https://ftp.ebi.ac.uk/pub/databases/alphafold/latest/UP000000625_83333_ECOLI_v4.tar
+#   https://ftp.ebi.ac.uk/pub/databases/alphafold/latest/UP000000625_83333_ECOLI_v6.tar
 #
 # Check the version suffix against the directory listing at
 #   https://ftp.ebi.ac.uk/pub/databases/alphafold/latest/
-# before downloading - it advances with each AlphaFold DB release, and I could not reach that host from
-# the environment where this was written, so the "_v4" above is unverified.
+# before downloading - it advances with each AlphaFold DB release (v6 as of this writing); newer releases
+# may drop the legacy PDB format and ship mmCIF only, which is why both are parsed here.
 # Save the tar anywhere and point alphafold_import_tar() at it. If the tar is blocked but single files
 # are not, use surface_priority_list() below to get a short, sensibly chosen accession list instead.
+# Path resolution deserves its own helper because "~" is a trap on Windows: R maps it to the user's
+# DOCUMENTS folder, not to the home directory, so the "~/Downloads/..." that works on macOS and Linux
+# resolves to C:/Users/<you>/Documents/Downloads and fails. Rather than make the caller retype paths,
+# try the obvious candidates and, on failure, say exactly what was tried and what tar files are actually
+# sitting in those folders.
+.resolve_file <- function(f, pattern = NULL) {
+  cand <- unique(c(f, path.expand(f), here(f)))
+  base <- basename(f)
+  homes <- unique(c(Sys.getenv("USERPROFILE"), Sys.getenv("HOME"), path.expand("~"),
+                    dirname(path.expand("~"))))
+  homes <- homes[nzchar(homes) & dir.exists(homes)]
+  dirs  <- unique(c(homes, file.path(homes, c("Downloads", "Desktop", "Documents",
+                                              "Documents/Downloads")), here("data", "raw"), getwd()))
+  dirs  <- dirs[dir.exists(dirs)]
+  cand  <- unique(c(cand, file.path(dirs, base)))
+  hit   <- cand[file.exists(cand) & !dir.exists(cand)]
+  if (length(hit)) return(hit[1])
+  # nothing matched the given name - show what IS there, so the real filename is obvious
+  found <- unlist(lapply(dirs, function(d)
+    list.files(d, pattern = if (is.null(pattern)) "\\.tar$" else pattern, full.names = TRUE)))
+  stop("Could not find '", base, "'.\nTried:\n  ", paste(utils::head(cand, 12), collapse = "\n  "),
+       if (length(found))
+         paste0("\n\nBut these files DO exist - pass one of these paths instead:\n  ",
+                paste(utils::head(found, 12), collapse = "\n  "))
+       else paste0("\n\nNo matching file in any of:\n  ", paste(dirs, collapse = "\n  "),
+                   "\nNOTE on Windows R, '~' means your DOCUMENTS folder, not your home folder - give the ",
+                   "full path instead, e.g. \"C:/Users/<you>/Downloads/<file>.tar\" (forward slashes)."),
+       call. = FALSE)
+}
+
 alphafold_import_tar <- function(tarfile, dest = .struct_dir(), keep_pdb_only = TRUE) {
-  if (!file.exists(tarfile)) { f2 <- here(tarfile); if (file.exists(f2)) tarfile <- f2 else stop("Not found: ", tarfile) }
+  tarfile <- .resolve_file(tarfile)
+  message("Using ", tarfile, " (", round(file.size(tarfile) / 1e9, 2), " GB).")
   dir.create(dest, recursive = TRUE, showWarnings = FALSE)
   message("Unpacking ", basename(tarfile), " -> ", dest, " (this takes a few minutes)...")
   utils::untar(tarfile, exdir = dest)
-  gz <- list.files(dest, pattern = "\\.pdb\\.gz$", full.names = TRUE)
+  # some releases pack into a subdirectory - flatten so everything sits in `dest`
+  sub <- list.files(dest, pattern = "^AF-.*\\.(pdb|cif)(\\.gz)?$", full.names = TRUE, recursive = TRUE)
+  moved <- sub[dirname(sub) != normalizePath(dest, winslash = "/", mustWork = FALSE)]
+  if (length(moved)) {
+    file.rename(moved, file.path(dest, basename(moved)))
+    message("Flattened ", length(moved), " file(s) out of subdirectories.")
+  }
+  # stream the decompression: guessing the uncompressed size and reading that many bytes silently
+  # TRUNCATES any file that compressed better than the guess
+  .gunzip <- function(gz, out) {
+    ci <- gzfile(gz, "rb"); co <- file(out, "wb")
+    on.exit({ try(close(ci), silent = TRUE); try(close(co), silent = TRUE) })
+    repeat { b <- readBin(ci, "raw", 1e6); if (!length(b)) break; writeBin(b, co) }
+  }
+  gz <- list.files(dest, pattern = "^AF-.*\\.(pdb|cif)\\.gz$", full.names = TRUE)
   if (length(gz)) {
-    message("Decompressing ", length(gz), " .pdb.gz file(s)...")
-    for (g in gz) {
-      out <- sub("\\.gz$", "", g)
-      if (!file.exists(out)) {
-        con <- gzfile(g, "rb"); writeBin(readBin(con, "raw", file.size(g) * 20), out); close(con)
-      }
-      unlink(g)
-    }
+    message("Decompressing ", length(gz), " file(s)...")
+    for (g in gz) { out <- sub("\\.gz$", "", g); if (!file.exists(out)) .gunzip(g, out); unlink(g) }
   }
-  if (keep_pdb_only) {
-    junk <- list.files(dest, pattern = "\\.cif(\\.gz)?$", full.names = TRUE)
-    if (length(junk)) { unlink(junk); message("Removed ", length(junk), " .cif file(s) - only PDB is used here.") }
+  npdb <- length(list.files(dest, pattern = "^AF-.*\\.pdb$"))
+  ncif <- length(list.files(dest, pattern = "^AF-.*\\.cif$"))
+  # Only discard mmCIF when PDB is actually present. Newer AlphaFold DB releases have been dropping the
+  # legacy PDB format, so deleting the mmCIF unconditionally could throw away the entire download.
+  if (keep_pdb_only && npdb > 0 && ncif > 0) {
+    unlink(list.files(dest, pattern = "^AF-.*\\.cif$", full.names = TRUE))
+    message("Removed ", ncif, " redundant .cif file(s) (PDB copies are present).") ; ncif <- 0L
   }
-  n <- length(list.files(dest, pattern = "^AF-.*\\.pdb$"))
-  message(n, " AlphaFold PDB structure(s) now available in ", dest, ".")
-  invisible(n)
+  message(npdb, " PDB and ", ncif, " mmCIF structure(s) now in ", dest,
+          ". Both formats are read by this script.")
+  if (npdb + ncif == 0L)
+    warning("Nothing usable was unpacked - check that the tar really is an AlphaFold proteome archive.",
+            call. = FALSE)
+  invisible(npdb + ncif)
 }
 
 # ---- 0c. a defensible short list, if you must download one protein at a time -------------------------
@@ -354,9 +435,10 @@ surface_hydrophobicity <- function(ids = NULL, metabolite = NULL, max_proteins =
   sdir <- .struct_dir()
   if (!dir.exists(sdir)) stop("No structure directory at ", sdir,
                               ". Fetch structures first: source('scripts/hydropro_ffo.R'); hydropro_fetch('ATP').")
-  files <- list.files(sdir, pattern = "^AF-.*\\.pdb$", full.names = TRUE)
-  if (!length(files)) stop("No AF-*.pdb files in ", sdir, " - see hydropro_fetch() / hydropro_import_structures().")
-  have <- sub("^AF-([^-]+)-.*$", "\\1", basename(files))
+  files <- list.files(sdir, pattern = "^AF-.*\\.(pdb|cif)$", full.names = TRUE)
+  if (!length(files)) stop("No AF-*.pdb or AF-*.cif files in ", sdir,
+                           " - see alphafold_import_tar(), hydropro_fetch() or hydropro_import_structures().")
+  have <- sub("^AF-([^-]+)-.*$", "\\1", basename(files))   # AF-<ACC>-F1-model_vN.(pdb|cif)
   if (is.null(ids) && !is.null(metabolite)) {
     f <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
     if (file.exists(f)) ids <- unique(as.character(fread(f)$protein_id))
