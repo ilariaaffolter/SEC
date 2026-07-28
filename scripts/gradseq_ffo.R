@@ -428,16 +428,43 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
   #   CAN  rank proteins by shape, and quantify how far each one departs from bulk behaviour;
   #   CANNOT independently establish the ABSOLUTE median f/f0, which is fixed at globular_ffo_assumed by
   #        construction. Do not present the median as a measurement; the SPREAD and the outliers are real.
+  #
+  # TWO THINGS THIS FIT MUST GET RIGHT, both of which produce a flat, useless curve when got wrong:
+  #  (a) DIRECTION. The scatter lives in the POSITION, not in the mass: at a given mass, a protein moves
+  #      up or down the gradient according to its shape and its assembly state. So log(d) belongs on the
+  #      left-hand side and the fit is inverted afterwards. Regressing log(s) on log(d) instead puts the
+  #      noisy variable among the predictors, which attenuates the slope towards zero - the textbook
+  #      errors-in-variables bias, and the reason the earlier curve came out nearly horizontal.
+  #  (b) RESOLUTION. The fit is only meaningful if position actually tracks mass in this gradient. A
+  #      glycerol gradient tuned to separate ribosomes may leave every ordinary protein piled in the top
+  #      few fractions, in which case there is no relationship to fit and NO calibration can be recovered
+  #      from this data - by this route or any other. That is checked first, and the model is refused
+  #      rather than returned as a flat line that silently assigns every protein the same s.
   fit_prot <- NULL; cprot <- NULL; n_prot <- 0L
   if (!is.null(mass_map) && "mw_Da" %in% names(D)) {
     Dp <- D[is.finite(mw_Da) & mw_Da > 0 & is.finite(pos_used) & pos_used > load_fraction]
     if (nrow(Dp) >= 50) {
       Dp[, s_expected := .s_from_ffo(mw_Da, globular_ffo_assumed)]
       Dp[, dd := pos_used - load_fraction]
+      qq <- stats::quantile(Dp$pos_used, c(0.25, 0.75), na.rm = TRUE)
+      rr <- suppressWarnings(stats::cor(log(Dp$dd), log(Dp$s_expected), method = "spearman"))
+      message(sprintf("   Resolution check: the middle 50%% of proteins occupy fractions %.1f-%.1f out of %g, and Spearman rho(position, mass-predicted s) = %+.3f over %d proteins.",
+                      qq[1], qq[2], max(fr), rr, nrow(Dp)))
+      if (!is.finite(rr) || abs(rr) < 0.3) {
+        message("   proteome      : REFUSED. Position barely tracks mass in this gradient, so there is no relationship to")
+        message("                   calibrate. This is not a defect of the method - it means the gradient does not resolve")
+        message("                   ordinary proteins (it was designed to separate ribosomal particles), so NO fraction -> s")
+        message("                   calibration is recoverable from this data by any route. Use gradseq_vs_sec_deviation().")
+      } else {
       fit_prot <- if (requireNamespace("MASS", quietly = TRUE))
-                    MASS::rlm(log(s_expected) ~ log(dd), data = Dp)
-                  else stats::lm(log(s_expected) ~ log(dd), data = Dp)
-      cprot <- stats::coef(fit_prot); n_prot <- nrow(Dp)
+                    MASS::rlm(log(dd) ~ log(s_expected), data = Dp)
+                  else stats::lm(log(dd) ~ log(s_expected), data = Dp)
+      kk <- stats::coef(fit_prot)                      # log d = a + b log s  ->  s = exp(-a/b) * d^(1/b)
+      if (!is.finite(kk[2]) || abs(kk[2]) < 1e-6) {
+        message("   proteome      : REFUSED, the inverted fit is degenerate.")
+        fit_prot <- NULL
+      } else {
+      cprot <- c(-kk[1] / kk[2], 1 / kk[2]); n_prot <- nrow(Dp)
       message(sprintf("   proteome      : s = %.3f * d^%.3f                 (robust fit over %d protein(s), assuming the BULK is compact at f/f0 = %.2f)",
                       exp(cprot[1]), cprot[2], n_prot, globular_ffo_assumed))
       # the test she asked for: does a curve fitted to ordinary proteins reach the ribosome?
@@ -451,7 +478,9 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
         message(sprintf("   => mean |error| %.0f%%: the proteome curve reaches the ribosomal particles. One law describes both regimes, which is strong evidence the calibration is sound.", 100 * aerr))
       else
         message(sprintf("   => mean |error| %.0f%%: the proteome curve does NOT extrapolate to the ribosomal particles. That is expected in part - the ribosome is ~2/3 RNA, so its partial specific volume is ~0.60 rather than the 0.73 assumed for protein, and it sediments faster than a protein of the same mass. Treat the two regimes as separately calibrated.", 100 * aerr))
-    } else message("   proteome      : skipped, only ", nrow(Dp), " protein(s) have both a mass and a peak fraction below the load zone.")
+      }
+      }
+    } else message("   proteome      : skipped, only ", nrow(Dp), " protein(s) have both a mass and a position below the load zone.")
   } else message("   proteome      : skipped, no monomer masses available (pass mass_map, or render a comparison to build the UniProt cache).")
 
   # ---- the paper's OWN landmark: where the low-molecular-weight bulk sediments -------------------
@@ -1009,8 +1038,6 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
   D[, mw_kDa := unname(mass_map[protein_id]) / 1000]
   D[, pos := if (position == "com") com_fraction else as.numeric(peak_fraction)]
   D <- D[is.finite(mw_kDa) & mw_kDa > 0 & is.finite(pos)]
-  fit <- if (requireNamespace("MASS", quietly = TRUE)) MASS::rlm(log10(mw_kDa) ~ pos, data = D) else stats::lm(log10(mw_kDa) ~ pos, data = D)
-  D[, deviation_log10_gradseq := stats::predict(fit, D) - log10(mw_kDa)]
 
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
@@ -1029,18 +1056,45 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
   # this project's standards calibration on one axis only: that ratio runs to 10^6 on extrapolated proteins
   # while a residual is bounded, so correlating the two would be meaningless. (Same defect, same fix, as in
   # secseq_compare.R.)
+  # BOTH FITS ARE DONE ON THE SHARED SET, AGAINST ONE SINGLE MASS COLUMN. Fitting them separately on
+  # different populations against different mass annotations left the "shared" -log10(mass) term only
+  # approximately shared, so partialling on one of them could not clean both axes. Here the term removed
+  # is literally the same number on both sides, which is what makes the partial correlation exact.
   if (!all(c("expected_mw_kDa", "apex_fraction") %in% names(G)))
     stop("globularity_check.txt lacks expected_mw_kDa/apex_fraction - re-run globularity_check().")
   G <- G[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & is.finite(apex_fraction)]
-  fitG <- if (requireNamespace("MASS", quietly = TRUE))
-            MASS::rlm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
-          else stats::lm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
-  G[, deviation_log10_ours := stats::predict(fitG, G) - log10(expected_mw_kDa)]
-
-  keep <- intersect(c("protein_id", "deviation_log10_ours", "expected_mw_kDa", "apex_fraction", "class"), names(G))
-  J <- merge(G[, ..keep], D[, .(protein_id, mw_kDa, pos, deviation_log10_gradseq)], by = "protein_id")
-  J <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_gradseq)]
+  keep <- intersect(c("protein_id", "expected_mw_kDa", "apex_fraction", "class"), names(G))
+  J <- merge(G[, ..keep], D[, .(protein_id, mw_kDa, pos)], by = "protein_id")
   if (!nrow(J)) stop("No shared proteins.")
+  mwdiff <- abs(J$expected_mw_kDa - J$mw_kDa) / pmax(J$mw_kDa, 1e-9)
+  message(sprintf("Proteins in both datasets: %d. Monomer mass agreement between the two annotations: %.1f%% within 5%% - using expected_mw_kDa for BOTH axes.",
+                  nrow(J), 100 * mean(mwdiff < 0.05, na.rm = TRUE)))
+  J[, lgm := log10(expected_mw_kDa)]
+  .rob <- function(f, dat) if (requireNamespace("MASS", quietly = TRUE)) MASS::rlm(f, data = dat) else stats::lm(f, data = dat)
+  fitG <- .rob(lgm ~ apex_fraction, J)
+  fitD <- .rob(lgm ~ pos,           J)
+  J[, deviation_log10_ours    := stats::predict(fitG, J) - lgm]
+  J[, deviation_log10_gradseq := stats::predict(fitD, J) - lgm]
+  J <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_gradseq)]
+  if (!nrow(J)) stop("No shared proteins with finite deviations.")
+
+  # HOW MUCH POSITIONAL SIGNAL DOES EACH TECHNIQUE ACTUALLY CARRY? This is the number that explains why
+  # the two axes come out on wildly different scales. A deviation is (slope of that dataset's mass-position
+  # fit) x (residual position), so a technique whose position barely tracks mass produces a nearly flat
+  # slope, a compressed axis, and a mass-adjusted deviation that is almost pure noise. Correlating that
+  # against anything is meaningless, so it is measured and reported rather than silently plotted.
+  .r2 <- function(f) { p <- stats::predict(f, J); suppressWarnings(stats::cor(p, J$lgm, use = "complete.obs")^2) }
+  r2_sec <- .r2(fitG); r2_grd <- .r2(fitD)
+  message(sprintf("Positional signal - share of the variance in monomer mass explained by elution/migration position: SEC %.1f%%, Grad-seq %.1f%%.",
+                  100 * r2_sec, 100 * r2_grd))
+  message(sprintf("   Axis spread follows directly from that: the mass-position slopes are %.4f (SEC) and %.4f (Grad-seq) log10 units per fraction, so the two deviation axes CANNOT share a scale.",
+                  stats::coef(fitG)[2], stats::coef(fitD)[2]))
+  .weak <- c("SEC", "Grad-seq")[c(r2_sec, r2_grd) < 0.05]
+  if (length(.weak))
+    warning("In ", paste(.weak, collapse = " and "), " the migration position explains under 5% of the variance in ",
+            "monomer mass, so that axis carries essentially no positional information and its mass-adjusted deviation ",
+            "is close to pure noise. A correlation against it is not interpretable - read the partial rho as an upper ",
+            "bound near zero, not as a measurement.", call. = FALSE, immediate. = TRUE)
   ct <- suppressWarnings(stats::cor.test(J$deviation_log10_ours, J$deviation_log10_gradseq, method = "spearman"))
 
   # PARTIAL correlation controlling for monomer mass. Both deviations are fitted(position) - log10(mass),
@@ -1063,24 +1117,30 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
     if (sum(ok) >= 3L) out[ok] <- stats::residuals(stats::lm(y[ok] ~ z[ok]))
     out
   }
-  J[, lgm := log10(expected_mw_kDa)]
+  # The control variable is log10(expected_mw_kDa) - the SAME column both deviations were built from a
+  # moment ago, so the term being removed is identical on both sides rather than merely similar.
   pc <- .pcor(J$deviation_log10_ours, J$deviation_log10_gradseq, J$lgm)
   J[, dev_ours_adj := .resid_on(deviation_log10_ours,     lgm)]
   J[, dev_grad_adj := .resid_on(deviation_log10_gradseq,  lgm)]
   r2o <- suppressWarnings(stats::cor(J$deviation_log10_ours,    J$lgm, use = "complete.obs")^2)
   r2g <- suppressWarnings(stats::cor(J$deviation_log10_gradseq, J$lgm, use = "complete.obs")^2)
 
-  message("Proteins in both datasets: ", nrow(J))
-  message(sprintf("Deviation agreement (SEC vs sedimentation): raw Spearman rho = %+.3f (p = %.3g)",
-                  unname(ct$estimate), ct$p.value))
-  message(sprintf("   PARTIAL Spearman rho, monomer mass held constant = %+.3f (p = %.3g)  <- this is the honest number",
+  message(sprintf("Deviation agreement (SEC vs sedimentation): raw Spearman rho = %+.3f (p = %.3g, n = %d)",
+                  unname(ct$estimate), ct$p.value, nrow(J)))
+  message(sprintf("   PARTIAL Spearman rho, monomer mass held constant = %+.3f (p = %.3g)",
                   pc$rho, pc$p))
-  message(sprintf("   (monomer mass alone explains %.0f%% of the SEC deviation and %.0f%% of the sedimentation one; equivalently, migration position explains %.0f%% and %.0f%% of the variance in monomer mass)",
-                  100 * r2o, 100 * r2g, 100 * (1 - r2o), 100 * (1 - r2g)))
-  if (is.finite(pc$rho) && abs(unname(ct$estimate)) > 0.6 && abs(pc$rho) < 0.3)
+  message(sprintf("   (monomer mass alone explains %.1f%% of the SEC deviation and %.1f%% of the sedimentation one)",
+                  100 * r2o, 100 * r2g))
+  if (min(r2_sec, r2_grd) < 0.05) {
+    message("   => NOT INTERPRETABLE. With one axis carrying essentially no positional signal, its mass-adjusted")
+    message("      deviation is close to pure noise, and a partial correlation against noise is not a measurement of")
+    message("      agreement. The honest statement is that this gradient does not resolve ordinary proteins well")
+    message("      enough to be compared with SEC at the level of individual proteins.")
+  } else if (is.finite(pc$rho) && abs(unname(ct$estimate)) > 0.6 && abs(pc$rho) < 0.3) {
     warning("The raw correlation is largely an artefact of the shared -log10(monomer mass) term; with mass held ",
             "constant the agreement drops to ", sprintf("%+.3f", pc$rho), ". Report the PARTIAL value.",
             call. = FALSE, immediate. = TRUE)
+  }
   message("   The two techniques weight mass and shape differently (s ~ M^(2/3)/(f/f0) versus R_s ~ (f/f0)M^(1/3)), ",
           "so only the AGREEMENT is meaningful, not the magnitudes.")
 
@@ -1118,8 +1178,11 @@ gradseq_vs_sec_deviation <- function(gs, metabolite, condition = NULL, position 
       scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both\n(mass-adjusted)") +
       geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       labs(title = "The same comparison with monomer mass removed from both axes",
-           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass): what the separation adds beyond what the\nprotein's mass already dictates. THE UNITS ARE NOT FOLD-CHANGES. Partial Spearman rho = %+.3f (p = %.3g, n = %d).\nMass alone explains %.0f%% of the SEC deviation and %.0f%% of the sedimentation one - that shared term is what\ninflates the raw correlation in the previous panel.",
-                              pc$rho, pc$p, pc$n, 100 * r2o, 100 * r2g),
+           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass). THE UNITS ARE NOT FOLD-CHANGES, and the two\naxes are NOT on a common scale: each is (that dataset's mass-position slope) x (residual position), and those slopes\nare %.4f (SEC) and %.4f (Grad-seq) log10 units per fraction. Position explains %.1f%% of the variance in monomer mass\nby SEC and %.1f%% by sedimentation. Partial Spearman rho = %+.3f (p = %.3g, n = %d).%s",
+                              stats::coef(fitG)[2], stats::coef(fitD)[2], 100 * r2_sec, 100 * r2_grd,
+                              pc$rho, pc$p, pc$n,
+                              if (min(r2_sec, r2_grd) < 0.05)
+                                "\n*** NOT INTERPRETABLE: one axis carries almost no positional signal, so it is close to pure noise. ***" else ""),
            x = "mass-adjusted deviation, Grad-seq", y = "mass-adjusted deviation, this study") + theme_bw()
     tryCatch({ grDevices::pdf(.gs_dir("sec_vs_gradseq_deviation.pdf"), width = 7.5, height = 6)
                print(g); print(gb); grDevices::dev.off() },
