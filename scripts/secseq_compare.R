@@ -77,6 +77,9 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 }
 
 # ---- 1. load ---------------------------------------------------------------------------------------
+# the most recent parse, so the later steps can be called without passing it back in every time
+.sq_cache <- new.env(parent = emptyenv())
+
 secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col = NULL,
                         fraction_prefix = "SEC-Fraction", skip = NULL) {
   if (!file.exists(file)) { f2 <- here(file); if (file.exists(f2)) file <- f2 else stop("File not found: ", file) }
@@ -125,7 +128,9 @@ secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col 
   dir.create(.sq_dir(), recursive = TRUE, showWarnings = FALSE)
   fwrite(cbind(D, as.data.table(Mn)), .sq_dir("secseq_profiles.csv"))
   message("Parsed ", nrow(D), " protein profile(s) over fractions ", min(fno), "-", max(fno), ".")
-  invisible(list(meta = D, profiles = Mn, fractions = fno))
+  out <- list(meta = D, profiles = Mn, fractions = fno, file = file)
+  .sq_cache$sq <- out          # so secseq_vs_sec() can be called without re-passing it
+  invisible(out)
 }
 
 # ---- 2. which way round is the fraction axis? ------------------------------------------------------
@@ -203,11 +208,19 @@ secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak")
 }
 
 # ---- 4. the cross-lab comparison -------------------------------------------------------------------
-secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
+secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log10(2),
                           restrict_to_calibrated = FALSE, save_plots = TRUE) {
   # restrict_to_calibrated defaults to FALSE because the deviation below is computed from a fit of mass
   # against elution POSITION and never touches the standards curve - so proteins outside the calibrated
   # MW interval are perfectly usable here, and excluding them would only discard data.
+  if (is.null(sq)) {
+    if (is.null(.sq_cache$sq))
+      stop("No SEC-seq data loaded. Run  sq <- secseq_load(\"data/raw/<the SEC-seq table>.xlsx\")  first, ",
+           "then either secseq_vs_sec(sq, metabolite = \"...\") or just secseq_vs_sec(metabolite = \"...\").")
+    sq <- .sq_cache$sq
+    message("Using the SEC-seq table loaded earlier: ",
+            if (is.null(sq$file)) "<cached>" else basename(as.character(sq$file)), ".")
+  }
   S <- secseq_selfcheck(sq, save_plots = FALSE)
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
@@ -315,6 +328,15 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
   r2p <- suppressWarnings(stats::cor(P$deviation_log10_published, P$lgm, use = "complete.obs")^2)
   message(sprintf("   (monomer mass alone explains %.0f%% of the deviation here and %.0f%% in the published data)",
                   100 * r2o, 100 * r2p))
+  # Read that the other way round and it is the interpretable number: because the deviation IS the
+  # residual of log10(mass) ~ position, the share of the deviation NOT explained by mass is exactly the
+  # share of log10(mass) that elution position does explain. Report it directly, and say plainly that
+  # restricting the mass range (restrict_to_calibrated) deflates it - a classic range-restriction effect,
+  # not a measure of how badly the column performs.
+  message(sprintf("   Equivalently: elution position explains %.0f%% of the variance in monomer mass here and %.0f%% in the published data.",
+                  100 * (1 - r2o), 100 * (1 - r2p)))
+  if (isTRUE(restrict_to_calibrated))
+    message("   NOTE you restricted the mass range, which mechanically lowers both figures. Re-run with restrict_to_calibrated = FALSE to see them on the full range.")
 
   # the reproducible set: anomalous, in the same direction, in both datasets
   P[, anom_ours := abs(deviation_log10_ours) > dev_cut]
@@ -323,14 +345,25 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
   P[, reproducible := anom_ours & anom_pub & same_direction]
   # ...and the same set after removing the shared mass term, so the shortlist cannot be an artefact
   # of a protein simply being small or large in both datasets.
+  # THE CUTOFF CANNOT BE dev_cut HERE. The mass-adjusted deviation is no longer a mass ratio: it is
+  # (slope of the mass-position fit) x (residual elution position), so its scale is compressed by
+  # however weak that fit is, and a fold-change threshold would simply never be met - it silently
+  # returned an empty set. Each axis therefore gets its own robust spread-based cutoff, and the
+  # fold-equivalent is reported so the number stays interpretable.
+  so <- stats::mad(P$dev_ours_adj, na.rm = TRUE); sp <- stats::mad(P$dev_pub_adj, na.rm = TRUE)
+  if (!is.finite(so) || so <= 0) so <- stats::sd(P$dev_ours_adj, na.rm = TRUE)
+  if (!is.finite(sp) || sp <= 0) sp <- stats::sd(P$dev_pub_adj, na.rm = TRUE)
+  cut_o <- 2 * so; cut_p <- 2 * sp
   P[, reproducible_massadj := is.finite(dev_ours_adj) & is.finite(dev_pub_adj) &
-        abs(dev_ours_adj) > dev_cut & abs(dev_pub_adj) > dev_cut &
+        abs(dev_ours_adj) > cut_o & abs(dev_pub_adj) > cut_p &
         sign(dev_ours_adj) == sign(dev_pub_adj)]
   message(sprintf("Anomalous (>%.1f-fold) here: %.1f%% | in the published data: %.1f%% | REPRODUCIBLE in both, same direction: %d protein(s) (%.1f%% of the shared set).",
                   10^dev_cut, 100 * mean(P$anom_ours), 100 * mean(P$anom_pub),
                   sum(P$reproducible), 100 * mean(P$reproducible)))
-  message(sprintf("   after removing the shared monomer-mass term, %d protein(s) (%.1f%%) remain reproducibly anomalous - use THIS set.",
-                  sum(P$reproducible_massadj), 100 * mean(P$reproducible_massadj)))
+  message(sprintf("   after removing the shared monomer-mass term: cutoff = 2 x robust SD, i.e. %.3f here and %.3f in the published data (log10 units, NOT fold-change);\n   %d protein(s) (%.1f%%) are beyond it in both datasets and in the same direction - use THIS set.",
+                  cut_o, cut_p, sum(P$reproducible_massadj), 100 * mean(P$reproducible_massadj)))
+  message(sprintf("   For scale: the mass-adjusted deviations span %.3f to %.3f (this study), so the fold-change cutoff used above (%.2f-fold) does not apply on this axis.",
+                  min(P$dev_ours_adj, na.rm = TRUE), max(P$dev_ours_adj, na.rm = TRUE), 10^dev_cut))
   fwrite(P, .sq_dir("secseq_vs_sec.csv"))
   fwrite(P[reproducible == TRUE][order(-abs(deviation_log10_ours))], .sq_dir("secseq_reproducible_anomalies.csv"))
   fwrite(P[reproducible_massadj == TRUE][order(-abs(dev_ours_adj))], .sq_dir("secseq_reproducible_anomalies_massadj.csv"))
@@ -354,8 +387,8 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
       scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both\n(mass-adjusted)") +
       geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       labs(title = "The same comparison with monomer mass removed from both axes",
-           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass), i.e. what the chromatography\nadds beyond what the protein's mass already dictates. Partial Spearman rho = %+.3f (p = %.3g, n = %d).\nMass alone explains %.0f%% of the deviation here and %.0f%% in the published data - that shared term is\nwhat inflates the raw correlation in the previous panel.",
-                              pc$rho, pc$p, pc$n, 100 * r2o, 100 * r2p),
+           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass): what the chromatography adds beyond what\nthe protein's mass already dictates. THE UNITS ARE NO LONGER FOLD-CHANGES - each axis is (slope of that\ndataset's mass-position fit) x (residual elution position), so the two scales are not comparable and only the\nagreement is. Partial Spearman rho = %+.3f (p = %.3g, n = %d); red = beyond 2 robust SD in both, same direction.\nThe parallel diagonal streaks are the fraction grid: proteins sharing an elution fraction in both datasets\nfall on a line as their mass varies.",
+                              pc$rho, pc$p, pc$n),
            x = "mass-adjusted deviation, published SEC-seq", y = "mass-adjusted deviation, this study") + theme_bw()
     g2 <- ggplot(melt(P[, .(protein_id, `this study` = deviation_log10_ours, `published` = deviation_log10_published)],
                       id.vars = "protein_id", variable.name = "dataset", value.name = "deviation"),
