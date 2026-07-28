@@ -67,7 +67,8 @@
 #   category_protein_annotation.txt    per protein: category + every annotation flag (auditable)
 #   GOenrichment_<go_col>_<category>.txt   enriched GO terms per category
 #   category_annotation_barplots.pdf   the percentages side by side across categories
-#   category_pI_charge.pdf             pI per category (violin) + pI vs elution deviation (artefact test)
+#   category_physchem.pdf              the two chromatography-artefact tests: pI and GRAVY per category
+#                                      (violins) and each against elution deviation across all proteins
 #   GOenrichment_<category>.pdf        GO bar plots
 # =============================================================================
 
@@ -145,6 +146,17 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   list(pI = (lo + hi) / 2, net_charge = q, charge_per_res = q / length(aa))
 }
 
+# GRAVY (Kyte-Doolittle grand average of hydropathy): the mean of the raw KD values over the sequence.
+# Positive = hydrophobic overall. Tested here because a silica-based SEC matrix can retain hydrophobic
+# proteins, which then elute LATE and read as sub-monomer - a chromatography artefact, not biology.
+.gravy <- function(seq) {
+  aa <- strsplit(toupper(gsub("[^A-Za-z]", "", seq)), "")[[1]]
+  if (!length(aa)) return(NA_real_)
+  v <- unname(.KD[aa]); v <- v[is.finite(v)]
+  if (!length(v)) return(NA_real_)
+  mean(v)
+}
+
 .foldindex <- function(seq, window = 51L) {
   aa <- strsplit(toupper(gsub("[^A-Za-z]", "", seq)), "")[[1]]
   if (!length(aa)) return(list(global = NA_real_, disorder_frac = NA_real_, length = 0L))
@@ -218,7 +230,9 @@ globularity_category_annotation <- function(
   ch <- lapply(U$sequence, function(s) if (is.na(s) || !nzchar(s)) list(pI = NA_real_, net_charge = NA_real_, charge_per_res = NA_real_) else .charge_props(s, buffer_pH))
   U[, `:=`(pI              = vapply(ch, function(x) x$pI, numeric(1)),
            net_charge      = vapply(ch, function(x) x$net_charge, numeric(1)),
-           charge_per_res  = vapply(ch, function(x) x$charge_per_res, numeric(1)))]
+           charge_per_res  = vapply(ch, function(x) x$charge_per_res, numeric(1)),
+           gravy           = vapply(U$sequence, function(s) if (is.na(s) || !nzchar(s)) NA_real_ else .gravy(s),
+                                    numeric(1), USE.NAMES = FALSE))]
   # filament keyword hit over GO terms + protein name (recorded, so every call is auditable)
   .txtcols <- intersect(c("go_p", "go_f", "go_c", "protein_name"), names(U))
   .stxt <- Reduce(function(a, b) paste(a, b, sep = " ; "),
@@ -279,7 +293,7 @@ globularity_category_annotation <- function(
     # ---- per-protein annotation table (auditable) ----
     ann_cols <- intersect(c("accession", "protein_name", "gene_names", "in_complex_portal", "has_interaction",
                             "filament_hit", "filament_terms", "foldindex_global", "foldindex_disorder_frac",
-                            "pI", "net_charge", "charge_per_res"), names(U))
+                            "pI", "net_charge", "charge_per_res", "gravy"), names(U))
     A <- merge(G[, .(protein_id, class, expected_mw_kDa, apparent_mw_kDa, ratio, ffo_vs_monomer)],
                U[, ..ann_cols], by.x = "protein_id", by.y = "accession", all.x = TRUE)
     if (!is.null(PL) && "plddt_disorder_frac" %in% names(PL))
@@ -306,12 +320,13 @@ globularity_category_annotation <- function(
     if ("plddt_disorder_frac" %in% names(A)) A[, idr_plddt := plddt_disorder_frac > 0.4]
     A[, basic_pI      := pI > pI_basic_cut]                          # net-positive at neutral pH
     A[, net_positive  := net_charge > 0]                             # at the running-buffer pH
+    A[, hydrophobic   := gravy > 0]                                  # hydrophobic overall (KD GRAVY)
 
     flags <- intersect(c("in_complex_portal", "has_interaction", "filament_hit",
                          "idr_foldindex", "idr_highfrac", "idr_plddt",
-                         "basic_pI", "net_positive"), names(A))
+                         "basic_pI", "net_positive", "hydrophobic"), names(A))
     # continuous variables compared per category with a two-sided Wilcoxon test (vs all other tested proteins)
-    conts <- intersect(c("pI", "net_charge", "charge_per_res", "foldindex_disorder_frac"), names(A))
+    conts <- intersect(c("pI", "net_charge", "charge_per_res", "gravy", "foldindex_disorder_frac"), names(A))
     .wilcox <- function(ids, v) {
       inn <- A[protein_id %in% ids][[v]]; out <- A[!(protein_id %in% ids)][[v]]
       inn <- inn[is.finite(inn)]; out <- out[is.finite(out)]
@@ -423,8 +438,44 @@ globularity_category_annotation <- function(
              x = "predicted pI", y = "log2(apparent / expected MW)", colour = NULL) +
         theme_bw() + theme(legend.position = "bottom")
 
-      .fpi <- file.path(fig_dir, "category_pI_charge.pdf")
-      tryCatch({ grDevices::pdf(.fpi, width = 8, height = 6); print(g_pi); print(g_pi2); grDevices::dev.off() },
+      # GRAVY: the hydrophobic-interaction counterpart of the pI test. A silica-based SEC matrix can
+      # retain hydrophobic proteins, which elute late and read as sub-monomer.
+      g_gr <- g_gr2 <- NULL
+      if ("gravy" %in% names(A)) {
+        AG <- A[is.finite(gravy)]
+        if (nrow(AG) > 10) {
+          AG[, category := factor(category, levels = levels(AP$category))]
+          g_gr <- ggplot(AG, aes(category, gravy, fill = category)) +
+            geom_violin(alpha = 0.45, colour = NA, scale = "width") +
+            geom_boxplot(width = 0.16, outlier.size = 0.4, fill = "white") +
+            geom_hline(yintercept = 0, linetype = 2, colour = "grey40") +
+            labs(title = paste0("Hydropathy (GRAVY) by elution category - PCM_ctrl_vs_", m),
+                 subtitle = "Above the dashed line = hydrophobic overall. sub_monomer enriched for high GRAVY would indicate\nhydrophobic retention on the silica matrix (artefact) rather than biology.",
+                 x = NULL, y = "GRAVY (Kyte-Doolittle mean hydropathy)") +
+            theme_bw() + theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+          AG2 <- AG[is.finite(ratio) & ratio > 0]
+          rg  <- if (nrow(AG2) > 10) suppressWarnings(stats::cor(AG2$gravy, log2(AG2$ratio), method = "spearman", use = "complete.obs")) else NA_real_
+          rgp <- if (nrow(AG2) > 10) tryCatch(suppressWarnings(stats::cor.test(AG2$gravy, log2(AG2$ratio), method = "spearman"))$p.value, error = function(e) NA_real_) else NA_real_
+          g_gr2 <- ggplot(AG2, aes(gravy, log2(ratio))) +
+            geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+            geom_vline(xintercept = 0, linetype = 3, colour = "grey55") +
+            geom_point(aes(colour = category), alpha = 0.45, size = 0.9) +
+            geom_smooth(method = "loess", se = TRUE, colour = "black", linewidth = 0.6, formula = y ~ x) +
+            labs(title = paste0("GRAVY vs elution deviation - PCM_ctrl_vs_", m),
+                 subtitle = sprintf("y = log2(apparent / expected MW); below 0 = elutes late (retained). Spearman rho = %.3f (p = %.3g).\nA negative trend = hydrophobic proteins retained by the matrix: an artefact, not biology.", rg, rgp),
+                 x = "GRAVY", y = "log2(apparent / expected MW)", colour = NULL) +
+            theme_bw() + theme(legend.position = "bottom")
+          message(sprintf("[%s] GRAVY vs log2(apparent/expected): Spearman rho = %.3f (p = %.3g) over %d protein(s).",
+                          m, rg, rgp, nrow(AG2)))
+        }
+      }
+
+      .fpi <- file.path(fig_dir, "category_physchem.pdf")
+      tryCatch({ grDevices::pdf(.fpi, width = 8, height = 6)
+                 print(g_pi); print(g_pi2)
+                 if (!is.null(g_gr))  print(g_gr)
+                 if (!is.null(g_gr2)) print(g_gr2)
+                 grDevices::dev.off() },
                error = function(e) { message("   !! could not write ", basename(.fpi), ": ", conditionMessage(e))
                                      try(grDevices::dev.off(), silent = TRUE) })
       message(sprintf("[%s] pI vs log2(apparent/expected): Spearman rho = %.3f (p = %.3g) over %d protein(s).",
