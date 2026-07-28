@@ -261,20 +261,79 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
   P <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_published)]
   rho_pos <- suppressWarnings(stats::cor(P$apex_fraction, P$pos_published, method = "spearman"))
   ct  <- suppressWarnings(stats::cor.test(P$deviation_log10_ours, P$deviation_log10_published, method = "spearman"))
+
+  # PARTIAL correlation controlling for monomer mass - THE statistic that matters here.
+  # Both deviations are of the form fitted(position) - log10(monomer mass), so they SHARE the
+  # -log10(mass) term. Whenever position predicts mass poorly - which is the very thing under
+  # investigation - each deviation collapses towards -(log10 mass - mean) and the raw correlation
+  # approaches 1 for that reason alone, telling us nothing about whether the two EXPERIMENTS agree.
+  # Removing the shared mass leaves the question actually being asked: does a protein sit in the same
+  # relative position in both runs, beyond what its mass already dictates?
+  .pcor <- function(x, y, z) {
+    ok <- is.finite(x) & is.finite(y) & is.finite(z); n <- sum(ok)
+    if (n < 10) return(list(rho = NA_real_, p = NA_real_, n = n))
+    rx <- rank(x[ok]); ry <- rank(y[ok]); rz <- rank(z[ok])
+    rxy <- stats::cor(rx, ry); rxz <- stats::cor(rx, rz); ryz <- stats::cor(ry, rz)
+    den <- sqrt((1 - rxz^2) * (1 - ryz^2))
+    if (!is.finite(den) || den <= 0) return(list(rho = NA_real_, p = NA_real_, n = n))
+    r <- (rxy - rxz * ryz) / den
+    tt <- r * sqrt((n - 3) / max(1 - r^2, .Machine$double.eps))
+    list(rho = r, p = 2 * stats::pt(-abs(tt), df = n - 3), n = n)
+  }
+  pc <- .pcor(P$deviation_log10_ours, P$deviation_log10_published, log10(P$expected_mw_kDa))
+  # the same adjustment, in linear form, so it can be plotted: what is left of each deviation
+  # once the shared monomer-mass term has been regressed out of it.
+  .resid_on <- function(y, z) {           # full-length residuals, NA-safe
+    out <- rep(NA_real_, length(y)); ok <- is.finite(y) & is.finite(z)
+    if (sum(ok) >= 3L) out[ok] <- stats::residuals(stats::lm(y[ok] ~ z[ok]))
+    out
+  }
+  P[, lgm := log10(expected_mw_kDa)]
+  P[, dev_ours_adj := .resid_on(deviation_log10_ours,      lgm)]
+  P[, dev_pub_adj  := .resid_on(deviation_log10_published, lgm)]
   message(sprintf("Elution POSITION agreement (Spearman, note the axes run opposite ways): rho = %+.3f", rho_pos))
-  message(sprintf("DEVIATION agreement - do both labs flag the SAME proteins as eluting off their monomer mass?\n   Spearman rho = %+.3f (p = %.3g, n = %d)",
+  message(sprintf("DEVIATION agreement - do both labs flag the SAME proteins as eluting off their monomer mass?\n   raw Spearman rho = %+.3f (p = %.3g, n = %d)",
                   unname(ct$estimate), ct$p.value, nrow(P)))
+  message(sprintf("   PARTIAL Spearman rho, monomer mass held constant = %+.3f (p = %.3g)  <- this is the honest number",
+                  pc$rho, pc$p))
+  # Both deviations contain the term -log10(monomer mass) by construction. If elution position is a
+  # poor predictor of mass, each deviation is dominated by that shared term and the RAW correlation
+  # is high whatever the experiments did. Only the partial correlation speaks to the experiments.
+  if (is.finite(pc$rho) && is.finite(unname(ct$estimate))) {
+    if (abs(unname(ct$estimate)) > 0.6 && abs(pc$rho) < 0.3) {
+      warning("The raw deviation correlation (", sprintf("%+.3f", unname(ct$estimate)),
+              ") is largely an artefact: both deviations share the term -log10(monomer mass), and with mass ",
+              "held constant the agreement drops to ", sprintf("%+.3f", pc$rho),
+              ". Report the PARTIAL value, not the raw one.", call. = FALSE, immediate. = TRUE)
+      message("   => Do NOT quote the raw rho. The two datasets agree mainly because they are plotted against the same monomer masses.")
+    } else if (abs(pc$rho) >= 0.3) {
+      message("   => The agreement survives removing the shared mass term, so it reflects reproducible chromatographic behaviour.")
+    }
+  }
+  # how much of each deviation is just the mass term? (R^2 of deviation on log10 mass)
+  r2o <- suppressWarnings(stats::cor(P$deviation_log10_ours,      P$lgm, use = "complete.obs")^2)
+  r2p <- suppressWarnings(stats::cor(P$deviation_log10_published, P$lgm, use = "complete.obs")^2)
+  message(sprintf("   (monomer mass alone explains %.0f%% of the deviation here and %.0f%% in the published data)",
+                  100 * r2o, 100 * r2p))
 
   # the reproducible set: anomalous, in the same direction, in both datasets
   P[, anom_ours := abs(deviation_log10_ours) > dev_cut]
   P[, anom_pub  := abs(deviation_log10_published) > dev_cut]
   P[, same_direction := sign(deviation_log10_ours) == sign(deviation_log10_published)]
   P[, reproducible := anom_ours & anom_pub & same_direction]
+  # ...and the same set after removing the shared mass term, so the shortlist cannot be an artefact
+  # of a protein simply being small or large in both datasets.
+  P[, reproducible_massadj := is.finite(dev_ours_adj) & is.finite(dev_pub_adj) &
+        abs(dev_ours_adj) > dev_cut & abs(dev_pub_adj) > dev_cut &
+        sign(dev_ours_adj) == sign(dev_pub_adj)]
   message(sprintf("Anomalous (>%.1f-fold) here: %.1f%% | in the published data: %.1f%% | REPRODUCIBLE in both, same direction: %d protein(s) (%.1f%% of the shared set).",
                   10^dev_cut, 100 * mean(P$anom_ours), 100 * mean(P$anom_pub),
                   sum(P$reproducible), 100 * mean(P$reproducible)))
+  message(sprintf("   after removing the shared monomer-mass term, %d protein(s) (%.1f%%) remain reproducibly anomalous - use THIS set.",
+                  sum(P$reproducible_massadj), 100 * mean(P$reproducible_massadj)))
   fwrite(P, .sq_dir("secseq_vs_sec.csv"))
   fwrite(P[reproducible == TRUE][order(-abs(deviation_log10_ours))], .sq_dir("secseq_reproducible_anomalies.csv"))
+  fwrite(P[reproducible_massadj == TRUE][order(-abs(dev_ours_adj))], .sq_dir("secseq_reproducible_anomalies_massadj.csv"))
 
   if (save_plots) {
     g1 <- ggplot(P, aes(deviation_log10_published, deviation_log10_ours)) +
@@ -284,10 +343,20 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
       scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both") +
       geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       labs(title = paste0("Do two independent SEC experiments agree on which proteins elute anomalously?  (", metabolite, " control)"),
-           subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nEach dataset is referenced to its OWN bulk behaviour, so no calibration is transferred. Spearman rho = %+.3f (p = %.3g, n = %d).%s",
-                              unname(ct$estimate), ct$p.value, nrow(P),
-                              "\nBOTH axes are residuals from a within-dataset fit of mass against elution position - neither uses a standards calibration."),
+           subtitle = sprintf("Deviation = log10(mass expected at the elution position) - log10(monomer mass); positive = elutes as though heavier.\nBoth axes are residuals from a within-dataset fit - neither uses a standards calibration.\nRaw Spearman rho = %+.3f (p = %.3g, n = %d)  BUT both axes contain the same -log10(monomer mass) term,\nso read the PARTIAL rho instead: %+.3f (p = %.3g). See the next panel.",
+                              unname(ct$estimate), ct$p.value, nrow(P), pc$rho, pc$p),
            x = "deviation, published SEC-seq", y = "deviation, this study") + theme_bw()
+    # the same comparison with the shared monomer-mass term regressed out of both axes
+    g1b <- ggplot(P[is.finite(dev_ours_adj) & is.finite(dev_pub_adj)], aes(dev_pub_adj, dev_ours_adj)) +
+      geom_hline(yintercept = 0, colour = "grey60") + geom_vline(xintercept = 0, colour = "grey60") +
+      geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey45") +
+      geom_point(aes(colour = reproducible_massadj), alpha = 0.45, size = 0.9) +
+      scale_colour_manual(values = c(`FALSE` = "grey65", `TRUE` = "#E15759"), name = "anomalous in both\n(mass-adjusted)") +
+      geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
+      labs(title = "The same comparison with monomer mass removed from both axes",
+           subtitle = sprintf("Each axis is the deviation after regressing out log10(monomer mass), i.e. what the chromatography\nadds beyond what the protein's mass already dictates. Partial Spearman rho = %+.3f (p = %.3g, n = %d).\nMass alone explains %.0f%% of the deviation here and %.0f%% in the published data - that shared term is\nwhat inflates the raw correlation in the previous panel.",
+                              pc$rho, pc$p, pc$n, 100 * r2o, 100 * r2p),
+           x = "mass-adjusted deviation, published SEC-seq", y = "mass-adjusted deviation, this study") + theme_bw()
     g2 <- ggplot(melt(P[, .(protein_id, `this study` = deviation_log10_ours, `published` = deviation_log10_published)],
                       id.vars = "protein_id", variable.name = "dataset", value.name = "deviation"),
                  aes(deviation, fill = dataset)) +
@@ -297,10 +366,12 @@ secseq_vs_sec <- function(sq, metabolite, condition = NULL, dev_cut = log10(2),
            subtitle = paste0("Dotted lines mark a ", round(10^dev_cut, 1), "-fold deviation. If the two distributions have a similar spread,\nthe anomalous population is a property of the proteome rather than of one column."),
            x = "log10(expected mass at position / monomer mass)", y = "density", fill = NULL) +
       theme_bw() + theme(legend.position = "top")
-    tryCatch({ grDevices::pdf(.sq_dir("secseq_vs_sec.pdf"), width = 8, height = 5.5)
-               print(g1); print(g2); grDevices::dev.off() },
+    tryCatch({ grDevices::pdf(.sq_dir("secseq_vs_sec.pdf"), width = 8, height = 6)
+               print(g1); print(g1b); print(g2); grDevices::dev.off() },
              error = function(e) try(grDevices::dev.off(), silent = TRUE))
   }
+  attr(P, "rho_raw")     <- unname(ct$estimate)
+  attr(P, "rho_partial") <- pc$rho
   invisible(P)
 }
 
