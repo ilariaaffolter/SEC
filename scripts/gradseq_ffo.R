@@ -69,8 +69,8 @@
 #   gradseq_profiles.csv          parsed, normalised sedimentation profiles + peak fraction
 #   gradseq_calibration.pdf       all three fraction -> s models, the anchors, the load zone and where
 #                                 compact proteins of known mass should elute under the model in use
-#   gradseq_ribosome_check.pdf    rps* vs rpl* peak fractions and mean subunit profiles - do the subunits
-#                                 separate as published?
+#   gradseq_anchor_check.pdf      where EVERY anchor particle actually sediments: peak fractions and mean
+#                                 profiles for the ribosomal subunits and for any extra anchor (e.g. GroEL)
 #   gradseq_ffo.csv               per protein: peak fraction, s, absolute f/f0 (monomer assumption)
 #   gradseq_ffo_distribution.pdf  the f/f0 distribution with 1.0 / 1.2 / 1.5 / 2.0 reference lines
 #   sec_vs_gradseq_distribution.pdf   THE HEADLINE: both distributions on one absolute axis
@@ -326,7 +326,7 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
 
   if (all(c("30S", "50S") %in% anchors$name) && anchors[name == "50S"]$fraction <= anchors[name == "30S"]$fraction)
     warning("The 50S anchor does not sediment further than the 30S anchor - the gradient orientation or the ",
-            "fraction numbering may be reversed. Inspect gradseq_ribosome_check.pdf before continuing.", call. = FALSE)
+            "fraction numbering may be reversed. Inspect gradseq_anchor_check.pdf before continuing.", call. = FALSE)
 
   # ---- the physical zero: a particle with s = 0 stays in the load zone ---------------------------
   if (is.null(load_fraction)) load_fraction <- min(fr) - 0.5
@@ -452,36 +452,49 @@ gradseq_calibrate <- function(gs, anchors = NULL, gene_map = NULL, extra_anchors
       coord_cartesian(ylim = c(ylo, max(anchors$s) * 1.15)) + theme_bw() + theme(legend.position = "top")
     tryCatch(ggsave(.gs_dir("gradseq_calibration.pdf"), gp, width = 8, height = 5.5), error = function(e) NULL)
 
-    # Extra anchors are not ribosomal, so they contribute no bar to this histogram - only a dashed line.
-    # Where the anchor names a gene, its OBSERVED peak is drawn too (dotted, with a point on the axis), so
-    # a hand-typed fraction can be checked against the data at a glance.
-    L <- rbindlist(list(cbind(small, subunit = "30S (rps*)"), cbind(large, subunit = "50S (rpl*)")))
-    obs <- if ("observed_fraction" %in% names(anchors)) anchors[is.finite(observed_fraction)] else anchors[0]
-    gr <- ggplot(L, aes(peak_fraction, fill = subunit)) +
+    # EVERY anchor is shown as data here, not just the ribosomal ones: a non-ribosomal anchor such as
+    # GroEL gets its own bar and its own profile trace, so the fraction fed into the calibration can be
+    # checked against where that particle actually sediments.
+    L <- rbindlist(list(cbind(small[, .(peak_fraction)], anchor = "30S (rps*)"),
+                        cbind(large[, .(peak_fraction)], anchor = "50S (rpl*)")))
+    extra_tr <- list(); obs <- anchors[0]
+    if ("gene" %in% names(anchors)) {
+      obs <- anchors[!is.na(gene)]
+      for (i in seq_len(nrow(obs))) {
+        g <- tolower(as.character(obs$gene[i])); ix <- which(!is.na(D$gene) & D$gene == g)
+        if (!length(ix)) next
+        lab <- paste0(obs$name[i], " (", g, ")")
+        L <- rbind(L, data.table(peak_fraction = D$peak_fraction[ix], anchor = lab))
+        pe <- colMeans(gs$profiles[ix, , drop = FALSE]); pe <- pe / max(pe)
+        extra_tr[[lab]] <- pe
+      }
+    }
+    gr <- ggplot(L, aes(peak_fraction, fill = anchor)) +
       geom_histogram(binwidth = 1, position = "identity", alpha = 0.6) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2) +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3,
                 colour = "grey20", inherit.aes = FALSE) +
-      { if (nrow(obs)) geom_vline(data = obs, aes(xintercept = observed_fraction), linetype = 3, colour = "#E15759") } +
-      { if (nrow(obs)) geom_point(data = obs, aes(x = observed_fraction, y = 0), colour = "#E15759",
-                                  size = 2.5, inherit.aes = FALSE) } +
-      labs(title = "Ribosomal subunit peak fractions (sanity check)",
-           subtitle = paste0("The two subunits should peak in clearly distinct fractions, as in the published A260 profile.\n",
-                             "Dashed lines are the anchor fractions used for the calibration. Anchors that are NOT ribosomal ",
-                             "contribute no bar\nhere - only a line; where one names a gene, its observed peak is marked in red ",
-                             "so the supplied value can be checked."),
-           x = "peak fraction", y = "proteins", fill = NULL) + theme_bw()
-    gc2 <- ggplot(data.table(fraction = rep(fr, 2),
-                             value = c(ps, pl),
-                             trace = rep(c("30S proteins (rps*)", "50S proteins (rpl*)"), each = length(fr))),
+      { if (nrow(obs) && "observed_fraction" %in% names(obs))
+          geom_vline(data = obs[is.finite(observed_fraction)], aes(xintercept = observed_fraction),
+                     linetype = 3, colour = "#E15759") } +
+      labs(title = "Anchor check: where each calibration anchor actually sediments",
+           subtitle = paste0("Bars are the proteins belonging to each anchor particle. Dashed lines are the fractions fed into the\n",
+                             "calibration; a red dotted line marks the OBSERVED peak of a named gene, so a hand-typed fraction can be\n",
+                             "checked. The two ribosomal subunits should peak in clearly distinct fractions, as in the published A260 profile."),
+           x = "peak fraction", y = "proteins", fill = NULL) + theme_bw() + theme(legend.position = "top")
+    trn <- c(list(`30S proteins (rps*)` = ps, `50S proteins (rpl*)` = pl), extra_tr)
+    gc2 <- ggplot(rbindlist(lapply(names(trn), function(n)
+                    data.table(fraction = fr, value = trn[[n]], trace = n))),
                   aes(fraction, value, colour = trace)) +
       geom_line(linewidth = 0.8) +
       geom_vline(data = anchors, aes(xintercept = fraction), linetype = 2, colour = "grey40") +
       geom_text(data = anchors, aes(x = fraction, y = Inf, label = name), vjust = 1.4, size = 3, colour = "grey20", inherit.aes = FALSE) +
-      labs(title = "Mean ribosomal subunit profiles",
-           subtitle = "Each trace is the mean normalised profile of that subunit's proteins, scaled to its own maximum.\nThe dashed lines are the anchor fractions actually used for the calibration.",
+      labs(title = "Mean sedimentation profile of each anchor particle",
+           subtitle = paste0("Each trace is the mean normalised profile of the proteins belonging to that anchor, scaled to its own maximum.\n",
+                             "A sharp single peak means the anchor is well defined; a broad or split trace means it is not, and the\n",
+                             "calibration inherits that uncertainty. Dashed lines are the fractions actually used."),
            x = "fraction", y = "relative signal", colour = NULL) + theme_bw() + theme(legend.position = "top")
-    tryCatch({ grDevices::pdf(.gs_dir("gradseq_ribosome_check.pdf"), width = 7.5, height = 5)
+    tryCatch({ grDevices::pdf(.gs_dir("gradseq_anchor_check.pdf"), width = 8, height = 5.5)
                print(gr); print(gc2); grDevices::dev.off() },
              error = function(e) try(grDevices::dev.off(), silent = TRUE))
   }
@@ -628,12 +641,14 @@ gradseq_ffo <- function(gs, cal, position = c("com", "peak"), mass_map = NULL, v
       theme_bw() + theme(legend.position = "top")
     tryCatch(ggsave(.gs_dir("gradseq_ffo_distribution.pdf"), g, width = 8.5, height = 5.5), error = function(e) NULL)
   }
+  attr(D, "model") <- cal$model              # so gradseq_vs_sec() can name the calibration on its figures
+  attr(D, "load_fraction") <- lf
   invisible(D)
 }
 
 # ---- 4. join to this project's SEC data ------------------------------------------------------------
 gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2, vbar = .VBAR,
-                           restrict_to_calibrated = TRUE, save_plots = TRUE) {
+                           restrict_to_calibrated = TRUE, exclude_load_zone = TRUE, save_plots = TRUE) {
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
   G <- fread(gf)
@@ -661,11 +676,24 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
   # (~1.2). This is exactly the relative->absolute conversion described in the header.
   G[, R_s_cm := .r_min(apparent_mw_kDa * 1000, vbar) * globular_ffo]
   G[, ffo_sec_absolute := ffo_vs_monomer * globular_ffo]
+  message(sprintf("SEC scale put on the absolute one with globular_ffo = %.2f. gradseq_selftest() measures ~1.24 for the classical globular standards, so this is a slight under-statement; pass globular_ffo = 1.25 to use that instead.",
+                  globular_ffo))
 
+  # Carry the load-zone flag across: those proteins have barely sedimented, so their s - and therefore
+  # their f/f0, native mass and implied oligomeric state - are not measurements at all.
+  ffcols <- intersect(c("protein_id", "s_svedberg", "mw_Da", "ffo_gradseq", "frac_used", "near_load_zone"),
+                      names(ff))
   J <- merge(G[, .(protein_id, apparent_mw_kDa, expected_mw_kDa, ffo_vs_monomer, ffo_sec_absolute, R_s_cm)],
-             ff[, .(protein_id, s_svedberg, mw_Da, ffo_gradseq, frac_used)], by = "protein_id")
+             ff[, ..ffcols], by = "protein_id")
   if (!nrow(J)) stop("No protein is present in both datasets - check the accession formats.")
   message("Proteins measured in BOTH datasets: ", nrow(J), " (SEC ", nrow(G), ", Grad-seq ", nrow(ff), ").")
+  if (exclude_load_zone && "near_load_zone" %in% names(J)) {
+    n0 <- nrow(J); J <- J[near_load_zone %in% FALSE]
+    if (n0 - nrow(J) > 0)
+      message(sprintf("   Dropped %d protein(s) (%.0f%%) sitting in the load zone, where s is set by the load band and diffusion rather than by sedimentation. Set exclude_load_zone = FALSE to keep them.",
+                      n0 - nrow(J), 100 * (n0 - nrow(J)) / n0))
+    if (!nrow(J)) stop("Every shared protein is in the load zone - the sedimentation data cannot support this comparison.")
+  }
 
   # Siegel & Monty: mass without a shape assumption, then the true f/f0 and the implied oligomeric state
   J[, M_native_Da := .M_native(R_s_cm, s_svedberg, vbar)]
@@ -676,9 +704,24 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
   msec <- stats::median(J$ffo_sec_absolute, na.rm = TRUE)
   mgrd <- stats::median(J$ffo_gradseq,      na.rm = TRUE)
   mtru <- stats::median(J$ffo_true,         na.rm = TRUE)
-  message(sprintf("Median absolute f/f0 - SEC: %.2f | Grad-seq: %.2f | Siegel-Monty combined: %.2f",
-                  msec, mgrd, mtru))
+  .mdl <- attr(ff, "model"); if (is.null(.mdl)) .mdl <- "unknown"
+  message(sprintf("Median absolute f/f0 over %d shared protein(s) - SEC: %.2f | Grad-seq ('%s' calibration): %.2f | Siegel-Monty combined: %.2f",
+                  nrow(J), msec, .mdl, mgrd, mtru))
   message(sprintf("Median implied oligomeric state (M_native / M_monomer): %.2f", stats::median(J$n_implied, na.rm = TRUE)))
+  # TWO HARD PHYSICAL FLOORS, both worth checking before anything here is believed:
+  #   f/f0 >= 1   - a sphere has the least friction for a given mass
+  #   n >= 1      - a native particle cannot be lighter than one copy of its own monomer
+  # Either being widely violated means the inputs are wrong, not the proteins.
+  .imp_t <- mean(J$ffo_true  < 1,    na.rm = TRUE)
+  .imp_n <- mean(J$n_implied < 0.75, na.rm = TRUE)   # 0.75 allows for ordinary measurement error
+  message(sprintf("Physical floors: %.0f%% of combined f/f0 below 1 (impossible), %.0f%% of implied oligomeric states below 0.75 (impossible - lighter than one monomer).",
+                  100 * .imp_t, 100 * .imp_n))
+  if (.imp_t > 0.05 || .imp_n > 0.05)
+    warning(sprintf(paste0("The Siegel-Monty combination violates a physical floor for a substantial share of proteins ",
+                           "(%.0f%% with f/f0 < 1, %.0f%% with n < 0.75). Since the algebra is verified by gradseq_selftest(), ",
+                           "the fault is in an input: almost certainly the fraction -> s calibration, which is extrapolated far ",
+                           "below its anchors. Do not quote native masses or oligomeric states from this table."),
+                   100 * .imp_t, 100 * .imp_n), call. = FALSE)
   message("Per-protein values are EXPLORATORY: different lab, buffer, growth condition and lysis, so the ",
           "complexes present need not match.")
 
@@ -687,12 +730,13 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
       data.table(ffo = J$ffo_sec_absolute, src = paste0("SEC (this study, x", globular_ffo, ")")),
       data.table(ffo = J$ffo_gradseq,      src = "Grad-seq (sedimentation)"),
       data.table(ffo = J$ffo_true,         src = "combined (Siegel-Monty)")))[is.finite(ffo) & ffo > 0]
-    # f/f0 < 1 is physically impossible (the sphere is the minimum-friction shape), so a curve sitting
+    # f/f0 < 1 is physically impossible (the sphere is the minimum-friction shape), so a curve with mass
     # below 1 is proof that its calibration is wrong - stamp that on the figure rather than let it be read
-    # as "very compact".
-    .bad <- c(SEC = stats::median(J$ffo_sec_absolute, na.rm = TRUE),
-              `Grad-seq` = mgrd, combined = mtru)
-    .bad <- names(.bad)[is.finite(.bad) & .bad < 1]
+    # as "very compact". Judge each curve by the SHARE it puts in the impossible region, not by whether its
+    # median happens to clear 1: a distribution can be centred above 1 and still be badly broken.
+    .frac <- function(x) mean(x < 1, na.rm = TRUE)
+    .sh <- c(SEC = .frac(J$ffo_sec_absolute), `Grad-seq` = .frac(J$ffo_gradseq), combined = .frac(J$ffo_true))
+    .bad <- names(.sh)[is.finite(.sh) & .sh > 0.05]
     refs <- data.table(x = c(1.0, 1.2, 1.5, 2.0), lab = c("SPHERE (hard floor)", "globular", "elongated", "extended"))
     g1 <- ggplot(L, aes(ffo, fill = src)) +
       annotate("rect", xmin = 0, xmax = 1, ymin = -Inf, ymax = Inf, fill = "grey55", alpha = 0.22) +
@@ -702,34 +746,47 @@ gradseq_vs_sec <- function(ff, metabolite, condition = NULL, globular_ffo = 1.2,
                 size = 2.7, colour = "grey25", inherit.aes = FALSE) +
       scale_x_log10() +
       labs(title = paste0("How compact is the proteome? Two independent techniques (", metabolite, " control)"),
-           subtitle = paste0("All on the ABSOLUTE scale. The SEC curve is the relative f/f0 multiplied by ", globular_ffo,
-                             " (the absolute f/f0 of the globular calibrants).\n",
+           subtitle = paste0("All on the ABSOLUTE scale, over ", nrow(J), " proteins measured in both. The SEC curve is the relative f/f0 multiplied by ",
+                             globular_ffo, " (the absolute\nf/f0 of the globular calibrants); the sedimentation curve uses the '", .mdl, "' fraction -> s calibration.\n",
                              "Oligomers inflate the SEC estimate (n^1/3) and deflate the sedimentation one (n^2/3); the combined curve removes both.\n",
-                             "SHADED REGION IS PHYSICALLY IMPOSSIBLE: f/f0 >= 1 always, since a sphere has the least friction for a given mass.",
+                             "SHADED REGION IS PHYSICALLY IMPOSSIBLE: f/f0 >= 1 always, since a sphere has the least friction for a given mass.\n",
+                             sprintf("Share in the impossible region - SEC %.0f%%, Grad-seq %.0f%%, combined %.0f%%.",
+                                     100 * .sh[["SEC"]], 100 * .sh[["Grad-seq"]], 100 * .sh[["combined"]]),
                              if (length(.bad)) paste0("\n*** ", paste(.bad, collapse = " and "),
-                                                      " sits below 1 -> that calibration is WRONG, not the proteins. Do not interpret it; use gradseq_vs_sec_deviation(). ***") else ""),
+                                                      " put more than 5% below the floor -> that input is WRONG, not the proteins. Use gradseq_vs_sec_deviation(). ***") else ""),
            x = "absolute f/f0", y = "density", fill = NULL) +
       theme_bw() + theme(legend.position = "top")
     if (length(.bad))
-      message("!! ", paste(.bad, collapse = " and "), " median f/f0 is below 1, which is physically impossible - ",
-              "the sedimentation calibration is unusable. Use gradseq_vs_sec_deviation() instead.")
-    tryCatch(ggsave(.gs_dir("sec_vs_gradseq_distribution.pdf"), g1, width = 8, height = 5.5), error = function(e) NULL)
+      message("!! ", paste(.bad, collapse = " and "), " put more than 5% of proteins below f/f0 = 1, which is physically ",
+              "impossible - that input is unusable on the absolute scale. Use gradseq_vs_sec_deviation() instead.")
+    tryCatch(ggsave(.gs_dir("sec_vs_gradseq_distribution.pdf"), g1, width = 8, height = 6), error = function(e) NULL)
 
     P <- J[is.finite(ffo_sec_absolute) & is.finite(ffo_gradseq) & ffo_sec_absolute > 0 & ffo_gradseq > 0]
     rho <- if (nrow(P) > 10) suppressWarnings(stats::cor(log(P$ffo_sec_absolute), log(P$ffo_gradseq), method = "spearman")) else NA_real_
     g2 <- ggplot(P, aes(ffo_gradseq, ffo_sec_absolute, colour = pmin(pmax(n_implied, 0.5), 8))) +
+      annotate("rect", xmin = 0, xmax = 1, ymin = 0, ymax = Inf, fill = "grey55", alpha = 0.20) +
+      annotate("rect", xmin = 0, xmax = Inf, ymin = 0, ymax = 1, fill = "grey55", alpha = 0.20) +
       geom_abline(slope = 1, intercept = 0, linetype = 2, colour = "grey50") +
       geom_point(alpha = 0.5, size = 1) +
       scale_x_log10() + scale_y_log10() + scale_colour_viridis_c(option = "C", trans = "log10", name = "n implied") +
       labs(title = "Opposite-bias diagnostic: SEC vs sedimentation f/f0",
-           subtitle = sprintf("Agreement on the dashed line means the monomer assumption holds. Systematic offsets indicate assembly:\noligomers sit ABOVE the line (SEC inflated by n^1/3, sedimentation deflated by n^2/3). Spearman rho(log) = %.2f.", rho),
+           subtitle = sprintf("Agreement on the dashed line means the monomer assumption holds. Systematic offsets indicate assembly:\noligomers sit ABOVE the line (SEC inflated by n^1/3, sedimentation deflated by n^2/3). Spearman rho(log) = %.2f, n = %d.\nShaded bands are impossible (f/f0 < 1) on the respective axis%s.",
+                              rho, nrow(P), if (isTRUE(exclude_load_zone)) "; load-zone proteins already excluded" else ""),
            x = "f/f0 from sedimentation", y = "f/f0 from SEC (absolute)") + theme_bw()
-    g3 <- ggplot(J[is.finite(M_native_Da) & M_native_Da > 0], aes(mw_Da / 1000, M_native_Da / 1000)) +
+    M3 <- J[is.finite(M_native_Da) & M_native_Da > 0]
+    sub_mono <- mean(M3$M_native_Da < M3$mw_Da * 0.75, na.rm = TRUE)
+    g3 <- ggplot(M3, aes(mw_Da / 1000, M_native_Da / 1000)) +
+      # ymin must be positive, not 0: the y axis is log-scaled and 0 would be dropped
+      geom_ribbon(data = data.table(x = range(M3$mw_Da / 1000),
+                                    ylo = min(M3$M_native_Da / 1000, na.rm = TRUE) * 0.5),
+                  aes(x = x, ymin = ylo, ymax = x), fill = "grey55", alpha = 0.20, inherit.aes = FALSE) +
       geom_abline(slope = 1, intercept = log10(c(1, 2, 4)), linetype = 2, colour = "grey60") +
       geom_point(alpha = 0.45, size = 0.9, colour = "steelblue") +
       scale_x_log10() + scale_y_log10() +
       labs(title = "Native mass without a shape assumption (Siegel & Monty)",
-           subtitle = "M_native = 6*pi*eta*N_A*R_s*s/(1-vbar*rho). Dashed = 1x, 2x, 4x the monomer mass.\nEXPLORATORY: the two measurements come from different labs and conditions.",
+           subtitle = sprintf("M_native = 6*pi*eta*N_A*R_s*s/(1-vbar*rho). Dashed = 1x, 2x, 4x the monomer mass.\nThe SHADED region below the 1x line is impossible: a native particle cannot weigh less than one copy of its own\nmonomer. %.0f%% of proteins fall there%s\nEXPLORATORY: the two measurements come from different labs and conditions.",
+                              100 * sub_mono,
+                              if (sub_mono > 0.05) ", which falsifies an input - almost certainly the fraction -> s calibration." else "."),
            x = "monomer mass (kDa, UniProt)", y = "native mass (kDa, combined)") + theme_bw()
     tryCatch({ grDevices::pdf(.gs_dir("sec_vs_gradseq_perprotein.pdf"), width = 7.5, height = 5.5)
                print(g2); print(g3); grDevices::dev.off() },
