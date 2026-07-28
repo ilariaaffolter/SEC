@@ -202,6 +202,14 @@ problematic_fractions <- c() #c("P2_36", "P2_47", "P2_48") # to annotate manuall
 ################### GRID-SEARCH
 
 perform_prot_grid_search <- T
+# The grid search is the single most expensive step (it runs findProteinFeatures once per parameter
+# combination). It is now CACHED per comparison in output/<comparison_id>/ProtGridSearch.RData and is
+# skipped automatically whenever that file exists, so a re-render never repeats it.
+force_prot_grid_search <- F     # T = recompute even if the cache exists (after changing data/filtering/grid)
+grid_search_from       <- NULL  # e.g. "QTL_83_RM" to copy that comparison's search instead of running one.
+                                # The optimal parameters describe the CHROMATOGRAPHY, not the contrast,
+                                # so borrowing across comparisons of the same SEC setup is defensible -
+                                # but say so in the methods.
 
 # With ibmt pval < 5e-3 in the control-control comparison experiment - TODO refine the way we look at this, but good enough for now!
 #proteins_to_exclude <- c("P04816", "P07003", "P07118", "P07822", "P08839", "P08997", "P09126", "P0A6C1", "P0A6C5", "P0A6F3", "P0A6H5", "P0A6T5", "P0A6U3", "P0A6W0", "P0A6W9", "P0A725", "P0A759", "P0A780", "P0A7B3", "P0A7G2", "P0A817", "P0A862", "P0A8I1", "P0A8P3", "P0A8V0", "P0A951", "P0A9H1", "P0A9P9", "P0AA16", "P0AAN5", "P0AAR3", "P0AAZ7", "P0AB14", "P0AB43", "P0AB46", "P0AB61", "P0AB65", "P0AB80", "P0ABE2", "P0ABH0", "P0AD53", "P0ADA1", "P0ADE6", "P0ADU5", "P0ADW8", "P0AE08", "P0AE48", "P0AE60", "P0AE63", "P0AEM4", "P0AES6", "P0AES9", "P0AFF6", "P0AFG0", "P0AFH0", "P0AFI7", "P0AFL3", "P0AFM4", "P0AFW0", "P0AFW8", "P0AGG4", "P0C0L9", "P10346", "P10442", "P16700", "P21151", "P21177", "P21889", "P23538", "P23843", "P23878", "P25524", "P26602", "P27278", "P27303", "P28248", "P30176", "P32141", "P32685", "P33219", "P33355", "P36659", "P36979", "P37613", "P37665", "P37691", "P39274", "P39408", "P40191", "P42616", "P45470", "P52119", "P64490", "P64506", "P64519", "P64559", "P68206", "P69222", "P69795", "P69822", "P76141", "P76243", "P76422", "P76423", "P76569", "P77695", "Q2M7X4", "Q46798")
@@ -1255,7 +1263,37 @@ pepTracesList_filtered_minN <- subset(pepTracesList_filtered, trace_subset_ids =
 
 ```{r perform_prot_grid_search}
 
-if(perform_prot_grid_search == T) {
+# CACHE GATE (handover fix): this chunk used to re-run the whole search on EVERY render whenever
+# perform_prot_grid_search was TRUE. The result was written to ProtGridSearch.RData by the next chunk,
+# but nothing ever read it back while the flag stayed TRUE - so the most expensive step in the pipeline
+# repeated itself on every re-render for no gain. It is now skipped when a saved search exists for THIS
+# comparison. Set force_prot_grid_search <- T (or delete the file) to recompute after changing the
+# upstream data, the filtering, or the grid.
+.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")
+if (!exists("force_prot_grid_search")) force_prot_grid_search <- F
+
+# BORROW A SEARCH FROM ANOTHER COMPARISON. The optimal feature-finding parameters describe the
+# CHROMATOGRAPHY - peak width, smoothing, correlation structure - not the biological contrast, so a
+# search run on one comparison of the same SEC setup is a legitimate starting point for another and
+# saves the single most expensive step. Set grid_search_from <- "QTL_83_RM" (any comparison_id whose
+# ProtGridSearch.RData exists) to copy it in. Flag it in the methods if you use it.
+if (!exists("grid_search_from")) grid_search_from <- NULL
+if (!is.null(grid_search_from) && !file.exists(.gridsearch_file)) {
+  .src <- here::here("output", grid_search_from, "ProtGridSearch.RData")
+  if (file.exists(.src)) {
+    file.copy(.src, .gridsearch_file)
+    message("Borrowed the grid search from comparison '", grid_search_from, "' -> ", .gridsearch_file,
+            ". These parameters describe the chromatography, not the contrast; state this in the methods.")
+  } else message("grid_search_from = '", grid_search_from, "' but ", .src, " does not exist - ignoring.")
+}
+
+.run_grid <- isTRUE(perform_prot_grid_search) &&
+             (isTRUE(force_prot_grid_search) || !file.exists(.gridsearch_file))
+if (isTRUE(perform_prot_grid_search) && !.run_grid)
+  message("Grid search SKIPPED: reusing ", .gridsearch_file,
+          " (delete it, or set force_prot_grid_search <- T, to recompute).")
+
+if(.run_grid == T) {
 # NOTE (faithful fix): the original sampled from `pepTracesList_filtered_minN$ctrl_1` and then set
 # `grid_peptideTraces <- grid_peptideTraces$ctrl_1`. This design has NO condition named "ctrl_1"
 # (conditions are strainBY/strainRM/strain31/strain83), so both returned NULL and the search could
@@ -1313,7 +1351,10 @@ grid_peptideTraces <- integrateTraceIntensities(grid_subset,
 .grid_cores <- if (is.na(.grid_cores) || .grid_cores < 2L) 1L else min(.grid_cores - 1L, 8L)
 .grid_ncomb <- length(grid_corrs) * length(grid_windows) * length(grid_smoothing) * length(grid_rt_heights)
 message("Grid search: ", .grid_ncomb, " parameter combinations x ", num_ids,
-        " proteins on ", .grid_cores, " core(s). Runs once; then set perform_prot_grid_search <- F to reuse.")
+        " proteins on ", .grid_cores, " core(s). Runs once; the result is cached and reused automatically.")
+.brk(paste0("grid search START: ", .grid_ncomb, " combinations x ", num_ids, " proteins on ",
+            .grid_cores, " core(s)"))
+.grid_t0 <- Sys.time()
 
 # Wrapped in tryCatch: performProteinGridSearch uses a parallel cluster (snow), and if ANY single
 # parameter combination errors inside CCprofiler (e.g. the "object 'merged' not found" edge case),
@@ -1334,6 +1375,7 @@ proteinFeatures_grid <- tryCatch(
   }
 )
 
+.brk(paste0("grid search DONE in ", round(as.numeric(difftime(Sys.time(), .grid_t0, units = "mins")), 1), " min"))
 if (!is.null(proteinFeatures_grid)) lapply(proteinFeatures_grid, head, n = 2) }
 ```
 
@@ -1343,9 +1385,13 @@ if (!is.null(proteinFeatures_grid)) lapply(proteinFeatures_grid, head, n = 2) }
 # findProteinFeatures call below can USE them. Previously this chunk was eval=FALSE, so its result
 # was never fed forward and the real run used hard-coded parameters regardless of the search.
 
-.gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")   # per-comparison (out_dir from SETUP)
+# .gridsearch_file is defined in the previous chunk (the cache gate); re-stated here so this chunk can
+# still be run on its own.
+if (!exists(".gridsearch_file")) .gridsearch_file <- file.path(out_dir, "ProtGridSearch.RData")
+if (!exists(".run_grid")) .run_grid <- FALSE
 
-if (perform_prot_grid_search == TRUE && exists("proteinFeatures_grid") && !is.null(proteinFeatures_grid)) {
+# Score ONLY when the grid actually ran in this render. Otherwise fall through to loading the cache.
+if (exists("proteinFeatures_grid") && !is.null(proteinFeatures_grid)) {
   # scoring wrapped too: if the grid ran but scoring/q-value estimation fails, don't kill the knit
   tryCatch({
     proteinFeatures_scoredData <- lapply(proteinFeatures_grid, calculateCoelutionScore)
@@ -1357,7 +1403,16 @@ if (perform_prot_grid_search == TRUE && exists("proteinFeatures_grid") && !is.nu
   }, error = function(e)
     message("Grid scoring failed (", conditionMessage(e), "); findProteinFeatures will use defaults."))
 } else if (file.exists(.gridsearch_file)) {
-  load(.gridsearch_file)   # reuse a previous run's saved best parameters
+  # reuse a previous run's saved parameters. Load into a temp environment and take ONLY bestStats:
+  # the file also holds proteinFeatures_grid (one full feature set per parameter combination), which is
+  # large and not needed downstream.
+  .ge <- new.env(); load(.gridsearch_file, envir = .ge)
+  if (!is.null(.ge$proteinFeatures_bestStats)) {
+    proteinFeatures_bestStats <- .ge$proteinFeatures_bestStats
+    message("Loaded cached grid-search parameters from ", .gridsearch_file, ".")
+    print(proteinFeatures_bestStats)
+  } else message("Cache ", .gridsearch_file, " has no proteinFeatures_bestStats - using defaults.")
+  rm(.ge)
 } else {
   message("No grid-search results available - findProteinFeatures will fall back to default parameters.")
 }
@@ -1387,7 +1442,9 @@ message("findProteinFeatures will use: corr_cutoff = ", best_corr_cutoff,
         ", window_size = ", best_window_size,
         ", smoothing_length = ", best_smoothing_length,
         ", rt_height = ", best_rt_height,
-        if (perform_prot_grid_search) "  (chosen by grid search)" else "  (loaded / default)")
+        if (isTRUE(.run_grid)) "  (chosen by the grid search that ran in THIS render)"
+        else if (exists("proteinFeatures_bestStats")) "  (loaded from the cached grid search)"
+        else "  (fallback defaults - no grid search available)")
 
 # Persist the chosen parameters to a small human-readable file so they survive after the console
 # scrolls (the message above is console-only). Lands in output/<comparison_id>/output_files/.
