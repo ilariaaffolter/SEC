@@ -134,17 +134,21 @@ secseq_load <- function(file, sheet = 1, id_col = NULL, mw_col = NULL, gene_col 
 }
 
 # ---- 2. which way round is the fraction axis? ------------------------------------------------------
-secseq_orientation <- function(sq, save_plots = TRUE) {
-  D <- sq$meta
+secseq_orientation <- function(sq, position = c("peak", "com"), save_plots = TRUE) {
+  position <- match.arg(position)
+  D <- copy(sq$meta)
+  # ONE position measure for both tests. Using the peak for one and the centre of mass for the other made
+  # them answer subtly different questions, and a spurious disagreement here aborts the whole comparison.
+  D[, pos := if (position == "com") com_fraction else as.numeric(peak_fraction)]
   rib <- D[grepl("^rp[sl][a-z]$", gene)]
   # test 1: the ribosome (~1-2.5 MDa) must lie at the high-mass end of the axis
   t1 <- if (nrow(rib) >= 5) {
-    med_rib <- stats::median(rib$peak_fraction); med_all <- stats::median(D$peak_fraction)
+    med_rib <- stats::median(rib$pos); med_all <- stats::median(D$pos)
     list(ok = TRUE, ribosome_fraction = med_rib, overall_fraction = med_all,
          high_mass_at = if (med_rib < med_all) "low fractions" else "high fractions", n = nrow(rib))
   } else list(ok = FALSE, n = nrow(rib))
   # test 2: sign of the global monomer-mass vs position correlation
-  rho <- suppressWarnings(stats::cor(log10(D$mw_kDa), D$com_fraction, method = "spearman", use = "complete.obs"))
+  rho <- suppressWarnings(stats::cor(log10(D$mw_kDa), D$pos, method = "spearman", use = "complete.obs"))
   t2_high_mass_at <- if (rho < 0) "low fractions" else "high fractions"
 
   if (isTRUE(t1$ok)) {
@@ -161,13 +165,13 @@ secseq_orientation <- function(sq, save_plots = TRUE) {
 
   if (save_plots) {
     dir.create(.sq_dir(), recursive = TRUE, showWarnings = FALSE)
-    g1 <- ggplot(D, aes(com_fraction, mw_kDa)) +
+    g1 <- ggplot(D, aes(pos, mw_kDa)) +
       geom_point(alpha = 0.25, size = 0.7, colour = "grey45") +
-      { if (nrow(rib)) geom_point(data = rib, aes(com_fraction, mw_kDa), colour = "firebrick", size = 1.4) else NULL } +
+      { if (nrow(rib)) geom_point(data = rib, aes(pos, mw_kDa), colour = "firebrick", size = 1.4) else NULL } +
       scale_y_log10() +
       labs(title = "Orientation of the published SEC fraction axis",
            subtitle = sprintf("Red = ribosomal proteins (the ~1-2.5 MDa particle, so they mark the high-mass end).\nSpearman rho(log mass, position) = %+.3f  =>  high mass at %s.", rho, high_mass_at),
-           x = "centre-of-mass fraction (published data)", y = "monomer mass (kDa)") + theme_bw()
+           x = paste0(position, " fraction (published data)"), y = "monomer mass (kDa)") + theme_bw()
     tryCatch(ggsave(.sq_dir("secseq_orientation.pdf"), g1, width = 7, height = 5), error = function(e) NULL)
   }
   invisible(list(high_mass_at = high_mass_at, rho = rho, ribosome = rib))
@@ -177,9 +181,12 @@ secseq_orientation <- function(sq, save_plots = TRUE) {
 # A robust fit of log10(monomer mass) against elution position describes how a TYPICAL protein of this
 # proteome elutes on that column. The residual is then "how much heavier the protein would have to be to
 # elute here", i.e. exactly the quantity globularity_check reports as log(apparent/expected).
-secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak"), save_plots = TRUE) {
+secseq_selfcheck <- function(sq, orientation = NULL, position = c("peak", "com"), save_plots = TRUE) {
+  # DEFAULT "peak": this project's side of the comparison uses apex_fraction, which is a peak. Comparing a
+  # peak against a centre of mass compares two different quantities - a centre of mass is pulled along the
+  # axis by the tail of the profile - so the two datasets must be summarised the same way.
   position <- match.arg(position)
-  if (is.null(orientation)) orientation <- secseq_orientation(sq, save_plots = FALSE)
+  if (is.null(orientation)) orientation <- secseq_orientation(sq, position = position, save_plots = FALSE)
   D <- copy(sq$meta)
   D[, pos := if (position == "com") com_fraction else as.numeric(peak_fraction)]
   D <- D[is.finite(pos) & is.finite(mw_kDa) & mw_kDa > 0]
@@ -209,7 +216,9 @@ secseq_selfcheck <- function(sq, orientation = NULL, position = c("com", "peak")
 
 # ---- 4. the cross-lab comparison -------------------------------------------------------------------
 secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log10(2),
+                          position = c("peak", "com"),
                           restrict_to_calibrated = FALSE, save_plots = TRUE) {
+  position <- match.arg(position)
   # restrict_to_calibrated defaults to FALSE because the deviation below is computed from a fit of mass
   # against elution POSITION and never touches the standards curve - so proteins outside the calibrated
   # MW interval are perfectly usable here, and excluding them would only discard data.
@@ -221,7 +230,7 @@ secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log
     message("Using the SEC-seq table loaded earlier: ",
             if (is.null(sq$file)) "<cached>" else basename(as.character(sq$file)), ".")
   }
-  S <- secseq_selfcheck(sq, save_plots = FALSE)
+  S <- secseq_selfcheck(sq, position = position, save_plots = FALSE)
   gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
   if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
   G <- fread(gf)
@@ -252,28 +261,50 @@ secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log
   # bounded, and correlating the two is meaningless.)
   # This project's fraction axis runs the other way (fraction 1 = void), which the fitted slope absorbs;
   # the sign convention - positive = migrates as though HEAVIER than its monomer - is preserved.
+  # BOTH FITS ARE DONE ON THE SHARED SET, AGAINST ONE SINGLE MASS COLUMN. Previously each deviation was
+  # fitted on its own population against its own mass annotation (expected_mw_kDa here, mw_kDa there), so
+  # the "shared" -log10(mass) term was only APPROXIMATELY shared - and partialling on one of the two could
+  # not fully clean both axes. Fitting both here, on the same proteins and the same masses, makes the term
+  # removed literally identical on both sides, which is what makes the partial correlation exact.
   G <- G[is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & is.finite(apex_fraction)]
-  fitG <- if (requireNamespace("MASS", quietly = TRUE))
-            MASS::rlm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
-          else stats::lm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
-  G[, deviation_log10_ours := stats::predict(fitG, G) - log10(expected_mw_kDa)]
   if ("ratio" %in% names(G)) G[, calibration_ratio_log10 := log10(ratio)]   # kept for reference only
-
-  keepcols <- intersect(c("protein_id", "apex_fraction", "deviation_log10_ours", "calibration_ratio_log10",
+  keepcols <- intersect(c("protein_id", "apex_fraction", "calibration_ratio_log10",
                           "expected_mw_kDa", "apparent_mw_kDa", "class"), names(G))
   J <- merge(G[, ..keepcols],
-             S[, .(protein_id, gene, mw_kDa, pos_published = pos, deviation_log10_published = deviation_log10)],
+             S[, .(protein_id, gene, mw_kDa, pos_published = pos)],
              by = "protein_id")
   if (!nrow(J)) stop("No shared proteins - check the accession formats in both tables.")
   message("Proteins measured in BOTH SEC datasets: ", nrow(J),
           " (this study ", nrow(G), ", published ", nrow(S), ").")
   # sanity: do the two labs agree on the monomer mass they used?
   mwdiff <- abs(J$expected_mw_kDa - J$mw_kDa) / pmax(J$mw_kDa, 1)
-  message(sprintf("Monomer mass agreement between the two annotation sources: %.1f%% within 5%%.", 100 * mean(mwdiff < 0.05, na.rm = TRUE)))
+  message(sprintf("Monomer mass agreement between the two annotation sources: %.1f%% within 5%% - using expected_mw_kDa for BOTH axes.",
+                  100 * mean(mwdiff < 0.05, na.rm = TRUE)))
+  J[, lgm := log10(expected_mw_kDa)]
+  .rob <- function(f, dat) if (requireNamespace("MASS", quietly = TRUE)) MASS::rlm(f, data = dat) else stats::lm(f, data = dat)
+  fitG <- .rob(lgm ~ apex_fraction, J)
+  fitS <- .rob(lgm ~ pos_published, J)
+  J[, deviation_log10_ours      := stats::predict(fitG, J) - lgm]
+  J[, deviation_log10_published := stats::predict(fitS, J) - lgm]
 
   P <- J[is.finite(deviation_log10_ours) & is.finite(deviation_log10_published)]
+  if (!nrow(P)) stop("No shared proteins with finite deviations.")
   rho_pos <- suppressWarnings(stats::cor(P$apex_fraction, P$pos_published, method = "spearman"))
   ct  <- suppressWarnings(stats::cor.test(P$deviation_log10_ours, P$deviation_log10_published, method = "spearman"))
+  # How much positional signal does each dataset actually carry? This is what sets the scale of each
+  # deviation axis - a deviation is (that dataset's mass-position slope) x (residual position) - so a
+  # dataset whose position barely tracks mass yields a compressed axis and a mass-adjusted deviation that
+  # is close to noise. Measure it and say so, rather than plotting it as though it were a measurement.
+  .r2f <- function(f) suppressWarnings(stats::cor(stats::predict(f, P), P$lgm, use = "complete.obs")^2)
+  r2_ours <- .r2f(fitG); r2_pub <- .r2f(fitS)
+  message(sprintf("Positional signal - share of the variance in monomer mass explained by elution position: this study %.1f%%, published %.1f%% (slopes %.4f and %.4f log10 units per fraction).",
+                  100 * r2_ours, 100 * r2_pub, stats::coef(fitG)[2], stats::coef(fitS)[2]))
+  .weak <- c("this study", "the published data")[c(r2_ours, r2_pub) < 0.05]
+  if (length(.weak))
+    warning("In ", paste(.weak, collapse = " and "), " elution position explains under 5% of the variance in monomer ",
+            "mass, so that axis carries almost no positional information and its mass-adjusted deviation is close to ",
+            "noise. Treat the partial rho as an upper bound near zero, not as a measurement of agreement.",
+            call. = FALSE, immediate. = TRUE)
 
   # PARTIAL correlation controlling for monomer mass - THE statistic that matters here.
   # Both deviations are of the form fitted(position) - log10(monomer mass), so they SHARE the
@@ -301,7 +332,8 @@ secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log
     if (sum(ok) >= 3L) out[ok] <- stats::residuals(stats::lm(y[ok] ~ z[ok]))
     out
   }
-  P[, lgm := log10(expected_mw_kDa)]
+  # lgm was set on J above and inherited here; the control is that SAME column, so the term removed from
+  # the two axes is identical rather than merely similar.
   P[, dev_ours_adj := .resid_on(deviation_log10_ours,      lgm)]
   P[, dev_pub_adj  := .resid_on(deviation_log10_published, lgm)]
   message(sprintf("Elution POSITION agreement (Spearman, note the axes run opposite ways): rho = %+.3f", rho_pos))
@@ -326,8 +358,11 @@ secseq_vs_sec <- function(sq = NULL, metabolite, condition = NULL, dev_cut = log
   # how much of each deviation is just the mass term? (R^2 of deviation on log10 mass)
   r2o <- suppressWarnings(stats::cor(P$deviation_log10_ours,      P$lgm, use = "complete.obs")^2)
   r2p <- suppressWarnings(stats::cor(P$deviation_log10_published, P$lgm, use = "complete.obs")^2)
-  message(sprintf("   (monomer mass alone explains %.0f%% of the deviation here and %.0f%% in the published data)",
+  message(sprintf("   (monomer mass alone explains %.1f%% of the deviation here and %.1f%% in the published data)",
                   100 * r2o, 100 * r2p))
+  if (min(r2_ours, r2_pub) < 0.05)
+    message("   => NOT INTERPRETABLE: one dataset carries almost no positional signal, so its mass-adjusted deviation ",
+            "is close to noise. Read the partial rho as an upper bound near zero.")
   # Read that the other way round and it is the interpretable number: because the deviation IS the
   # residual of log10(mass) ~ position, the share of the deviation NOT explained by mass is exactly the
   # share of log10(mass) that elution position does explain. Report it directly, and say plainly that
