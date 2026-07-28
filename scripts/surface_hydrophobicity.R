@@ -46,6 +46,9 @@
 # USAGE (RStudio console, project open):
 #   source(here::here("scripts", "surface_hydrophobicity.R"))
 #   surface_selftest()                              # verify the SASA geometry first
+#   # --- getting structures, easiest first ---
+#   alphafold_import_tar("~/Downloads/UP000000625_83333_ECOLI_v4.tar")   # whole proteome, ONE download
+#   surface_priority_list("ATP", n = 200)           # or: a short, defensibly chosen accession list
 #   surface_hydrophobicity(metabolite = "ATP", max_proteins = 300)   # slow; cached and resumable
 #   surface_vs_elution(metabolite = "ATP")          # the test, against elution deviation
 #
@@ -198,6 +201,150 @@ surface_selftest <- function(n_points = c(92, 252), probe = 1.4) {
   roots <- vapply(seq_len(m), find, integer(1))
   areas <- tapply(sasa[sel], roots, sum)
   list(area = max(areas), n_atoms = m)
+}
+
+# ---- 0b. getting the structures ---------------------------------------------------------------------
+# EASIEST ROUTE - ONE FILE, NO LIST. AlphaFold DB publishes whole proteomes as a single tar, so there is
+# no need to pick proteins by hand at all. For E. coli K-12 MG1655 (UniProt proteome UP000000625,
+# taxid 83333) that is roughly 4300 structures in one download:
+#
+#   https://ftp.ebi.ac.uk/pub/databases/alphafold/latest/UP000000625_83333_ECOLI_v4.tar
+#
+# Check the version suffix against the directory listing at
+#   https://ftp.ebi.ac.uk/pub/databases/alphafold/latest/
+# before downloading - it advances with each AlphaFold DB release, and I could not reach that host from
+# the environment where this was written, so the "_v4" above is unverified.
+# Save the tar anywhere and point alphafold_import_tar() at it. If the tar is blocked but single files
+# are not, use surface_priority_list() below to get a short, sensibly chosen accession list instead.
+alphafold_import_tar <- function(tarfile, dest = .struct_dir(), keep_pdb_only = TRUE) {
+  if (!file.exists(tarfile)) { f2 <- here(tarfile); if (file.exists(f2)) tarfile <- f2 else stop("Not found: ", tarfile) }
+  dir.create(dest, recursive = TRUE, showWarnings = FALSE)
+  message("Unpacking ", basename(tarfile), " -> ", dest, " (this takes a few minutes)...")
+  utils::untar(tarfile, exdir = dest)
+  gz <- list.files(dest, pattern = "\\.pdb\\.gz$", full.names = TRUE)
+  if (length(gz)) {
+    message("Decompressing ", length(gz), " .pdb.gz file(s)...")
+    for (g in gz) {
+      out <- sub("\\.gz$", "", g)
+      if (!file.exists(out)) {
+        con <- gzfile(g, "rb"); writeBin(readBin(con, "raw", file.size(g) * 20), out); close(con)
+      }
+      unlink(g)
+    }
+  }
+  if (keep_pdb_only) {
+    junk <- list.files(dest, pattern = "\\.cif(\\.gz)?$", full.names = TRUE)
+    if (length(junk)) { unlink(junk); message("Removed ", length(junk), " .cif file(s) - only PDB is used here.") }
+  }
+  n <- length(list.files(dest, pattern = "^AF-.*\\.pdb$"))
+  message(n, " AlphaFold PDB structure(s) now available in ", dest, ".")
+  invisible(n)
+}
+
+# ---- 0c. a defensible short list, if you must download one protein at a time -------------------------
+# A NOTE ON STUDY DESIGN, because "the 200 proteins known to have interaction partners" is the wrong
+# sample for this particular question. The test correlates surface hydrophobicity against elution
+# deviation. Known interactors mostly elute LARGER than their monomer - that is what having partners
+# means chromatographically - so selecting on interaction status truncates the range of the very
+# variable being predicted, and a correlation computed inside that truncated range is biased towards
+# zero and uninterpretable either way.
+#
+# The default here therefore takes a sample STRATIFIED across the observed elution-deviation range, with
+# interactors and non-interactors balanced inside each stratum. That buys two tests instead of one:
+#   (1) the correlation, now over the full deviation range where it is meaningful;
+#   (2) a cleaner group comparison - do proteins with curated partners have greasier SURFACES than
+#       proteins without, at matched size? That is arguably the sharper test, and it needs both groups.
+# Pass mode = "interactors_only" if you want the list you originally asked for; it is kept because it is
+# still the right sample for a purely descriptive "what do interfaces look like" survey.
+#
+# Ribosomal proteins are excluded in every mode: they are one huge assembly, they would dominate any
+# interactor set, and their elution says more about the particle than about their own surfaces.
+surface_priority_list <- function(metabolite, n = 200, mode = c("stratified", "interactors_only"),
+                                  condition = NULL, restrict_to_calibrated = TRUE,
+                                  complex_portal_file = NULL, seed = 1) {
+  mode <- match.arg(mode)
+  gf <- here("output", paste0("PCM_ctrl_vs_", metabolite), "tables", "globularity_check.txt")
+  if (!file.exists(gf)) stop("No globularity_check.txt for ", metabolite, " - run globularity_check() first.")
+  G <- fread(gf)
+  if ("condition" %in% names(G)) {
+    cn <- unique(as.character(G$condition))
+    cc <- if (!is.null(condition)) condition else { x <- cn[grepl("ctrl|control|ref", cn, ignore.case = TRUE)][1]; if (is.na(x)) cn[1] else x }
+    G <- G[condition == cc]
+  }
+  if (restrict_to_calibrated && "in_calibrated_range" %in% names(G)) G <- G[in_calibrated_range %in% TRUE]
+  G <- G[is.finite(apparent_mw_kDa) & is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & apparent_mw_kDa > 0]
+  G[, dev_log2 := log2(apparent_mw_kDa / expected_mw_kDa)]
+
+  # annotation: gene symbol, curated complex membership, curated binary interactions
+  U <- NULL; sf <- here("output", "uniprot_annotation_shared.RData")
+  if (file.exists(sf)) { e <- new.env(); load(sf, envir = e); U <- as.data.table(e$.uniprot_all) }
+  if (is.null(U)) stop("No UniProt cache - render a comparison first.")
+  U[, acc := as.character(input_id)]
+  U[, gene1 := tolower(sub(" .*$", "", as.character(gene_names)))]
+  U[, has_interaction := if ("cc_interaction" %in% names(U)) !is.na(cc_interaction) & nzchar(cc_interaction) else FALSE]
+  cp <- .complex_portal_members_sf(complex_portal_file)
+  U[, in_complex_portal := if (is.null(cp)) FALSE else toupper(acc) %in% cp]
+  keepU <- intersect(c("acc", "gene1", "protein_name", "has_interaction", "in_complex_portal"), names(U))
+  J <- merge(G, U[, ..keepU], by.x = "protein_id", by.y = "acc")
+  if (!nrow(J)) stop("No overlap between the SEC table and the UniProt cache.")
+
+  # exclude ribosomal proteins
+  is_rib <- grepl("^rp[slm][a-z]$", J$gene1) |
+            grepl("(30S|50S|40S|60S)? ?ribosomal protein", as.character(J$protein_name), ignore.case = TRUE)
+  message("Excluding ", sum(is_rib), " ribosomal protein(s).")
+  J <- J[!is_rib]
+  J[, any_partner := has_interaction %in% TRUE | in_complex_portal %in% TRUE]
+  message(sprintf("%d protein(s) available; %d (%.0f%%) have a curated partner (Complex Portal and/or UniProt interactions).",
+                  nrow(J), sum(J$any_partner), 100 * mean(J$any_partner)))
+
+  set.seed(seed)
+  if (mode == "interactors_only") {
+    P <- J[any_partner == TRUE]
+    setorder(P, -abs(dev_log2))                       # most informative elution behaviour first
+    sel <- head(P, n)
+    message("mode = 'interactors_only': ", nrow(sel), " protein(s). NOTE this sample is selected on ",
+            "interaction status, which truncates the elution-deviation range - use it descriptively, ",
+            "not for the correlation.")
+  } else {
+    # 10 strata across the deviation range, half interactors / half not within each
+    J[, stratum := cut(dev_log2, breaks = unique(stats::quantile(dev_log2, seq(0, 1, 0.1), na.rm = TRUE)),
+                       include.lowest = TRUE, labels = FALSE)]
+    per <- ceiling(n / (2 * length(unique(J$stratum[is.finite(J$stratum)]))))
+    sel <- J[is.finite(stratum), .SD[sample(.N, min(.N, per))], by = .(stratum, any_partner)]
+    if (nrow(sel) > n) sel <- sel[sample(.N, n)]
+    message("mode = 'stratified': ", nrow(sel), " protein(s) spread across ",
+            length(unique(sel$stratum)), " deviation strata, ",
+            sum(sel$any_partner), " with a curated partner and ", sum(!sel$any_partner), " without.")
+  }
+  setorder(sel, -any_partner, -abs(dev_log2))
+  dir.create(.sf_dir(), recursive = TRUE, showWarnings = FALSE)
+  out_cols <- intersect(c("protein_id", "gene1", "protein_name", "expected_mw_kDa", "apparent_mw_kDa",
+                          "dev_log2", "class", "has_interaction", "in_complex_portal", "any_partner"), names(sel))
+  fwrite(sel[, ..out_cols], .sf_dir("surface_priority_list.csv"))
+  writeLines(sel$protein_id, .sf_dir("surface_priority_accessions.txt"))
+  message("Wrote ", .sf_dir("surface_priority_list.csv"), " (annotated) and ",
+          .sf_dir("surface_priority_accessions.txt"), " (one accession per line).")
+  message("Download each as https://alphafold.ebi.ac.uk/files/AF-<ACCESSION>-F1-model_v4.pdb into ",
+          .struct_dir(), " - or take the whole proteome in one tar, see alphafold_import_tar().")
+  invisible(sel)
+}
+
+# same Complex Portal parser as globularity_category_annotation.R, kept local so this script stands alone
+.complex_portal_members_sf <- function(file = NULL) {
+  f <- file
+  if (is.null(f)) {
+    cand <- list.files(here("data", "raw"), pattern = "^Complex_portal.*\\.tsv$", full.names = TRUE)
+    if (!length(cand)) { message("No Complex Portal export in data/raw - using UniProt interactions only."); return(NULL) }
+    f <- cand[1]
+  } else if (!file.exists(f)) { f2 <- here("data", "raw", f); if (!file.exists(f2)) return(NULL); f <- f2 }
+  cp <- tryCatch(as.data.table(read.csv(f, sep = "\t", header = TRUE, check.names = FALSE)), error = function(e) NULL)
+  if (is.null(cp) || !nrow(cp)) return(NULL)
+  idc <- grep("identifier", names(cp), ignore.case = TRUE, value = TRUE)
+  col <- if (length(idc)) grep("molecul|stoichiom", idc, ignore.case = TRUE, value = TRUE)[1] else NA_character_
+  if (is.na(col)) col <- if (length(idc)) idc[1] else NA_character_
+  if (is.na(col)) return(NULL)
+  unique(toupper(unlist(regmatches(cp[[col]],
+    gregexpr("[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}", cp[[col]])))))
 }
 
 # ---- 1. per-protein surface metrics -----------------------------------------------------------------
