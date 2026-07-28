@@ -1569,10 +1569,24 @@ save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"
 # CCprofiler steps (scoreFeatures, extractFeatureVals, fillFeatureVals) are single-threaded inside the
 # package and are the slowest part of the render after findProteinFeatures itself.
 .featvals_file <- file.path(out_dir, "rdata", "featureVals.RData")
+.featvals_part <- file.path(out_dir, "rdata", "featureVals_partial.RData")
 if (load_proteinFeatures.RData && file.exists(.featvals_file)) {
   load(.featvals_file)   # -> proteinFeaturesFiltered, *_featureVals, *_featureValsFilled
   message("Loaded cached feature values from ", .featvals_file,
           " (skipped scoreFeatures / extractFeatureVals / fillFeatureVals).")
+} else if (load_proteinFeatures.RData && file.exists(.featvals_part)) {
+  # A previous render got through the 8.6 h extraction but was interrupted before the end. Resume from
+  # that checkpoint: only fillFeatureVals (minutes) still has to run.
+  load(.featvals_part)   # -> proteinFeaturesFiltered, proteinFeaturesFiltered_featureVals
+  message("Resuming from the extractFeatureVals checkpoint ", .featvals_part,
+          " - only fillFeatureVals still needs to run.")
+  .brk("resumed from extractFeatureVals checkpoint -> fillFeatureVals")
+  proteinFeaturesFiltered_featureValsFilled <- fillFeatureVals(
+    featureVals = proteinFeaturesFiltered_featureVals,
+    tracesList  = pepTracesList_filtered_minN,
+    design_matrix = design_matrix)
+  save(proteinFeaturesFiltered, proteinFeaturesFiltered_featureVals,
+       proteinFeaturesFiltered_featureValsFilled, file = .featvals_file)
 } else {
 
 #' Score protein features and filter for a detection FDR of 5%
@@ -1585,14 +1599,66 @@ summarizeFeatures(proteinFeaturesFiltered,
                   # PDF=TRUE,
                   # name="output_files/feature_summary_proteinFeaturesFiltered")
 
+# checkpoint the scored features immediately - cheap to save, and it means an interrupt during the
+# very long extraction below does not also cost the scoring
+save(proteinFeaturesFiltered, file = file.path(out_dir, "rdata", "proteinFeaturesFiltered.RData"))
+
 #' ## Extract feature values
+# THE SLOWEST STEP IN THE WHOLE PIPELINE. Measured on this dataset: 8.6 h, against 0.6 h for
+# findProteinFeatures and 0.1 h for fillFeatureVals. It is single-threaded inside CCprofiler, and until
+# now its result was only saved AFTER fillFeatureVals - so an interrupt anywhere in those 8.6 h threw
+# the whole thing away and the next render started from zero. That is what happened here.
+#
+# The fix is to run it in CHUNKS of features and checkpoint each chunk. Extraction is per-feature, so
+# splitting the feature table and row-binding the pieces returns the same object; the guard below
+# verifies that the pieces really do share a structure, and falls back to one plain call if anything
+# about the split looks wrong. The practical gain is resumability: a crash at hour 7 now resumes at
+# hour 7. Delete rdata/featureVals_chunks/ to force a clean re-extraction.
 .brk("extractFeatureVals (FDR 0.05) -- SERIAL CCprofiler step, slow on big data ...")
-proteinFeaturesFiltered_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
-                                             features = proteinFeaturesFiltered,
-                                             design_matrix = design_matrix,
-                                             extract = "subunits_detected",
-                                             imputeZero = T,
-                                             verbose = F)
+.fv_chunk_dir <- file.path(out_dir, "rdata", "featureVals_chunks")
+dir.create(.fv_chunk_dir, recursive = TRUE, showWarnings = FALSE)
+if (!exists("featureval_chunks")) featureval_chunks <- 20L   # more chunks = finer checkpoints
+
+.extract_chunked <- function() {
+  FT <- proteinFeaturesFiltered
+  idcol <- intersect(c("protein_id", "complex_id", "feature_id"), names(FT))[1]
+  if (is.na(idcol)) stop("no id column to split on")
+  ids <- unique(as.character(FT[[idcol]]))
+  if (length(ids) < 2 * featureval_chunks) stop("too few features to be worth chunking")
+  grp <- split(ids, cut(seq_along(ids), breaks = featureval_chunks, labels = FALSE))
+  out <- vector("list", length(grp)); t0 <- Sys.time()
+  for (k in seq_along(grp)) {
+    cf <- file.path(.fv_chunk_dir, sprintf("chunk_%03d.rds", k))
+    if (file.exists(cf)) { out[[k]] <- readRDS(cf); next }
+    sub <- FT[as.character(FT[[idcol]]) %in% grp[[k]], ]
+    out[[k]] <- extractFeatureVals(traces = pepTracesList_filtered_minN,
+                                   features = sub, design_matrix = design_matrix,
+                                   extract = "subunits_detected", imputeZero = T, verbose = F)
+    saveRDS(out[[k]], cf)
+    .brk(sprintf("  extractFeatureVals chunk %d/%d done (%.1f min elapsed)", k, length(grp),
+                 as.numeric(difftime(Sys.time(), t0, units = "mins"))))
+  }
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) stop("every chunk came back empty")
+  nm <- lapply(out, names)
+  if (length(unique(vapply(nm, function(z) paste(z, collapse = "|"), character(1)))) != 1L)
+    stop("chunks disagree on their columns - not safe to combine")
+  res <- data.table::rbindlist(out, use.names = TRUE, fill = FALSE)
+  if (inherits(out[[1]], "data.table")) res else as.data.frame(res)
+}
+
+proteinFeaturesFiltered_featureVals <- tryCatch(.extract_chunked(), error = function(e) {
+  message("Chunked extraction not used (", conditionMessage(e), "); running the single plain call.")
+  .brk("extractFeatureVals -- falling back to a single plain call")
+  extractFeatureVals(traces = pepTracesList_filtered_minN,
+                     features = proteinFeaturesFiltered,
+                     design_matrix = design_matrix,
+                     extract = "subunits_detected", imputeZero = T, verbose = F)
+})
+# checkpoint before fillFeatureVals, so those hours can never be lost again
+save(proteinFeaturesFiltered, proteinFeaturesFiltered_featureVals,
+     file = file.path(out_dir, "rdata", "featureVals_partial.RData"))
+.brk("extractFeatureVals DONE and checkpointed")
 
 
 #' ## Fill feature values
