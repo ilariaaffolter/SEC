@@ -16,7 +16,7 @@ rmd <- here("analysis", "DiffAnalysis_yeast_QTL.Rmd")
 
 # Comparisons to run (must match names in the `comparisons` registry in the .Rmd).
 # 31 and 83 are the mutant strains; BY and RM the parents (the reference in each pair).
-comparisons_to_run <- c("QTL_83_RM","QTL_83_RM_EtOH","QTL_31_BY", "QTL_31_RM", "QTL_83_BY",
+comparisons_to_run <- c("QTL_83_RM_EtOH","QTL_83_RM","QTL_31_BY", "QTL_31_RM", "QTL_83_BY",
                         "QTL_RM_BY")   # 83 vs RM grown on ethanol (see the EtOH entry in the .Rmd registry)
 # Carbon-source effect (strain83 glucose vs strain83 ethanol): once the mixed .tsv (both searched in one
 # Spectronaut run) is in data/raw/ and its `pattern` is set in the .Rmd registry, add "QTL_83_Glc_vs_EtOH"
