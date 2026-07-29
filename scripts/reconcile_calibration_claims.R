@@ -32,7 +32,9 @@
 suppressPackageStartupMessages({ library(here); library(data.table) })
 
 reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
-                                         surface_csv = NULL, verbose = TRUE) {
+                                         surface_csv = NULL, globular_ffo = 1.25,
+                                         tolerance_fractions = 1, max_oligomer = 4L,
+                                         verbose = TRUE) {
   if (is.null(metabolites)) {
     d <- basename(list.dirs(here("output"), recursive = FALSE))
     metabolites <- sub("^PCM_ctrl_vs_", "", d[grepl("^PCM_ctrl_vs_", d)])
@@ -57,8 +59,17 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
     # meaningful even out of range - the override is what zeroes it, not the measurement
     honest_out <- if ("dev_fractions" %in% names(G)) mean(G$dev_fractions[!inr] <= 1, na.rm = TRUE) else NA_real_
     honest_in  <- if ("dev_fractions" %in% names(G)) mean(G$dev_fractions[inr]  <= 1, na.rm = TRUE) else NA_real_
-    # the non-circular test: f/f0 < 1 is physically impossible
+    # THE NON-CIRCULAR TEST - with the RIGHT threshold. `ffo_vs_monomer` is (apparent/expected)^(1/3),
+    # which is RELATIVE to the globular calibrants: a protein behaving exactly like them scores 1.0 BY
+    # CONSTRUCTION. It is NOT an absolute frictional ratio, so `ffo_vs_monomer < 1` is not a physics
+    # violation at all - it just means "more compact than a typical globular standard", which is possible.
+    # The absolute ratio is ffo_vs_monomer * globular_ffo (~1.25 measured for the classical standards by
+    # gradseq_selftest), so the PHYSICALLY IMPOSSIBLE region is
+    #        ffo_vs_monomer < 1 / globular_ffo  =  0.80
+    # Testing against 1.0 instead of 0.80 counts a large, ordinary population as "impossible" and destroys
+    # the argument. That was a bug in the first version of this script.
     ffo <- if ("ffo_vs_monomer" %in% names(G)) G$ffo_vs_monomer else rep(NA_real_, nrow(G))
+    ffo_floor <- 1 / globular_ffo
     data.table(
       metabolite        = m,
       n                 = nrow(G),
@@ -68,8 +79,11 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
       pct_glob_pooled   = 100 * mean(G$globular_as_expected %in% TRUE),
       honest_glob_in    = 100 * honest_in,
       honest_glob_out   = 100 * honest_out,
-      pct_ffo_lt1_in    = 100 * mean(ffo[inr]  < 1, na.rm = TRUE),
-      pct_ffo_lt1_out   = 100 * mean(ffo[!inr] < 1, na.rm = TRUE))
+      pct_impossible_in  = 100 * mean(ffo[inr]  < ffo_floor, na.rm = TRUE),
+      pct_impossible_out = 100 * mean(ffo[!inr] < ffo_floor, na.rm = TRUE),
+      # kept for comparison: the WRONG threshold the first version used
+      pct_below1_in      = 100 * mean(ffo[inr]  < 1, na.rm = TRUE),
+      pct_below1_out     = 100 * mean(ffo[!inr] < 1, na.rm = TRUE))
   }))
   if (!nrow(per)) stop("Nothing could be read.")
 
@@ -116,6 +130,41 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
                 median(per$honest_glob_in, na.rm = TRUE)))
   }
 
+  # ---- 2b. THE GEOMETRIC NULL -----------------------------------------------------------------------
+  # The objection that matters most: is "80.9% globular inside the calibrated range" impressive, or is it
+  # what you would get from ANY set of elution positions falling in that window?
+  # A protein counts as globular if its apex is within `tolerance_fractions` of ANY of its 1x..max_oligomer
+  # expected positions. Those positions are only log10(max_oligomer)/|slope| fractions apart, and each
+  # carries +-tolerance. So the accepting band has a FIXED width, and the calibrated window has a fixed
+  # width, and their ratio is the share that would pass by geometry alone with no biology involved.
+  cat("\n=========== 2b. HOW MUCH OF 80.9%% IS JUST GEOMETRY? ===========\n")
+  cal <- tryCatch({
+    f <- here("output", paste0("PCM_ctrl_vs_", per$metabolite[1]), "tables", "globularity_standards_check.txt")
+    if (file.exists(f)) fread(f) else NULL }, error = function(e) NULL)
+  if (is.null(cal) || !all(c("elution_fraction", "expected_kDa") %in% names(cal))) {
+    cat("globularity_standards_check.txt not found - cannot compute the geometric null.\n")
+  } else {
+    ok <- is.finite(cal$elution_fraction) & is.finite(cal$expected_kDa) & cal$expected_kDa > 0
+    sl <- stats::coef(stats::lm(log10(cal$expected_kDa[ok]) ~ cal$elution_fraction[ok]))[2]
+    win <- diff(range(cal$elution_fraction[ok]))
+    band <- log10(max_oligomer) / abs(sl) + 2 * tolerance_fractions
+    null_pct <- 100 * min(band / win, 1)
+    obs <- 100 * sum(per$n * per$pct_in_range / 100 * per$pct_glob_in / 100) / sum(per$n * per$pct_in_range / 100)
+    cat(sprintf("calibration slope        = %.3f decades/fraction (%.2fx MW per fraction)\n", sl, 10^abs(sl)))
+    cat(sprintf("calibrated window        = %.2f fractions wide\n", win))
+    cat(sprintf("1x..%dx positions span    = %.2f fractions; +-%g tolerance each side\n",
+                max_oligomer, log10(max_oligomer)/abs(sl), tolerance_fractions))
+    cat(sprintf("=> accepting band        = %.2f fractions = %.1f%% of the window\n", band, null_pct))
+    cat(sprintf("\n   GEOMETRIC NULL  %.1f%%   vs   OBSERVED  %.1f%%   ->  excess %+.1f points\n",
+                null_pct, obs, obs - null_pct))
+    if (obs - null_pct < 15)
+      cat("   Most of the in-range globularity rate is the accepting band being nearly as wide as the\n",
+          "   calibrated window. Do NOT quote 80.9%% as though it were a measurement of the proteome.\n",
+          "   Quote the EXCESS over this null, or narrow tolerance_fractions / max_oligomer and re-run.\n", sep="")
+    else
+      cat("   A substantial excess over geometry - the in-range rate carries real information.\n")
+  }
+
   # ---- 3. range restriction ------------------------------------------------------------------------
   cat("\n=========== 3. IS THE rho DOUBLING JUST RANGE RESTRICTION? ===========\n")
   scsv <- if (!is.null(surface_csv)) surface_csv else here("output", "surface", "surface_vs_elution_allproteins.csv")
@@ -148,17 +197,24 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
 
   # ---- 4. the non-circular test --------------------------------------------------------------------
   cat("\n=========== 4. THE ONE NON-CIRCULAR TEST: f/f0 BELOW THE PHYSICAL FLOOR ===========\n")
-  if (all(is.na(per$pct_ffo_lt1_out))) {
+  if (all(is.na(per$pct_impossible_out))) {
     cat("ffo_vs_monomer not in the table - re-run globularity_check().\n")
   } else {
     cat("f/f0 >= 1 is imposed by PHYSICS, not by the calibration: a sphere has the least friction for a\n")
     cat("given mass. So a floor violation OUTSIDE and not INSIDE is the calibration failing exactly where\n")
     cat("it is extrapolated - and unlike the deviation argument, nothing about it is circular.\n\n")
-    print(per[, .(metabolite, pct_ffo_lt1_in = round(pct_ffo_lt1_in, 1),
-                  pct_ffo_lt1_out = round(pct_ffo_lt1_out, 1))])
+    cat(sprintf("Threshold: ffo_vs_monomer < 1/globular_ffo = %.2f. (Testing against 1.0 is WRONG -\n", 1/globular_ffo))
+    cat("ffo_vs_monomer is RELATIVE to the calibrants, which score 1.0 by construction.)\n\n")
+    print(per[, .(metabolite,
+                  impossible_in  = round(pct_impossible_in, 1),
+                  impossible_out = round(pct_impossible_out, 1),
+                  `below1_in(wrong)`  = round(pct_below1_in, 1),
+                  `below1_out(wrong)` = round(pct_below1_out, 1))])
     cat(sprintf("\n=> median: %.1f%% impossible in range vs %.1f%% out of range.\n",
-                median(per$pct_ffo_lt1_in, na.rm = TRUE), median(per$pct_ffo_lt1_out, na.rm = TRUE)))
-    cat(if (median(per$pct_ffo_lt1_out, na.rm = TRUE) > median(per$pct_ffo_lt1_in, na.rm = TRUE) + 5)
+                median(per$pct_impossible_in, na.rm = TRUE), median(per$pct_impossible_out, na.rm = TRUE)))
+    cat(if (median(per$pct_impossible_in, na.rm = TRUE) > 10)
+      "   WARNING: a large impossible population INSIDE the calibrated range too. That is not the\n   calibration failing where extrapolated - it is failing everywhere, and this test cannot then be\n   used to argue that the extrapolated region is special.\n"
+      else if (median(per$pct_impossible_out, na.rm = TRUE) > median(per$pct_impossible_in, na.rm = TRUE) + 5)
       "   THIS IS YOUR STRONGEST NUMBER. Physics falsifying the calibration precisely where it is\n   extrapolated, with no definitional circularity anywhere in it.\n"
       else "   No clear contrast, so this line of argument is not available. Rely on the coverage figure instead.\n")
   }
