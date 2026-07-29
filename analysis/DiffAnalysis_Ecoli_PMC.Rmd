@@ -2183,12 +2183,75 @@ complexFeaturesCollapsed <- callapseByUniqueFeatureGroups(
 .complex_featureVals_file <- file.path(out_dir, "rdata", "complex_featureVals.RData")
 if(!file.exists(.complex_featureVals_file)){
 
-complex_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
-                                          features = complexFeaturesCollapsed,
-                                          design_matrix = design_matrix,
-                                          extract = "subunits",
-                                          imputeZero = T,
-                                          verbose = F)
+# THIS IS THE STEP THAT STALLS THE COMPLEX SECTION. extractFeatureVals is single-threaded and its cost
+# scales with the TRACES it is handed, not with the number of features - measured at roughly 88 min per
+# call on the yeast data whatever the feature count. Handing it the whole peptide trace list therefore
+# pays that cost in full, and until now nothing was written until it finished, so an interrupted run
+# lost everything.
+# Fix, in two parts: restrict the traces to the proteins that actually appear in the complex features
+# (a complex hypothesis set covers far fewer proteins than the whole proteome, so this is a large
+# saving), and checkpoint in chunks so the work survives an interruption.
+.brk("complex extractFeatureVals -- SERIAL CCprofiler step, the usual stall point ...")
+.cfv_chunk_dir <- file.path(out_dir, "rdata", "complex_featureVals_chunks")
+dir.create(.cfv_chunk_dir, recursive = TRUE, showWarnings = FALSE)
+if (!exists("complex_featureval_chunks")) complex_featureval_chunks <- 10L
+
+.extract_complex_chunked <- function() {
+  FT <- complexFeaturesCollapsed
+  idcol <- intersect(c("complex_id", "feature_id", "protein_id"), names(FT))[1]
+  if (is.na(idcol)) stop("no id column to split on")
+  ids <- unique(as.character(FT[[idcol]]))
+  if (length(ids) < 2 * complex_featureval_chunks) stop("too few features to be worth chunking")
+  .mk <- file.path(.cfv_chunk_dir, "chunk_count.txt")
+  if (file.exists(.mk)) {
+    prev <- suppressWarnings(as.integer(readLines(.mk, warn = FALSE)[1]))
+    if (is.finite(prev) && prev != complex_featureval_chunks) {
+      message("complex_featureval_chunks changed - discarding chunks from the old split.")
+      unlink(list.files(.cfv_chunk_dir, pattern = "^chunk_.*\\.rds$", full.names = TRUE))
+    }
+  }
+  writeLines(as.character(complex_featureval_chunks), .mk)
+  grp <- split(ids, cut(seq_along(ids), breaks = complex_featureval_chunks, labels = FALSE))
+  # the proteins a chunk needs: subunit accessions of the complexes in that chunk
+  pcol <- intersect(c("protein_id", "subunits_detected", "subunits_annotated"), names(FT))[1]
+  out <- vector("list", length(grp)); t0 <- Sys.time(); first_new <- TRUE
+  for (k in seq_along(grp)) {
+    cf <- file.path(.cfv_chunk_dir, sprintf("chunk_%03d.rds", k))
+    if (file.exists(cf)) { out[[k]] <- readRDS(cf); next }
+    sub <- FT[as.character(FT[[idcol]]) %in% grp[[k]], ]
+    prot <- if (!is.na(pcol))
+      unique(unlist(strsplit(as.character(sub[[pcol]]), "[;,]\\s*"))) else NULL
+    st <- if (!is.null(prot) && length(prot))
+      tryCatch(subset(pepTracesList_filtered_minN, trace_subset_ids = prot,
+                      trace_subset_type = "protein_id"),
+               error = function(e) pepTracesList_filtered_minN) else pepTracesList_filtered_minN
+    out[[k]] <- extractFeatureVals(traces = st, features = sub, design_matrix = design_matrix,
+                                   extract = "subunits", imputeZero = T, verbose = F)
+    saveRDS(out[[k]], cf)
+    .brk(sprintf("  complex extractFeatureVals chunk %d/%d done (%.1f min elapsed)", k, length(grp),
+                 as.numeric(difftime(Sys.time(), t0, units = "mins"))))
+    if (first_new) {
+      .m <- as.numeric(difftime(Sys.time(), t0, units = "mins")); first_new <- FALSE
+      .brk(sprintf("  -> first new chunk %.1f min; %d left => about %.1f h to go",
+                   .m, length(grp) - k, .m * (length(grp) - k) / 60))
+    }
+  }
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) stop("every chunk came back empty")
+  if (length(unique(vapply(out, function(z) paste(names(z), collapse = "|"), character(1)))) != 1L)
+    stop("chunks disagree on their columns - not safe to combine")
+  res <- data.table::rbindlist(out, use.names = TRUE, fill = FALSE)
+  if (inherits(out[[1]], "data.table")) res else as.data.frame(res)
+}
+
+complex_featureVals <- tryCatch(.extract_complex_chunked(), error = function(e) {
+  message("Chunked complex extraction not used (", conditionMessage(e), "); running one plain call.")
+  extractFeatureVals(traces = pepTracesList_filtered_minN,
+                     features = complexFeaturesCollapsed,
+                     design_matrix = design_matrix,
+                     extract = "subunits", imputeZero = T, verbose = F)
+})
+.brk("complex extractFeatureVals DONE")
 
 save(complex_featureVals, file = .complex_featureVals_file)}
 
