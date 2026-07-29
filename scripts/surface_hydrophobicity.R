@@ -52,14 +52,18 @@
 #   surface_priority_list("ATP", n = 200)           # or: a short, defensibly chosen accession list
 #   surface_hydrophobicity(metabolite = "ATP", max_proteins = 300)   # slow; cached and resumable
 #   surface_vs_elution(metabolite = "ATP")          # the test, against elution deviation
+#   surface_vs_elution_compare("ATP")               # calibrated vs all proteins, side by side
 #
 # COST: roughly 1-3 s per protein at the default 92 test points. Start with max_proteins = 300 to see
 # whether anything is there; the cache is additive, so raising the cap later only computes the new ones.
 #
 # OUTPUT (output/surface/):
 #   surface_metrics.csv          per protein: SASA, surface GRAVY, hydrophobic fraction, largest patch
-#   surface_vs_elution.csv       the join with globularity_check + both deviations
-#   surface_vs_elution.pdf       each metric vs elution deviation, raw and mass-adjusted
+#   surface_vs_elution_<set>.csv       the join with globularity_check, per protein set
+#   surface_vs_elution_stats_<set>.csv the correlation table, per protein set
+#   surface_vs_elution_COMPARISON.csv  calibrated vs all-proteins, side by side
+#   surface_vs_elution_<set>.pdf       each metric vs elution deviation, per protein set
+#                                      <set> is "calibrated" or "allproteins" - the two never overwrite
 #   surface_vs_gravy.pdf         surface GRAVY vs sequence GRAVY - how different are they really?
 # =============================================================================
 
@@ -599,7 +603,20 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
                rho_beyond_composition = round(pcg$rho, 3), p_beyond_composition = pcg$p)
   }))
   dir.create(.sf_dir(), recursive = TRUE, showWarnings = FALSE)
-  fwrite(J, .sf_dir("surface_vs_elution.csv")); fwrite(res, .sf_dir("surface_vs_elution_stats.csv"))
+  # Tag every output with the protein set it came from. Previously both settings wrote the SAME file
+  # names, so running restrict_to_calibrated = FALSE silently overwrote the calibrated result and the two
+  # could not be compared - which is the whole point of running both.
+  .tag <- if (isTRUE(restrict_to_calibrated)) "calibrated" else "allproteins"
+  .f_csv  <- .sf_dir(paste0("surface_vs_elution_", .tag, ".csv"))
+  .f_stat <- .sf_dir(paste0("surface_vs_elution_stats_", .tag, ".csv"))
+  .f_pdf  <- .sf_dir(paste0("surface_vs_elution_", .tag, ".pdf"))
+  fwrite(J, .f_csv); fwrite(res, .f_stat)
+  message("Protein set: ", .tag, " (n = ", nrow(J), "). Outputs carry that suffix, so the two settings do not overwrite each other.")
+  if (!isTRUE(restrict_to_calibrated))
+    message("CAUTION with restrict_to_calibrated = FALSE: outside the calibrated MW interval the apparent MW is an\n",
+            "   EXTRAPOLATION of the standards curve, not a measurement, so dev_log2 is not a measured quantity for\n",
+            "   those proteins. Treat this run as a robustness check: if the correlation holds in BOTH sets it is\n",
+            "   solid; if it appears only here, it is a property of the extrapolation.")
 
   message("\nSurface hydrophobicity vs elution deviation (y = log2(apparent/expected); positive = elutes as though heavier):")
   print(res)
@@ -651,7 +668,10 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
       scale_colour_manual(values = c(`FALSE` = "grey55", `TRUE` = "#E15759"), name = "membrane-associated") +
       geom_smooth(method = "loess", formula = y ~ x, se = TRUE, colour = "black", linewidth = 0.6) +
       facet_wrap(~ facet, scales = "free_x") +
-      labs(title = paste0("Surface hydrophobicity vs elution deviation  (", metabolite, " control)"),
+      labs(title = paste0("Surface hydrophobicity vs elution deviation  (", metabolite, " control) - ",
+                          if (isTRUE(restrict_to_calibrated)) "WITHIN the calibrated MW interval"
+                          else "ALL proteins, incl. extrapolated apparent MW",
+                          "  [n = ", nrow(J), "]"),
            subtitle = paste0("y = log2(apparent / expected MW); BELOW 0 = elutes late, i.e. retained. A NEGATIVE trend would be the\n",
                              "column-retention artefact; a positive one is consistent with assembly but cannot prove it. Facet labels give the\n",
                              "raw and the mass-partialled Spearman rho - use the partial one, since size drives both surface area and assembly."),
@@ -666,9 +686,60 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
            subtitle = sprintf("Sequence GRAVY averages over BURIED and exposed residues alike; surface GRAVY weights each residue by how\nmuch of it is actually exposed. Spearman rho between them = %.3f. Points below the dashed line are proteins whose\nsurface is more POLAR than their composition suggests - the normal state of a soluble protein, and the reason\nsequence GRAVY cannot test an interface hypothesis.",
                               suppressWarnings(stats::cor(J$sequence_gravy_here, J$surface_gravy, method = "spearman", use = "complete.obs"))),
            x = "sequence GRAVY (same residues)", y = "surface GRAVY (SASA-weighted)") + theme_bw()
-    tryCatch({ grDevices::pdf(.sf_dir("surface_vs_elution.pdf"), width = 9, height = 7)
-               print(g1); print(g2); grDevices::dev.off() },
-             error = function(e) try(grDevices::dev.off(), silent = TRUE))
+    .ok <- tryCatch({ grDevices::pdf(.f_pdf, width = 9, height = 7)
+                      print(g1); print(g2); grDevices::dev.off(); TRUE },
+                    error = function(e) {
+                      try(grDevices::dev.off(), silent = TRUE)
+                      message("!! COULD NOT WRITE ", .f_pdf, ": ", conditionMessage(e))
+                      message("   The usual cause on Windows is that the PDF is OPEN in a viewer, which locks the file.")
+                      message("   Close it and re-run. (This used to fail silently, which is why the figure looked stale.)")
+                      FALSE })
+    if (.ok) message("Figures -> ", .f_pdf)
   }
   invisible(list(data = J, stats = res))
+}
+
+# ---- 3. calibrated vs all-proteins, side by side ----------------------------------------------------
+# The direct answer to "what happens if I put the other ~50% back in". Runs the test on BOTH protein
+# sets and lays the results next to each other.
+#
+# WHY IT MATTERS, and why it is a robustness check rather than a bigger analysis: outside the calibrated
+# MW interval the apparent MW is an EXTRAPOLATION of the standards curve, not a measurement, so for those
+# proteins dev_log2 is a derived guess. Adding them roughly doubles n, which always tightens p-values -
+# that on its own means nothing. The informative comparison is the EFFECT SIZE:
+#   similar rho in both sets   -> the association does not depend on the extrapolation. Strong evidence,
+#                                 and you can report the calibrated number knowing it generalises.
+#   much larger with all       -> the extra signal lives in the extrapolated region, i.e. it is a
+#                                 property of the standards-curve fit rather than of the proteins.
+#   much smaller with all      -> the extrapolated proteins are adding noise, as expected if their
+#                                 dev_log2 is largely meaningless.
+surface_vs_elution_compare <- function(metabolite, condition = NULL, exclude_membrane = TRUE) {
+  message("=== Protein set 1: WITHIN the calibrated MW interval ===")
+  a <- surface_vs_elution(metabolite, condition = condition, restrict_to_calibrated = TRUE,
+                          exclude_membrane = exclude_membrane, save_plots = TRUE)
+  message("\n=== Protein set 2: ALL proteins, including the extrapolated ones ===")
+  b <- surface_vs_elution(metabolite, condition = condition, restrict_to_calibrated = FALSE,
+                          exclude_membrane = exclude_membrane, save_plots = TRUE)
+  A <- data.table::copy(a$stats)[, set := "calibrated"]
+  B <- data.table::copy(b$stats)[, set := "all proteins"]
+  cols <- intersect(c("metric", "n", "rho_raw", "rho_partial_mass", "rho_partial_nomembrane",
+                      "rho_beyond_composition"), names(A))
+  M <- merge(A[, ..cols], B[, ..cols], by = "metric", suffixes = c("_cal", "_all"))
+  M[, delta_partial := round(rho_partial_mass_all - rho_partial_mass_cal, 3)]
+  data.table::setorder(M, -rho_partial_mass_cal)
+  fwrite(M, .sf_dir("surface_vs_elution_COMPARISON.csv"))
+  message("\n=== SIDE BY SIDE (partial rho, monomer mass held constant) ===")
+  print(M[, .(metric, n_cal, n_all,
+              rho_cal = rho_partial_mass_cal, rho_all = rho_partial_mass_all, delta = delta_partial)])
+  message("Comparison table -> ", .sf_dir("surface_vs_elution_COMPARISON.csv"))
+  d <- max(abs(M$delta_partial), na.rm = TRUE)
+  message(sprintf("\nLargest shift in partial rho when the extrapolated proteins are added: %.3f", d))
+  message(if (d < 0.05)
+    "  => The association is INDEPENDENT of the extrapolation. Report the calibrated figures; this run is the robustness check that justifies them."
+    else if (any(abs(M$rho_partial_mass_all) > abs(M$rho_partial_mass_cal) + 0.05, na.rm = TRUE))
+    "  => The effect is LARGER once extrapolated proteins are included. Be careful: their apparent MW is not a measurement, so the extra signal may belong to the standards-curve fit rather than to the proteins. Report the calibrated figures."
+    else
+    "  => The effect SHRINKS with the extrapolated proteins included, which is what you would expect if their dev_log2 is largely noise. Report the calibrated figures.")
+  message("Note that n roughly doubles, so every p-value falls - that is arithmetic, not evidence. Compare rho, not p.")
+  invisible(M)
 }
