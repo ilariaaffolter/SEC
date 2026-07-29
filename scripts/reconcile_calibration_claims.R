@@ -212,8 +212,17 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
                   `below1_out(wrong)` = round(pct_below1_out, 1))])
     cat(sprintf("\n=> median: %.1f%% impossible in range vs %.1f%% out of range.\n",
                 median(per$pct_impossible_in, na.rm = TRUE), median(per$pct_impossible_out, na.rm = TRUE)))
-    cat(if (median(per$pct_impossible_in, na.rm = TRUE) > 10)
-      "   WARNING: a large impossible population INSIDE the calibrated range too. That is not the\n   calibration failing where extrapolated - it is failing everywhere, and this test cannot then be\n   used to argue that the extrapolated region is special.\n"
+    # Report the RATIO, not a pass/fail on an arbitrary threshold. A baseline of impossible values inside
+    # the calibrated range is expected - column adsorption, proteolysis, a mis-called apex, and the fact
+    # that globular_ffo is a single constant rather than a per-protein value all produce some. What the
+    # argument needs is that extrapolation makes it MUCH worse, and that is a ratio question.
+    per[, imposs_ratio := pct_impossible_out / pmax(pct_impossible_in, 1e-9)]
+    cat(sprintf("\n   RATIO outside/inside per metabolite: %s  (median %.2fx)\n",
+                paste(sprintf("%s %.1fx", per$metabolite, per$imposs_ratio), collapse = ", "),
+                median(per$imposs_ratio, na.rm = TRUE)))
+    cat(if (median(per$imposs_ratio, na.rm = TRUE) >= 2)
+      sprintf("   => Impossible values are %.1fx more common outside than inside. That IS the calibration\n      failing where it is extrapolated, and it is not circular. BUT report the inside baseline\n      (%.1f%%) honestly too - extrapolation is not the only cause of an impossible value.\n",
+              median(per$imposs_ratio, na.rm = TRUE), median(per$pct_impossible_in, na.rm = TRUE))
       else if (median(per$pct_impossible_out, na.rm = TRUE) > median(per$pct_impossible_in, na.rm = TRUE) + 5)
       "   THIS IS YOUR STRONGEST NUMBER. Physics falsifying the calibration precisely where it is\n   extrapolated, with no definitional circularity anywhere in it.\n"
       else "   No clear contrast, so this line of argument is not available. Rely on the coverage figure instead.\n")

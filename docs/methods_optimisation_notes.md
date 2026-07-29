@@ -136,17 +136,22 @@ model selection is made on that criterion rather than on fit to the ribosomal an
 
 ## 3. Take-home messages
 
-- **The "55.8% anomalous" figure is dominated by extrapolation, not biology.** Restricted to
-  the calibrated MW interval the proteome is **80.9% globular** (19.1% anomalous; 5318
-  observations = 2932 monomer + 2386 oligomer). Quote the restricted number and state the
-  denominator.
+- **The pooled anomalous figure is dominated by extrapolation, not biology.** Restricted to the
+  calibrated MW interval the proteome is **80.9% globular**. VERIFIED against a geometric null:
+  the accepting band (1x-4x states, +-1 fraction) is 3.52 fractions against a 7.63-fraction
+  window, so **46.1% would pass by geometry alone** - the observed 80.9% is a genuine **+34.8
+  point excess**, not an artefact of a wide tolerance. Pooled over everything the figure is
+  **37.9%** (median across metabolites 39.8%); an earlier note said 44%, which was wrong.
+  Quote one of these and say which.
 
-- **The calibration is the weak link, and it is quantifiable.** The six standards span
-  F15.76 (thyroglobulin, 670 kDa) to F21.85 (myoglobin, 17 kDa) — about **6 fractions and
-  1.6 decades** — while proteins elute over ~30 fractions and ~8 decades. **53% of
-  observations fall outside the calibrated interval**, so roughly half of every
-  globular-calibration-based claim in this field rests on extrapolation. This is the
-  strongest form of the argument against globular-standard calibration: not that it is
+- **The calibration is the weak link, and it is quantifiable.** CORRECTED FROM THE DATA by
+  `reconcile_calibration_claims()`, which reads the standards table directly: the calibrated
+  window is **7.63 fractions / 3.02 decades**, at **0.396 decades per fraction = 2.49x MW per
+  fraction**. (An earlier draft of these notes said 6.09 fractions / 1.6 decades / 1.83x —
+  those figures were wrong; use the script's.) Despite that wide span, **53.2% of observations
+  still fall outside the interval**, because most of them elute EARLIER than the largest
+  standard. Roughly half of every globular-calibration-based claim therefore rests on
+  extrapolation. This is the strongest form of the argument: not that the approach is
   conceptually wrong, but that it covers under half the data.
 
 - **f/f₀ ≥ 1 is a hard physical floor and makes an excellent falsification test.** A sphere
