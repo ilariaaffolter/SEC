@@ -516,6 +516,26 @@ surface_hydrophobicity <- function(ids = NULL, metabolite = NULL, max_proteins =
   list(rho = r, p = 2 * stats::pt(-abs(tt), df = n - 3), n = n)
 }
 
+# Rank-based partial correlation on SEVERAL covariates at once: rank everything, regress the ranks of x
+# and of y on the ranks of the covariates, and correlate what is left. With Z = (mass, sequence GRAVY)
+# this answers the question the single-covariate version cannot - does the SURFACE carry information
+# beyond what the amino-acid composition already provides? Surface and sequence hydropathy are
+# correlated with each other, so comparing their two separate correlations does not settle that.
+.pcor_multi <- function(x, y, Z) {
+  Z <- as.matrix(Z)
+  ok <- is.finite(x) & is.finite(y) & apply(is.finite(Z), 1, all); n <- sum(ok)
+  k <- ncol(Z)
+  if (n < 10 + k) return(list(rho = NA_real_, p = NA_real_, n = n))
+  rx <- rank(x[ok]); ry <- rank(y[ok])
+  RZ <- apply(Z[ok, , drop = FALSE], 2, rank)
+  ex <- stats::residuals(stats::lm(rx ~ RZ)); ey <- stats::residuals(stats::lm(ry ~ RZ))
+  r <- suppressWarnings(stats::cor(ex, ey))
+  if (!is.finite(r)) return(list(rho = NA_real_, p = NA_real_, n = n))
+  df <- n - 2 - k
+  tt <- r * sqrt(df / max(1 - r^2, .Machine$double.eps))
+  list(rho = r, p = 2 * stats::pt(-abs(tt), df = df), n = n)
+}
+
 surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibrated = TRUE,
                                exclude_membrane = TRUE, save_plots = TRUE) {
   cache <- .sf_dir("surface_metrics.csv")
@@ -568,26 +588,48 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
     pc  <- .pcor_sf(x, y, J$lgm)
     K <- J[is_membrane == FALSE]
     pcm <- if (nrow(K) >= 30) .pcor_sf(K[[mt]], K$dev_log2, K$lgm) else list(rho = NA_real_, p = NA_real_, n = nrow(K))
+    # THE DECISIVE ONE: hold mass AND sequence GRAVY constant. If a surface metric still correlates
+    # after the composition has been removed, the surface is carrying information the sequence does not.
+    pcg <- if (mt == "sequence_gravy_here") list(rho = NA_real_, p = NA_real_, n = NA_integer_)
+           else .pcor_multi(x, y, cbind(J$lgm, J$sequence_gravy_here))
     data.table(metric = mt, n = sum(is.finite(x) & is.finite(y)),
                rho_raw = round(unname(raw$estimate), 3), p_raw = raw$p.value,
                rho_partial_mass = round(pc$rho, 3), p_partial = pc$p,
-               rho_partial_nomembrane = round(pcm$rho, 3), n_nomembrane = pcm$n)
+               rho_partial_nomembrane = round(pcm$rho, 3), n_nomembrane = pcm$n,
+               rho_beyond_composition = round(pcg$rho, 3), p_beyond_composition = pcg$p)
   }))
   dir.create(.sf_dir(), recursive = TRUE, showWarnings = FALSE)
   fwrite(J, .sf_dir("surface_vs_elution.csv")); fwrite(res, .sf_dir("surface_vs_elution_stats.csv"))
 
   message("\nSurface hydrophobicity vs elution deviation (y = log2(apparent/expected); positive = elutes as though heavier):")
   print(res)
+  message("\nWHAT EACH COLUMN IS:")
+  message("  rho_raw                 plain Spearman, no covariates.")
+  message("  rho_partial_mass        Spearman with log10(monomer mass) HELD CONSTANT: rank both variables,")
+  message("                          regress each on rank(mass), correlate the residuals. Reads as: among")
+  message("                          proteins of the SAME SIZE, does more surface hydrophobicity go with")
+  message("                          eluting larger? Needed because size drives both.")
+  message("  rho_partial_nomembrane  THE SAME mass-partialled statistic, recomputed on the non-membrane")
+  message("                          subset only. It is not 'the correlation without mass control' - both")
+  message("                          columns control for mass; this one just drops membrane proteins.")
+  message("  rho_beyond_composition  mass AND sequence GRAVY held constant - does the SURFACE add anything")
+  message("                          the amino-acid composition did not already say? This is the one that")
+  message("                          separates an interface story from a compositional confound.")
   message("\nHOW TO READ THIS:")
   message("  * The RETENTION ARTEFACT predicts a NEGATIVE correlation (sticky protein elutes late, looks small).")
-  message("    A positive value excludes it - that is the one conclusion these data support on their own.")
-  message("  * `rho_partial_mass` is the number that matters: bigger proteins have more surface AND assemble more,")
-  message("    so the raw value is confounded by size.")
-  message("  * Compare `surface_gravy` with `sequence_gravy_here`. If the SURFACE metric is the stronger one, the")
-  message("    signal lives where interfaces are and the assembly reading gains support. If they are the same, the")
-  message("    surface adds nothing over composition and no interface claim is warranted.")
-  message("  * `patch_frac` is the sharpest test: assembly needs a contiguous patch, not a high average.")
-  message("  * If an effect dies in `rho_partial_nomembrane`, it was membrane proteins, not interfaces.")
+  message("    A positive value excludes it.")
+  message("  * If an effect grows in `rho_partial_nomembrane`, membrane proteins were diluting it, not causing it.")
+  message("  * `patch_frac` is size-normalised; `largest_patch_A2` is absolute, so it keeps a size component")
+  message("    that the mass partial then removes - compare the two before reading anything into either.")
+  .bc <- res[metric != "sequence_gravy_here" & is.finite(rho_beyond_composition)]
+  if (nrow(.bc)) {
+    b <- .bc[which.max(abs(rho_beyond_composition))]
+    message(sprintf("\n  BEYOND COMPOSITION: %s keeps rho = %+.3f (p = %.3g) with mass AND sequence GRAVY held constant.",
+                    b$metric, b$rho_beyond_composition, b$p_beyond_composition))
+    message(if (abs(b$rho_beyond_composition) >= 0.15)
+      "  => The surface carries information the sequence does not. That is the result the interface reading needs."
+      else "  => Once composition is removed almost nothing is left: the signal is compositional, not an interface property. Report the artefact exclusion only.")
+  }
   .best <- res[metric != "sequence_gravy_here"][which.max(abs(rho_partial_mass))]
   if (nrow(.best) && is.finite(.best$rho_partial_mass))
     message(sprintf("\n  Strongest surface metric: %s, partial rho = %+.3f (%.1f%% of the variance). %s",
