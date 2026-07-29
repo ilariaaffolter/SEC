@@ -541,7 +541,9 @@ surface_hydrophobicity <- function(ids = NULL, metabolite = NULL, max_proteins =
 }
 
 surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibrated = TRUE,
+                               deviation = c("calibration", "residual"),
                                exclude_membrane = TRUE, save_plots = TRUE) {
+  deviation <- match.arg(deviation)
   cache <- .sf_dir("surface_metrics.csv")
   if (!file.exists(cache)) stop("No surface metrics yet - run surface_hydrophobicity() first.")
   S <- fread(cache)[ok %in% TRUE]
@@ -560,8 +562,40 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
   if (!all(c("apparent_mw_kDa", "expected_mw_kDa") %in% names(G)))
     stop("globularity_check.txt lacks apparent_mw_kDa/expected_mw_kDa.")
   G <- G[is.finite(apparent_mw_kDa) & is.finite(expected_mw_kDa) & expected_mw_kDa > 0 & apparent_mw_kDa > 0]
-  # the SAME deviation the GRAVY test uses, so the two are directly comparable
-  G[, dev_log2 := log2(apparent_mw_kDa / expected_mw_kDa)]
+
+  # TWO WAYS TO MEASURE "elutes off its monomer mass", and the choice matters enormously once
+  # out-of-calibration proteins are included.
+  #
+  # deviation = "calibration" (default, and what the GRAVY test used):
+  #     dev = log2(apparent MW / expected MW), apparent MW read off the STANDARDS CURVE.
+  #   Outside the standards' MW interval that curve is extrapolated, and the extrapolation is what
+  #   generates the extreme values. Worse, membership of `in_calibrated_range` is DEFINED by apparent MW
+  #   leaving [min standard, max standard] - so for any protein whose expected mass sits inside that
+  #   interval, "out of range" FORCES |dev| past a fixed threshold. Concretely, a 35 kDa protein can only
+  #   be called in-range if its dev lies in [-1.04, +4.26]; leaving the range puts it outside that window
+  #   by construction. "The out-of-range proteins deviate most" is therefore largely a definition, not a
+  #   finding, and a correlation computed across that boundary inherits the circularity.
+  #
+  # deviation = "residual" (use this whenever out-of-calibration proteins are included):
+  #     dev = fitted(apex_fraction) - log10(expected MW), from a ROBUST fit of log10(mass) against apex
+  #     fraction WITHIN this dataset.
+  #   Same quantity in spirit - how far the protein elutes from where its mass predicts - but referenced
+  #   to the proteome's own bulk behaviour instead of to a curve extrapolated past its anchors. It is
+  #   defined for every protein, in or out of the standards range, and carries no extrapolation. This is
+  #   the same construction used in secseq_compare.R and gradseq_ffo.R.
+  if (deviation == "calibration") {
+    G[, dev_log2 := log2(apparent_mw_kDa / expected_mw_kDa)]
+  } else {
+    if (!"apex_fraction" %in% names(G)) stop("globularity_check.txt has no apex_fraction - needed for deviation = 'residual'.")
+    G <- G[is.finite(apex_fraction)]
+    .fitG <- if (requireNamespace("MASS", quietly = TRUE))
+               MASS::rlm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+             else stats::lm(log10(expected_mw_kDa) ~ apex_fraction, data = G)
+    # log10 -> log2 so the two definitions share a scale and can be compared directly
+    G[, dev_log2 := (stats::predict(.fitG, G) - log10(expected_mw_kDa)) / log10(2)]
+    message("deviation = 'residual': within-dataset robust fit, NO standards curve and no extrapolation. ",
+            "Slope = ", signif(stats::coef(.fitG)[2], 3), " log10 units per fraction.")
+  }
   J <- merge(S, G[, .(protein_id, dev_log2, expected_mw_kDa,
                       class = if ("class" %in% names(G)) class else NA_character_)], by = "protein_id")
   if (!nrow(J)) stop("No overlap between the structures and the SEC table.")
@@ -606,7 +640,8 @@ surface_vs_elution <- function(metabolite, condition = NULL, restrict_to_calibra
   # Tag every output with the protein set it came from. Previously both settings wrote the SAME file
   # names, so running restrict_to_calibrated = FALSE silently overwrote the calibrated result and the two
   # could not be compared - which is the whole point of running both.
-  .tag <- if (isTRUE(restrict_to_calibrated)) "calibrated" else "allproteins"
+  .tag <- paste0(if (isTRUE(restrict_to_calibrated)) "calibrated" else "allproteins",
+                 if (deviation == "residual") "_residualdev" else "")
   .f_csv  <- .sf_dir(paste0("surface_vs_elution_", .tag, ".csv"))
   .f_stat <- .sf_dir(paste0("surface_vs_elution_stats_", .tag, ".csv"))
   .f_pdf  <- .sf_dir(paste0("surface_vs_elution_", .tag, ".pdf"))
@@ -720,17 +755,30 @@ surface_vs_elution_compare <- function(metabolite, condition = NULL, exclude_mem
   message("\n=== Protein set 2: ALL proteins, including the extrapolated ones ===")
   b <- surface_vs_elution(metabolite, condition = condition, restrict_to_calibrated = FALSE,
                           exclude_membrane = exclude_membrane, save_plots = TRUE)
+  message("\n=== Protein set 3: ALL proteins, CALIBRATION-FREE deviation (breaks the circularity) ===")
+  cc3 <- surface_vs_elution(metabolite, condition = condition, restrict_to_calibrated = FALSE,
+                            deviation = "residual", exclude_membrane = exclude_membrane, save_plots = TRUE)
   A <- data.table::copy(a$stats)[, set := "calibrated"]
   B <- data.table::copy(b$stats)[, set := "all proteins"]
+  C3 <- data.table::copy(cc3$stats)[, set := "all, residual dev"]
   cols <- intersect(c("metric", "n", "rho_raw", "rho_partial_mass", "rho_partial_nomembrane",
                       "rho_beyond_composition"), names(A))
   M <- merge(A[, ..cols], B[, ..cols], by = "metric", suffixes = c("_cal", "_all"))
+  M <- merge(M, C3[, .(metric, rho_partial_mass_res = rho_partial_mass, n_res = n)], by = "metric")
   M[, delta_partial := round(rho_partial_mass_all - rho_partial_mass_cal, 3)]
   data.table::setorder(M, -rho_partial_mass_cal)
   fwrite(M, .sf_dir("surface_vs_elution_COMPARISON.csv"))
   message("\n=== SIDE BY SIDE (partial rho, monomer mass held constant) ===")
   print(M[, .(metric, n_cal, n_all,
-              rho_cal = rho_partial_mass_cal, rho_all = rho_partial_mass_all, delta = delta_partial)])
+              rho_cal = rho_partial_mass_cal, rho_all = rho_partial_mass_all,
+              rho_all_residualdev = rho_partial_mass_res, delta = delta_partial)])
+  message("\nWHICH COLUMN TO BELIEVE:")
+  message("  rho_cal              in-range only. Honest, but RANGE-RESTRICTED, so it UNDER-states the true association.")
+  message("  rho_all              all proteins, deviation from the standards curve. Inflated two ways: range expansion,")
+  message("                       and circularity - out-of-range membership is DEFINED by apparent MW leaving the")
+  message("                       standards interval, which forces |dev| past a threshold for most proteins.")
+  message("  rho_all_residualdev  all proteins, deviation from a within-dataset fit. No extrapolation, no circularity.")
+  message("                       THIS is the number to quote when out-of-range proteins are included.")
   message("Comparison table -> ", .sf_dir("surface_vs_elution_COMPARISON.csv"))
   d <- max(abs(M$delta_partial), na.rm = TRUE)
   message(sprintf("\nLargest shift in partial rho when the extrapolated proteins are added: %.3f", d))
