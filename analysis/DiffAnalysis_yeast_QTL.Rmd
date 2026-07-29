@@ -1625,18 +1625,49 @@ if (!exists("featureval_chunks")) featureval_chunks <- 20L   # more chunks = fin
   if (is.na(idcol)) stop("no id column to split on")
   ids <- unique(as.character(FT[[idcol]]))
   if (length(ids) < 2 * featureval_chunks) stop("too few features to be worth chunking")
+  # The split depends on featureval_chunks, so cached chunks are only valid for the SAME setting.
+  # Changing it silently would mix incompatible splits and lose or duplicate features.
+  .marker <- file.path(.fv_chunk_dir, "chunk_count.txt")
+  if (file.exists(.marker)) {
+    prev <- suppressWarnings(as.integer(readLines(.marker, warn = FALSE)[1]))
+    if (is.finite(prev) && prev != featureval_chunks) {
+      message("featureval_chunks changed from ", prev, " to ", featureval_chunks,
+              " - the cached chunks use the OLD split and cannot be mixed. Discarding them.")
+      unlink(list.files(.fv_chunk_dir, pattern = "^chunk_.*\\.rds$", full.names = TRUE))
+    }
+  }
+  writeLines(as.character(featureval_chunks), .marker)
   grp <- split(ids, cut(seq_along(ids), breaks = featureval_chunks, labels = FALSE))
-  out <- vector("list", length(grp)); t0 <- Sys.time()
+  out <- vector("list", length(grp)); t0 <- Sys.time(); .first_new <- TRUE
   for (k in seq_along(grp)) {
     cf <- file.path(.fv_chunk_dir, sprintf("chunk_%03d.rds", k))
     if (file.exists(cf)) { out[[k]] <- readRDS(cf); next }
     sub <- FT[as.character(FT[[idcol]]) %in% grp[[k]], ]
-    out[[k]] <- extractFeatureVals(traces = pepTracesList_filtered_minN,
+    # SUBSET THE TRACES TOO - this is the whole point. Measured on this dataset: passing the FULL trace
+    # list to each chunk costs ~88 min per call whatever the chunk size, because the per-call work scales
+    # with the TRACES, not with the features. Twenty such calls took 30 h against 8.6 h for one plain
+    # call, i.e. chunking made it 3.5x worse. Restricting the traces to the chunk's own proteins removes
+    # that fixed cost, so each chunk is roughly 1/n of the work and the total finally drops.
+    sub_traces <- tryCatch(subset(pepTracesList_filtered_minN,
+                                  trace_subset_ids = grp[[k]], trace_subset_type = "protein_id"),
+                           error = function(e) { message("  (trace subsetting failed: ", conditionMessage(e),
+                                                         " - using the full trace list for this chunk)")
+                                                 pepTracesList_filtered_minN })
+    out[[k]] <- extractFeatureVals(traces = sub_traces,
                                    features = sub, design_matrix = design_matrix,
                                    extract = "subunits_detected", imputeZero = T, verbose = F)
     saveRDS(out[[k]], cf)
     .brk(sprintf("  extractFeatureVals chunk %d/%d done (%.1f min elapsed)", k, length(grp),
                  as.numeric(difftime(Sys.time(), t0, units = "mins"))))
+    # Report the cost of the FIRST chunk computed in this render, so the trace-subsetting speedup is
+    # visible immediately instead of after another overnight run.
+    if (.first_new) {
+      .mins <- as.numeric(difftime(Sys.time(), t0, units = "mins")); .first_new <- FALSE
+      .brk(sprintf("  -> first new chunk took %.1f min; %d chunk(s) left => about %.1f h to go",
+                   .mins, length(grp) - k, .mins * (length(grp) - k) / 60))
+      if (.mins > 30)
+        .brk("  -> STILL SLOW: trace subsetting did not help. Set featureval_chunks <- 1 and delete rdata/featureVals_chunks/ to fall back to one plain call (~8.6 h).")
+    }
   }
   out <- out[!vapply(out, is.null, logical(1))]
   if (!length(out)) stop("every chunk came back empty")
