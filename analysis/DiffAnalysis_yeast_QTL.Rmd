@@ -1494,6 +1494,17 @@ if (!exists("best_rt_height"))        best_rt_height        <- 1
 .pf_cores <- parallel::detectCores()
 .pf_cores <- if (is.na(.pf_cores) || .pf_cores < 2L) 1L else min(.pf_cores - 1L, 6L)
 
+# CACHE GATE (handover fix): proteinFeatures.RData was being SAVED a few lines below but never LOADED,
+# so this ~30-40 min step re-ran on every render even though its result was already sitting on disk -
+# the same defect the grid search had. The Ecoli report has had this guard for months; the yeast one
+# never got it. Set load_proteinFeatures.RData <- F, or delete the file, to force a fresh run after
+# changing the upstream data, the filtering, or the feature-finding parameters.
+.pf_file <- file.path(out_dir, "rdata", "proteinFeatures.RData")
+if (load_proteinFeatures.RData && file.exists(.pf_file)) {
+  load(.pf_file)   # restores `proteinFeatures` from the previous run
+  message("Loaded cached proteinFeatures from ", .pf_file, " (skipped findProteinFeatures).")
+  .brk("findProteinFeatures SKIPPED (loaded from cache)")
+} else {
 .brk(paste0("findProteinFeatures starting (parallelized=T, n_cores=", .pf_cores, ") -- if the log stops HERE, the parallel cluster is hanging under render"))
 suppressMessages(
   proteinFeatures <-  findProteinFeatures(traces = pepTracesIntegrated_sum,
@@ -1508,6 +1519,7 @@ suppressMessages(
 
 )
 )
+}
 
 # --- OPTIONAL: alternative-parameter exploration runs (DISABLED by default) -----------------------
 # The three findProteinFeatures calls below re-run feature finding at lower corr_cutoff (0.7 / 0.5 /
@@ -1563,7 +1575,12 @@ suppressMessages(
 } # end if (explore_alt_params) -- alt-parameter comparison runs, off by default
 
 .brk("findProteinFeatures DONE -> save + scoreFeatures (FDR 0.05) ...")
-save(proteinFeatures, file = file.path(out_dir, "rdata", "proteinFeatures.RData"))
+# only write the cache when it was actually recomputed; rewriting a just-loaded object is pure I/O
+if (!file.exists(.pf_file)) {
+  dir.create(dirname(.pf_file), recursive = TRUE, showWarnings = FALSE)
+  save(proteinFeatures, file = .pf_file)
+  message("Saved proteinFeatures to ", .pf_file, " (re-runs with load_proteinFeatures.RData = T skip findProteinFeatures).")
+}
 
 # Reuse the whole serial tail if a previous run of this comparison already produced it. These three
 # CCprofiler steps (scoreFeatures, extractFeatureVals, fillFeatureVals) are single-threaded inside the
@@ -2223,16 +2240,32 @@ plotSummarizedMScoverage(hypotheses = complexHypotheses_minimal,
 
 
 #' ## Complex feature finding
-complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
-                                        complex_hypothesis = complexTargetsPlusDecoys,
-                                        corr_cutoff = 0.9,
-                                        window_size = 7,
-                                        parallelized = F,
-                                        n_cores = 1,
-                                        collapse_method = "apex_network",
-                                        perturb_cutoff = "5%",
-                                        rt_height = 1,
-                                        smoothing_length = 7)
+# Cached and parallelised, matching the Ecoli report. This was running SERIALLY here (parallelized = F,
+# n_cores = 1) and with no cache, so it recomputed in full on every render on a single core.
+.cf_cores <- parallel::detectCores()
+.cf_cores <- if (is.na(.cf_cores) || .cf_cores < 2L) 1L else min(.cf_cores - 1L, 12L)
+.cf_file <- file.path(out_dir, "rdata", "complexFeatures.RData")
+if (!exists("load_complexFeatures.RData")) load_complexFeatures.RData <- TRUE
+if (load_complexFeatures.RData && file.exists(.cf_file)) {
+  load(.cf_file)   # restores `complexFeatures` from the previous run
+  message("Loaded cached complexFeatures from ", .cf_file, " (skipped findComplexFeatures).")
+  .brk("findComplexFeatures SKIPPED (loaded from cache)")
+} else {
+  .brk(paste0("findComplexFeatures starting (parallelized=T, n_cores=", .cf_cores, ") ..."))
+  complexFeatures <-  findComplexFeatures(traces = protein_traces_sum,
+                                          complex_hypothesis = complexTargetsPlusDecoys,
+                                          corr_cutoff = 0.9,
+                                          window_size = 7,
+                                          parallelized = T,
+                                          n_cores = .cf_cores,
+                                          collapse_method = "apex_network",
+                                          perturb_cutoff = "5%",
+                                          rt_height = 1,
+                                          smoothing_length = 7)
+  dir.create(dirname(.cf_file), recursive = TRUE, showWarnings = FALSE)
+  save(complexFeatures, file = .cf_file)
+  .brk("findComplexFeatures DONE and cached")
+}
 ```
 
 ## - filter Complex features
