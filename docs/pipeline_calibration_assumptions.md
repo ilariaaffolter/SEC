@@ -18,7 +18,12 @@ All three were read at source. Everything below is verified from code unless mar
 **Gaps, flagged honestly:**
 - **UNVERIFIED**: PrInCE on Bioconductor *devel* (the landing page returns 403 through the proxy). Conclusions are scoped to `fosterlab/PrInCE` master, v1.7.1.
 - **UNVERIFIED**: PCprophet's packaged GUI binaries (`PCprophet_GUI/*.zip`) — no source, so I cannot see what defaults they ship. CLI/source path only.
-- **Correction to a common belief**: `getMassAssemblyChange` **does not exist in CCprofiler master**. What you are using is `getMassAssemblyChange_aljazfix`, defined locally in `/home/user/SEC/analysis/DiffAnalysis_Ecoli_PMC.Rmd` (called at line 1190). The upstream analogue is `annotateMassDistribution`/`summarizeMassDistribution`. Say so in Methods, or a reviewer who greps the package will not find it.
+- **CORRECTED AFTER PUBLICATION OF THIS NOTE**: an earlier draft claimed `getMassAssemblyChange` does
+  not exist in CCprofiler. That was wrong - it was scoped to the `master` branch only. The function IS
+  exported by the `differential` and `DA_module` branches (`NAMESPACE`: `export(getMassAssemblyChange)`,
+  `export(plotMassAssemblyChange)`) and is defined in `R/annotateMassDistribution.R` on those branches,
+  alongside `annotateMassDistribution`. Cite the branch in Methods, since `master` genuinely does not
+  have it. The original (now superseded) claim was: `getMassAssemblyChange` does not exist in CCprofiler master. What you are using is `getMassAssemblyChange_aljazfix`, defined locally in `/home/user/SEC/analysis/DiffAnalysis_Ecoli_PMC.Rmd` (called at line 1190). The upstream analogue is `annotateMassDistribution`/`summarizeMassDistribution`. Say so in Methods, or a reviewer who greps the package will not find it.
 
 **One-line summary of the comparison:** PrInCE never converts fractions to mass, so the question does not arise. PCprophet converts only for a report column and one optional collapsing mode. CCprofiler is the only one where a calibrated MW reaches anything you would call a result — and it is the only one of the three whose *documentation* does not warn you about extrapolation, while PCprophet's does.
 
