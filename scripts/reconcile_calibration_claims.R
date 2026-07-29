@@ -51,6 +51,26 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
       G <- G[condition == cc]
     }
     if (!nrow(G)) return(NULL)
+    # AUDIT. Two things silently differ between metabolites and would otherwise be invisible:
+    #  (1) which condition the regex picked. If one comparison names its conditions differently, the
+    #      "control" rows could be the wrong rows, and nothing downstream would notice.
+    #  (2) the calibration itself. globularity_check reads the fraction->MW map from THAT comparison's
+    #      own traces object (`mwmap <- .fraction_mw_map(tl[[1]])`), written by annotateMolecularWeight
+    #      during that render - so every metabolite can carry a DIFFERENT calibration, and a metabolite
+    #      that looks like an outlier may simply have been calibrated differently.
+    cond_used <- if ("condition" %in% names(G)) as.character(G$condition[1]) else NA_character_
+    sf <- here("output", paste0("PCM_ctrl_vs_", m), "tables", "globularity_standards_check.txt")
+    slope <- NA_real_; win <- NA_real_; nstd <- NA_integer_
+    if (file.exists(sf)) {
+      cal <- tryCatch(fread(sf), error = function(e) NULL)
+      if (!is.null(cal) && all(c("elution_fraction", "expected_kDa") %in% names(cal))) {
+        o <- is.finite(cal$elution_fraction) & is.finite(cal$expected_kDa) & cal$expected_kDa > 0
+        if (sum(o) >= 2) {
+          slope <- unname(stats::coef(stats::lm(log10(cal$expected_kDa[o]) ~ cal$elution_fraction[o]))[2])
+          win   <- diff(range(cal$elution_fraction[o])); nstd <- sum(o)
+        }
+      }
+    }
     need <- c("in_calibrated_range", "globular_as_expected")
     if (!all(need %in% names(G))) { message("[", m, "] missing ", paste(setdiff(need, names(G)), collapse = "/"), " - re-run globularity_check()"); return(NULL) }
 
@@ -73,6 +93,10 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
     data.table(
       metabolite        = m,
       n                 = nrow(G),
+      condition_used    = cond_used,
+      cal_slope         = slope,
+      cal_window_fr     = win,
+      n_standards       = nstd,
       pct_in_range      = 100 * mean(inr),
       pct_glob_in       = 100 * mean(G$globular_as_expected[inr] %in% TRUE),
       pct_glob_out      = 100 * mean(G$globular_as_expected[!inr] %in% TRUE),
@@ -138,24 +162,27 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
   # carries +-tolerance. So the accepting band has a FIXED width, and the calibrated window has a fixed
   # width, and their ratio is the share that would pass by geometry alone with no biology involved.
   cat("\n=========== 2b. HOW MUCH OF 80.9%% IS JUST GEOMETRY? ===========\n")
-  cal <- tryCatch({
-    f <- here("output", paste0("PCM_ctrl_vs_", per$metabolite[1]), "tables", "globularity_standards_check.txt")
-    if (file.exists(f)) fread(f) else NULL }, error = function(e) NULL)
-  if (is.null(cal) || !all(c("elution_fraction", "expected_kDa") %in% names(cal))) {
+  if (all(is.na(per$cal_slope))) {
     cat("globularity_standards_check.txt not found - cannot compute the geometric null.\n")
   } else {
-    ok <- is.finite(cal$elution_fraction) & is.finite(cal$expected_kDa) & cal$expected_kDa > 0
-    sl <- stats::coef(stats::lm(log10(cal$expected_kDa[ok]) ~ cal$elution_fraction[ok]))[2]
-    win <- diff(range(cal$elution_fraction[ok]))
-    band <- log10(max_oligomer) / abs(sl) + 2 * tolerance_fractions
-    null_pct <- 100 * min(band / win, 1)
+    # PER METABOLITE. The earlier version computed one null from the FIRST metabolite and applied it to
+    # all of them, which is wrong whenever the calibrations differ - exactly the case that makes one
+    # metabolite look like an outlier.
+    per[, band_fr  := log10(max_oligomer) / abs(cal_slope) + 2 * tolerance_fractions]
+    per[, null_pct := 100 * pmin(band_fr / cal_window_fr, 1)]
+    per[, excess   := pct_glob_in - null_pct]
+    print(per[, .(metabolite,
+                  slope_dec_per_fr = round(cal_slope, 3),
+                  fold_per_fraction = round(10^abs(cal_slope), 2),
+                  window_fr = round(cal_window_fr, 2), n_std = n_standards,
+                  band_fr = round(band_fr, 2),
+                  geometric_null = round(null_pct, 1),
+                  observed = round(pct_glob_in, 1),
+                  excess = round(excess, 1))])
+    sl <- stats::median(per$cal_slope, na.rm = TRUE); win <- stats::median(per$cal_window_fr, na.rm = TRUE)
+    null_pct <- stats::median(per$null_pct, na.rm = TRUE)
     obs <- 100 * sum(per$n * per$pct_in_range / 100 * per$pct_glob_in / 100) / sum(per$n * per$pct_in_range / 100)
-    cat(sprintf("calibration slope        = %.3f decades/fraction (%.2fx MW per fraction)\n", sl, 10^abs(sl)))
-    cat(sprintf("calibrated window        = %.2f fractions wide\n", win))
-    cat(sprintf("1x..%dx positions span    = %.2f fractions; +-%g tolerance each side\n",
-                max_oligomer, log10(max_oligomer)/abs(sl), tolerance_fractions))
-    cat(sprintf("=> accepting band        = %.2f fractions = %.1f%% of the window\n", band, null_pct))
-    cat(sprintf("\n   GEOMETRIC NULL  %.1f%%   vs   OBSERVED  %.1f%%   ->  excess %+.1f points\n",
+    cat(sprintf("\n   MEDIAN GEOMETRIC NULL  %.1f%%   vs   POOLED OBSERVED  %.1f%%   ->  excess %+.1f points\n",
                 null_pct, obs, obs - null_pct))
     if (obs - null_pct < 15)
       cat("   Most of the in-range globularity rate is the accepting band being nearly as wide as the\n",
@@ -164,6 +191,29 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
     else
       cat("   A substantial excess over geometry - the in-range rate carries real information.\n")
   }
+
+  # ---- 2c. DO ALL METABOLITES SHARE THE SAME SETUP? -------------------------------------------------
+  # A metabolite that stands out on every line is usually a different SETUP, not different biology.
+  cat("\n=========== 2c. AUDIT: is every metabolite comparable? ===========\n")
+  print(per[, .(metabolite, condition_used, n,
+                cal_slope = round(cal_slope, 3), cal_window_fr = round(cal_window_fr, 2),
+                n_standards, pct_in_range = round(pct_in_range, 1))])
+  .flag <- character(0)
+  if (length(unique(na.omit(per$condition_used))) > 1)
+    .flag <- c(.flag, paste0("CONDITION NAMES DIFFER: ", paste(unique(per$condition_used), collapse = " / "),
+                             " - check the regex picked the control rows in every case"))
+  if (diff(range(per$cal_slope, na.rm = TRUE)) > 0.02)
+    .flag <- c(.flag, sprintf("CALIBRATION SLOPES DIFFER by %.3f decades/fraction (%.3f to %.3f) - these comparisons do NOT share a calibration, so a metabolite can look anomalous purely because its curve is different",
+                              diff(range(per$cal_slope, na.rm = TRUE)), min(per$cal_slope, na.rm = TRUE), max(per$cal_slope, na.rm = TRUE)))
+  if (diff(range(per$cal_window_fr, na.rm = TRUE)) > 0.5)
+    .flag <- c(.flag, sprintf("CALIBRATED WINDOWS DIFFER by %.2f fractions (%.2f to %.2f)",
+                              diff(range(per$cal_window_fr, na.rm = TRUE)), min(per$cal_window_fr, na.rm = TRUE), max(per$cal_window_fr, na.rm = TRUE)))
+  if (length(unique(na.omit(per$n_standards))) > 1)
+    .flag <- c(.flag, paste0("DIFFERENT NUMBER OF STANDARDS: ", paste(sort(unique(per$n_standards)), collapse = " / ")))
+  if (length(.flag)) { cat("!! ", paste(.flag, collapse = "\n!! "), "\n", sep = "")
+    cat("   Do not pool these until it is resolved. An outlier metabolite is a SETUP question first.\n")
+  } else cat("=> All metabolites share the same condition naming, standards count, slope and window.\n",
+             "   An outlier is therefore about the data, not the setup.\n", sep = "")
 
   # ---- 3. range restriction ------------------------------------------------------------------------
   cat("\n=========== 3. IS THE rho DOUBLING JUST RANGE RESTRICTION? ===========\n")
