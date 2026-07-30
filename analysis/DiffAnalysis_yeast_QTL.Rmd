@@ -2333,12 +2333,86 @@ complexFeaturesCollapsed <- callapseByUniqueFeatureGroups(
 .complex_featureVals_file <- file.path(out_dir, "rdata", "complex_featureVals.RData")
 if(!file.exists(.complex_featureVals_file)){
 
-complex_featureVals <- extractFeatureVals(traces = pepTracesList_filtered_minN,
-                                          features = complexFeaturesCollapsed,
-                                          design_matrix = design_matrix,
-                                          extract = "subunits",
-                                          imputeZero = T,
-                                          verbose = F)
+# THIS IS THE STEP THAT STALLS THE COMPLEX SECTION (unnamed-chunk-31, ~76-77%). extractFeatureVals is
+# single-threaded and its cost scales with the TRACES it is handed, not with the number of features -
+# ~88 min per call on this data whatever the feature count. Handing it the whole peptide trace list
+# therefore pays that cost in full, and nothing was written until it finished, so an interrupted run
+# lost everything. Ported from the protein-level fix already in this file (and from Ecoli_PCM):
+# restrict the traces to the proteins that actually appear in the complex features (a hypothesis set
+# covers far fewer proteins than the whole proteome), and checkpoint in chunks so it survives an interrupt.
+.brk("complex extractFeatureVals -- SERIAL CCprofiler step, the usual stall point (chunk 31) ...")
+.cfv_chunk_dir <- file.path(out_dir, "rdata", "complex_featureVals_chunks")
+dir.create(.cfv_chunk_dir, recursive = TRUE, showWarnings = FALSE)
+if (!exists("complex_featureval_chunks")) complex_featureval_chunks <- 10L
+
+.extract_complex_chunked <- function() {
+  FT <- complexFeaturesCollapsed
+  idcol <- intersect(c("complex_id", "feature_id", "protein_id"), names(FT))[1]
+  if (is.na(idcol)) stop("no id column to split on")
+  ids <- unique(as.character(FT[[idcol]]))
+  if (length(ids) < 2 * complex_featureval_chunks) stop("too few features to be worth chunking")
+  .mk <- file.path(.cfv_chunk_dir, "chunk_count.txt")
+  if (file.exists(.mk)) {
+    prev <- suppressWarnings(as.integer(readLines(.mk, warn = FALSE)[1]))
+    if (is.finite(prev) && prev != complex_featureval_chunks) {
+      message("complex_featureval_chunks changed - discarding chunks from the old split.")
+      unlink(list.files(.cfv_chunk_dir, pattern = "^chunk_.*\\.rds$", full.names = TRUE))
+    }
+  }
+  writeLines(as.character(complex_featureval_chunks), .mk)
+  grp <- split(ids, cut(seq_along(ids), breaks = complex_featureval_chunks, labels = FALSE))
+  # the proteins a chunk needs: subunit accessions of the complexes in that chunk
+  pcol <- intersect(c("protein_id", "subunits_detected", "subunits_annotated"), names(FT))[1]
+  # SAFETY: if we cannot get subunit proteins, subsetting the traces is impossible and each chunk would
+  # silently fall back to the FULL trace list - i.e. pay the full multi-hour cost N times, far worse than
+  # one plain call. Bail out (the outer tryCatch then runs a single plain call) rather than risk that.
+  if (is.na(pcol)) stop("no subunit column (protein_id/subunits_detected/subunits_annotated) to subset traces by")
+  .allprot   <- unique(unlist(strsplit(as.character(FT[[pcol]]), "[;,]\\s*")))
+  .traceprot <- tryCatch(unique(pepTracesList_filtered_minN[[1]]$trace_annotation$protein_id), error = function(e) NULL)
+  # if the complex subunits cover most of the trace proteins, subsetting saves little and chunking would
+  # be slower than one plain call - so bail (the outer tryCatch runs the single plain call).
+  if (!length(.allprot)) stop("could not parse any subunit proteins from ", pcol, " - cannot subset traces")
+  if (!is.null(.traceprot) && length(.traceprot) &&
+      length(intersect(.allprot, .traceprot)) > 0.6 * length(.traceprot))
+    stop("subunit subsetting would keep >60% of the trace list - a plain call is cheaper than chunking")
+  out <- vector("list", length(grp)); t0 <- Sys.time(); first_new <- TRUE
+  for (k in seq_along(grp)) {
+    cf <- file.path(.cfv_chunk_dir, sprintf("chunk_%03d.rds", k))
+    if (file.exists(cf)) { out[[k]] <- readRDS(cf); next }
+    sub <- FT[as.character(FT[[idcol]]) %in% grp[[k]], ]
+    prot <- if (!is.na(pcol))
+      unique(unlist(strsplit(as.character(sub[[pcol]]), "[;,]\\s*"))) else NULL
+    st <- if (!is.null(prot) && length(prot))
+      tryCatch(subset(pepTracesList_filtered_minN, trace_subset_ids = prot,
+                      trace_subset_type = "protein_id"),
+               error = function(e) pepTracesList_filtered_minN) else pepTracesList_filtered_minN
+    out[[k]] <- extractFeatureVals(traces = st, features = sub, design_matrix = design_matrix,
+                                   extract = "subunits", imputeZero = T, verbose = F)
+    saveRDS(out[[k]], cf)
+    .brk(sprintf("  complex extractFeatureVals chunk %d/%d done (%.1f min elapsed)", k, length(grp),
+                 as.numeric(difftime(Sys.time(), t0, units = "mins"))))
+    if (first_new) {
+      .m <- as.numeric(difftime(Sys.time(), t0, units = "mins")); first_new <- FALSE
+      .brk(sprintf("  -> first new chunk %.1f min; %d left => about %.1f h to go",
+                   .m, length(grp) - k, .m * (length(grp) - k) / 60))
+    }
+  }
+  out <- out[!vapply(out, is.null, logical(1))]
+  if (!length(out)) stop("every chunk came back empty")
+  if (length(unique(vapply(out, function(z) paste(names(z), collapse = "|"), character(1)))) != 1L)
+    stop("chunks disagree on their columns - not safe to combine")
+  res <- data.table::rbindlist(out, use.names = TRUE, fill = FALSE)
+  if (inherits(out[[1]], "data.table")) res else as.data.frame(res)
+}
+
+complex_featureVals <- tryCatch(.extract_complex_chunked(), error = function(e) {
+  message("Chunked complex extraction not used (", conditionMessage(e), "); running one plain call.")
+  extractFeatureVals(traces = pepTracesList_filtered_minN,
+                     features = complexFeaturesCollapsed,
+                     design_matrix = design_matrix,
+                     extract = "subunits", imputeZero = T, verbose = F)
+})
+.brk("complex extractFeatureVals DONE")
 
 save(complex_featureVals, file = .complex_featureVals_file)}
 
@@ -2347,9 +2421,20 @@ if(file.exists(.complex_featureVals_file)){
 
 ######################################################################################
 
-complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
-                                             tracesList = pepTracesList_filtered_minN,
-                                             design_matrix = design_matrix)
+# Cache + breadcrumb the complex fillFeatureVals too, so the last serial step of the complex tail is
+# visible in the log and is not repeated on a re-render after the expensive extraction above.
+.complex_filled_file <- file.path(out_dir, "rdata", "complex_featureValsFilled.RData")
+if (file.exists(.complex_filled_file)) {
+  load(.complex_filled_file)
+  .brk("complex fillFeatureVals SKIPPED (loaded from cache)")
+} else {
+  .brk("complex fillFeatureVals -- SERIAL CCprofiler step ...")
+  complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
+                                               tracesList = pepTracesList_filtered_minN,
+                                               design_matrix = design_matrix)
+  save(complex_featureValsFilled, file = .complex_filled_file)
+  .brk("complex fillFeatureVals DONE and cached")
+}
 ```
 
 ## - differential
@@ -2361,6 +2446,7 @@ complex_featureValsFilled <- fillFeatureVals(featureVals = complex_featureVals,
 # create list to append to
 complex_DiffExprPep_list <- list()
 
+.brk("complex differential test (testDifferentialExpression per condition) ...")
 # Sample_id_treat / Condition fix - see the "compare local vs global" chunk above for the rationale.
 Sample_id_treat <- treatment_conditions   # condition label(s); compare each treatment vs the reference
 for(i in Sample_id_treat) {
@@ -2383,6 +2469,7 @@ for(i in Sample_id_treat) {
           # Append to the list
                     complex_DiffExprPep_list[[i]] <- complex_DiffExprPep_i
 }
+.brk("complex differential test DONE")
 ```
 
 ```{r}
