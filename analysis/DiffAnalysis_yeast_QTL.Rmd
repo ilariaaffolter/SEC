@@ -2363,6 +2363,18 @@ if (!exists("complex_featureval_chunks")) complex_featureval_chunks <- 10L
   grp <- split(ids, cut(seq_along(ids), breaks = complex_featureval_chunks, labels = FALSE))
   # the proteins a chunk needs: subunit accessions of the complexes in that chunk
   pcol <- intersect(c("protein_id", "subunits_detected", "subunits_annotated"), names(FT))[1]
+  # SAFETY: if we cannot get subunit proteins, subsetting the traces is impossible and each chunk would
+  # silently fall back to the FULL trace list - i.e. pay the full multi-hour cost N times, far worse than
+  # one plain call. Bail out (the outer tryCatch then runs a single plain call) rather than risk that.
+  if (is.na(pcol)) stop("no subunit column (protein_id/subunits_detected/subunits_annotated) to subset traces by")
+  .allprot   <- unique(unlist(strsplit(as.character(FT[[pcol]]), "[;,]\\s*")))
+  .traceprot <- tryCatch(unique(pepTracesList_filtered_minN[[1]]$trace_annotation$protein_id), error = function(e) NULL)
+  # if the complex subunits cover most of the trace proteins, subsetting saves little and chunking would
+  # be slower than one plain call - so bail (the outer tryCatch runs the single plain call).
+  if (!length(.allprot)) stop("could not parse any subunit proteins from ", pcol, " - cannot subset traces")
+  if (!is.null(.traceprot) && length(.traceprot) &&
+      length(intersect(.allprot, .traceprot)) > 0.6 * length(.traceprot))
+    stop("subunit subsetting would keep >60% of the trace list - a plain call is cheaper than chunking")
   out <- vector("list", length(grp)); t0 <- Sys.time(); first_new <- TRUE
   for (k in seq_along(grp)) {
     cf <- file.path(.cfv_chunk_dir, sprintf("chunk_%03d.rds", k))
