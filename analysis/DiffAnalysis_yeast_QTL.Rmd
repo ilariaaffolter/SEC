@@ -2446,30 +2446,53 @@ if (file.exists(.complex_filled_file)) {
 # create list to append to
 complex_DiffExprPep_list <- list()
 
-.brk("complex differential test (testDifferentialExpression per condition) ...")
+# CACHE the complex differential test. It is a single testDifferentialExpression_beniFix call (only one
+# treatment condition here), parallelised internally over feature groups - but for complexes with
+# extract = "subunits" there can be tens of thousands of groups, so it is genuinely slow (hours), NOT
+# hung. Its internal progress messages are buffered by knitr and so are invisible during the render;
+# the .brk lines below expose the job size and completion in render_progress.log instead. Once it
+# finishes it is cached, so a re-render never repeats it.
+.complex_diff_file <- file.path(out_dir, "rdata", "complex_DiffExprPep_list.RData")
+if (file.exists(.complex_diff_file)) {
+  load(.complex_diff_file)
+  .brk("complex differential test SKIPPED (loaded from cache)")
+} else {
 # Sample_id_treat / Condition fix - see the "compare local vs global" chunk above for the rationale.
 Sample_id_treat <- treatment_conditions   # condition label(s); compare each treatment vs the reference
 for(i in Sample_id_treat) {
-            
-          sample_vector <- c(i, ref_condition) 
-          
+
+          sample_vector <- c(i, ref_condition)
+
           #filter for just 0- and condition x
           complex_featureValsFilled_i <- complex_featureValsFilled %>%
             filter(Condition %in% sample_vector) %>%
             mutate(Condition = factor(Condition, levels = sample_vector)) %>%
             arrange(Condition)
 
+          # expose the job size so this step is not a black box: how many feature-groups the test will
+          # iterate (this is what determines the runtime), and the table it works on.
+          .ng <- tryCatch(data.table::uniqueN(as.data.table(complex_featureValsFilled_i),
+                            by = intersect(c("id","feature_id","complex_id","apex"),
+                                           names(complex_featureValsFilled_i))), error = function(e) NA)
+          .brk(sprintf("complex differential test START (condition '%s'): %s rows, ~%s feature-groups to test - this is slow but NOT hung",
+                       i, format(nrow(complex_featureValsFilled_i), big.mark=","),
+                       if (is.na(.ng)) "?" else format(.ng, big.mark=",")))
+          .t0 <- Sys.time()
 
           #' ## Perform peptide-level differential expression testing for all features
           complex_DiffExprPep_i <- testDifferentialExpression_beniFix(featureVals = complex_featureValsFilled_i,
                                                             compare_between = "Condition",
                                                             level = "peptide",
                                                             measuredOnly = FALSE)
-          
+
+          .brk(sprintf("complex differential test condition '%s' DONE in %.1f min", i,
+                       as.numeric(difftime(Sys.time(), .t0, units = "mins"))))
           # Append to the list
                     complex_DiffExprPep_list[[i]] <- complex_DiffExprPep_i
 }
-.brk("complex differential test DONE")
+save(complex_DiffExprPep_list, file = .complex_diff_file)
+.brk("complex differential test DONE and cached")
+}
 ```
 
 ```{r}
