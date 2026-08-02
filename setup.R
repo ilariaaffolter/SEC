@@ -50,7 +50,12 @@ cran_pkgs <- c(
   "data.table", "stringr", "ggplot2", "betareg", "lmtest", "ggrepel",
   "scales", "protti", "tidyverse", "DT", "readxl", "writexl", "UpSetR",
   "here", "fs", "ggpmisc", "rlist", "progress",
-  "foreach", "doParallel", "igraph"
+  "foreach", "doParallel", "igraph",
+  # also used by the .Rmd / helper scripts: janitor::clean_names, reshape2::melt
+  # (R/ccprofiler_fixes.R), knitr/rmarkdown (knit the report), patchwork (proteoform
+  # figures), and eulerr/ggVennDiagram/VennDiagram (scripts/diagnose_power_ceiling.R):
+  "janitor", "reshape2", "knitr", "rmarkdown",
+  "patchwork", "eulerr", "ggVennDiagram", "VennDiagram"
 )
 install.packages(cran_pkgs)
 
