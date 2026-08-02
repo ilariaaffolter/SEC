@@ -181,13 +181,19 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
     stop("Complex Portal file not found: '", complex_portal_file, "' (also tried data/raw/). ",
          "Pass complex_portal_file= or give an explicit vector of protein_ids.", call. = FALSE) }
   cp <- as.data.table(utils::read.csv(f, sep = "\t", header = TRUE, check.names = FALSE))
-  nm <- tolower(gsub("[^a-z0-9]+", "_", names(cp)))                # janitor::clean_names-equivalent
+  # janitor::clean_names-equivalent: collapse non-alphanumerics to "_" THEN lowercase.
+  # (must be [^A-Za-z0-9] - a lowercase-only class would eat every uppercase letter, incl. the leading one.)
+  nm <- tolower(gsub("^_+|_+$", "", gsub("[^A-Za-z0-9]+", "_", names(cp))))
   setnames(cp, names(cp), nm)
-  ac  <- grep("complex_ac|^x_complex_ac|^complex_ac", nm, value = TRUE)[1]
+  ac  <- grep("complex_ac", nm, value = TRUE)[1]
   nmc <- grep("recommended_name", nm, value = TRUE)[1]
   alc <- grep("aliases", nm, value = TRUE)[1]
   dsc <- grep("^description", nm, value = TRUE)[1]
-  plc <- grep("expanded_participant_list|participants_stoichiometry|participant", nm, value = TRUE)[1]
+  # participant/accession column: prefer expanded_participant_list (as the report does), else the
+  # "identifiers and stoichiometry of molecules" column. NB avoid bare "identifier" - that also matches
+  # taxonomy_identifier, which is NOT the participant column.
+  plc <- grep("expanded_participant_list|participant", nm, value = TRUE)[1]
+  if (is.na(plc)) plc <- grep("stoichiometry|molecules_in_complex", nm, ignore.case = TRUE, value = TRUE)[1]
   if (is.na(ac) || is.na(plc)) stop("Could not find the complex-id / participant columns in ", basename(f),
                                     ". Columns: ", paste(nm, collapse = ", "), call. = FALSE)
   # match query against id (with/without CPX-), name, alias, description
