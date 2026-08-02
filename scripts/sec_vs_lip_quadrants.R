@@ -83,9 +83,11 @@
 #
 # OUTPUT (output/sec_vs_lip_quadrants/):
 #   <hit_col>/tables/   contingency_per_metabolite.csv, contingency_pooled.csv, quadrant_membership.csv,
-#                       quadrant_counts.csv, metabolite_match_report.csv, GOenrichment_*.csv
+#                       quadrant_counts.csv, metabolite_match_report.csv, GOenrichment_*.csv (POOLED),
+#                       GO_per_metabolite/GO_<metabolite>_<quadrant>_<go>.csv (per-metabolite, if testable)
 #   <hit_col>/figures/  contingency_mosaic.pdf, quadrant_counts_bar.pdf, sec_volcano_by_lip.pdf,
-#                       GOenrichment_quadrants_<go>.pdf
+#                       GOenrichment_quadrants_<go>.pdf (POOLED, all 4 quadrants),
+#                       GOenrichment_per_metabolite_<go>.pdf (one page per metabolite x quadrant that is testable)
 #   <hit_col>/quadrant_interpretation.txt
 #   concentration_comparison_per_metabolite.csv   C1 vs C2 side by side (overlap, fold, Fisher p)
 #   concentration_comparison_pooled.csv           C1 vs C2 pooled over protein-metabolite pairs
@@ -390,7 +392,8 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 # LIP = data.table(accession, metabolite, is_hit logical, tested logical).
 .svl_run_one <- function(SEC, LIP, mode, present, U, gene_of, metabolites, raw_labels, outdir,
                          sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt,
-                         go_columns, go_min_genes, go_top_n, sig_col = NA_character_, sig_cut = 0.05,
+                         go_columns, go_min_genes, go_top_n, go_per_metabolite = TRUE,
+                         sig_col = NA_character_, sig_cut = 0.05,
                          tag = "", verbose = TRUE) {
   tdir <- file.path(outdir, "tables"); fdir <- file.path(outdir, "figures")
   dir.create(tdir, recursive = TRUE, showWarnings = FALSE)
@@ -491,27 +494,60 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
                   if (!is.null(ftu)) ftu$p.value else NA_real_))
   if (verbose) print(POOL)
 
-  # ---- GO over-representation per quadrant (pooled pairs; bg = pooled universe) ----
+  # ---- GO over-representation per quadrant ----
+  # (a) POOLED over all metabolites (foreground = every protein that is EVER in that quadrant; background =
+  #     the whole shared universe). This is the powered, all-metabolites view.
+  # (b) if go_per_metabolite: ONE GO PER METABOLITE per quadrant (foreground = proteins in that quadrant FOR
+  #     THAT metabolite; background = that metabolite's own universe). This matches the 6-panel SEC volcano -
+  #     one enrichment per metabolite - but per-metabolite quadrants are often tiny (especially SEC+/LiP+ for
+  #     low-hit metabolites), so many are too small to test and are skipped with a note (not forced).
   go_written <- character(0)
   qtoken <- c("SEC+/LiP+" = "SECpos_LiPpos", "SEC+/LiP-" = "SECpos_LiPneg",
               "SEC-/LiP+" = "SECneg_LiPpos", "SEC-/LiP-" = "SECneg_LiPneg")
+  relevant_q <- c("SEC+/LiP+", "SEC+/LiP-", "SEC-/LiP+")   # the 3 informative quadrants for the per-metabolite view
   if (!is.null(U)) {
-    bg <- unique(QUAD$accession)
+    bg_all <- unique(QUAD$accession)
+    pmdir <- file.path(tdir, "GO_per_metabolite")
+    if (isTRUE(go_per_metabolite)) dir.create(pmdir, recursive = TRUE, showWarnings = FALSE)
     for (go in go_columns) {
       if (!go %in% names(U)) next
+      # (a) POOLED (all 4 quadrants)
       plots <- list()
       for (q in qlev) {
         fg <- unique(QUAD[quadrant == q, accession])
-        tbl <- .svl_go_enrichment(fg, bg, U, id_col = "accession", go_col = go, min_genes = go_min_genes, top_n = go_top_n)
+        tbl <- .svl_go_enrichment(fg, bg_all, U, id_col = "accession", go_col = go, min_genes = go_min_genes, top_n = go_top_n)
         if (!is.null(tbl) && nrow(tbl)) {
           fwrite(tbl, file.path(tdir, paste0("GOenrichment_", qtoken[[q]], "_", go, ".csv")))
-          plots[[q]] <- .svl_go_barplot(tbl, paste0(lab, q, "  -  ", go, "  (n=", length(fg), ", bg=", length(bg), ")"))
+          plots[[q]] <- .svl_go_barplot(tbl, paste0(lab, "POOLED  ", q, "  -  ", go, "  (n=", length(fg), ", bg=", length(bg_all), ")"))
         }
       }
       if (length(plots)) {
         grDevices::pdf(file.path(fdir, paste0("GOenrichment_quadrants_", go, ".pdf")), width = 9, height = 6)
         for (p in plots) print(p); grDevices::dev.off()
         go_written <- c(go_written, go)
+      }
+      # (b) PER METABOLITE (3 informative quadrants x each metabolite; bg = that metabolite's universe)
+      if (isTRUE(go_per_metabolite)) {
+        pm_pages <- list()
+        for (m in both) {
+          bg_m <- unique(QUAD[metabolite == m, accession])
+          for (q in relevant_q) {
+            fg <- unique(QUAD[metabolite == m & quadrant == q, accession])
+            if (length(fg) < go_min_genes) {
+              if (verbose) message(sprintf("  %sGO %s | %s / %s: only %d protein(s) -> too small, skipped.", lab, go, m, q, length(fg)))
+              next
+            }
+            tbl <- .svl_go_enrichment(fg, bg_m, U, id_col = "accession", go_col = go, min_genes = go_min_genes, top_n = go_top_n)
+            if (!is.null(tbl) && nrow(tbl)) {
+              fwrite(tbl, file.path(pmdir, paste0("GO_", m, "_", qtoken[[q]], "_", go, ".csv")))
+              pm_pages[[paste(m, q)]] <- .svl_go_barplot(tbl, paste0(lab, m, "  ", q, "  -  ", go, "  (n=", length(fg), ", bg=", length(bg_m), ")"))
+            } else if (verbose) message(sprintf("  %sGO %s | %s / %s: n=%d but no GO term shared by >=%d of them.", lab, go, m, q, length(fg), go_min_genes))
+          }
+        }
+        if (length(pm_pages)) {
+          grDevices::pdf(file.path(fdir, paste0("GOenrichment_per_metabolite_", go, ".pdf")), width = 9, height = 6)
+          for (p in pm_pages) print(p); grDevices::dev.off()
+        }
       }
     }
   } else message(lab, "NOTE: no output/uniprot_annotation_shared.RData -> GO enrichment skipped.")
@@ -618,6 +654,7 @@ sec_vs_lip_quadrants <- function(
     enrichment_alt   = c("greater", "two.sided", "less"),
     go_columns       = c("go_p", "go_f", "go_c"),
     go_min_genes     = 2, go_top_n = 15,
+    go_per_metabolite = TRUE,                                  # also run GO per metabolite (not just pooled)
     out_subdir       = "sec_vs_lip_quadrants",
     verbose          = TRUE) {
 
@@ -671,6 +708,7 @@ sec_vs_lip_quadrants <- function(
                                     metabolites = metabolites, raw_labels = PS$raw_labels,
                                     outdir = here("output", out_subdir, hc),
                                     sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt, go_columns, go_min_genes, go_top_n,
+                                    go_per_metabolite = go_per_metabolite,
                                     sig_col = NA_character_, sig_cut = sig_cut, tag = hc, verbose = verbose)
     }
     if (length(results) >= 2) .svl_write_concentration_comparison(results, here("output", out_subdir), verbose)
@@ -681,6 +719,7 @@ sec_vs_lip_quadrants <- function(
                                         metabolites = metabolites, raw_labels = P$raw_labels,
                                         outdir = here("output", out_subdir),
                                         sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt, go_columns, go_min_genes, go_top_n,
+                                        go_per_metabolite = go_per_metabolite,
                                         sig_col = P$sig_col, sig_cut = sig_cut, tag = "", verbose = verbose)
   }
   message("\nAll done. Root: ", here("output", out_subdir))
