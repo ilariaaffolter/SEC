@@ -397,18 +397,19 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   lab <- if (nzchar(tag)) paste0("[", tag, "] ") else ""
 
-  # match report for THIS hit definition
+  # match report for THIS hit definition. NB the id column must NOT be called `key` - `key` is a reserved
+  # argument of data.table() (it would try to SET the table key to k instead of making a column).
   match_report <- rbindlist(lapply(metabolites, function(k) data.table(
-    key = k, matched = k %in% LIP$metabolite,
+    metabolite = k, matched = k %in% LIP$metabolite,
     n_lip_hits   = LIP[metabolite == k & is_hit == TRUE, uniqueN(accession)],
     n_lip_tested = if (mode == "background") LIP[metabolite == k & tested == TRUE, uniqueN(accession)] else NA_integer_)))
   fwrite(match_report, file.path(tdir, "metabolite_match_report.csv"))
-  unmatched <- match_report[matched == FALSE, key]
+  unmatched <- match_report[matched == FALSE, metabolite]
   if (length(unmatched)) message("\n*** ", lab, "NOT MATCHED in the Piazza data: ", paste(unmatched, collapse = ", "),
                                  " ***  (labels present: ", paste(utils::head(raw_labels, 60), collapse = " | "), ")")
   if (verbose) { message(lab, "metabolite match report:"); print(match_report) }
 
-  both <- intersect(names(SEC), match_report[matched == TRUE, key])
+  both <- intersect(names(SEC), match_report[matched == TRUE, metabolite])
   if (!length(both)) stop(lab, "No metabolite present in BOTH the SEC runs and the Piazza data after name-matching.\n",
                           "See ", file.path(tdir, "metabolite_match_report.csv"), " and pass metabolite_map=.", call. = FALSE)
   message(lab, "metabolites usable on both axes: ", paste(sort(both), collapse = ", "))
