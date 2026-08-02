@@ -90,9 +90,29 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
     # the argument. That was a bug in the first version of this script.
     ffo <- if ("ffo_vs_monomer" %in% names(G)) G$ffo_vs_monomer else rep(NA_real_, nrow(G))
     ffo_floor <- 1 / globular_ffo
+
+    # THE CORE QUESTION: does elution actually track monomer mass at all? Two forms.
+    #  (a) rho_pos_mass = Spearman(apex_fraction, log10 monomer mass). CALIBRATION-FREE - no apparent MW,
+    #      no standards curve, no circularity. This is the honest test of "is SEC separating by size".
+    #  (b) rho_app_exp = Spearman(log10 apparent MW, log10 monomer mass). The apparent~expected correlation
+    #      the globular-standard framework relies on; but apparent MW = f(apex_fraction), a monotone
+    #      transform, so in-range this is just (a) re-expressed, and out-of-range it is dominated by the
+    #      extrapolated tail. Reported for completeness, but (a) is the one to trust.
+    .cor <- function(x, y, sub) {
+      ok <- sub & is.finite(x) & is.finite(y)
+      if (sum(ok) < 10) return(NA_real_)
+      suppressWarnings(stats::cor(x[ok], y[ok], method = "spearman"))
+    }
+    lem <- if ("expected_mw_kDa" %in% names(G)) log10(G$expected_mw_kDa) else rep(NA_real_, nrow(G))
+    lam <- if ("apparent_mw_kDa" %in% names(G)) log10(G$apparent_mw_kDa) else rep(NA_real_, nrow(G))
+    apx <- if ("apex_fraction"   %in% names(G)) as.numeric(G$apex_fraction) else rep(NA_real_, nrow(G))
     data.table(
       metabolite        = m,
       n                 = nrow(G),
+      rho_pos_mass_in   = .cor(apx, lem, inr),           # calibration-free, in calibrated range
+      rho_pos_mass_all  = .cor(apx, lem, rep(TRUE, nrow(G))),
+      rho_app_exp_in    = .cor(lam, lem, inr),           # apparent~expected, in range
+      rho_app_exp_all   = .cor(lam, lem, rep(TRUE, nrow(G))),
       condition_used    = cond_used,
       cal_slope         = slope,
       cal_window_fr     = win,
@@ -277,6 +297,28 @@ reconcile_calibration_claims <- function(metabolites = NULL, condition = NULL,
       "   THIS IS YOUR STRONGEST NUMBER. Physics falsifying the calibration precisely where it is\n   extrapolated, with no definitional circularity anywhere in it.\n"
       else "   No clear contrast, so this line of argument is not available. Rely on the coverage figure instead.\n")
   }
+
+  # ---- 5. THE CORE ASSUMPTION: does elution track monomer mass? ------------------------------------
+  cat("\n=========== 5. DOES ELUTION TRACK MONOMER MASS? (the assumption the whole approach rests on) ===========\n")
+  cat("rho_pos_mass = Spearman(apex fraction, log10 monomer mass) - CALIBRATION-FREE, no circularity.\n")
+  cat("rho_app_exp  = Spearman(log10 apparent MW, log10 monomer mass) - the apparent~expected correlation itself.\n\n")
+  print(per[, .(metabolite,
+                rho_pos_mass_in  = round(rho_pos_mass_in, 3),
+                rho_pos_mass_all = round(rho_pos_mass_all, 3),
+                rho_app_exp_in   = round(rho_app_exp_in, 3),
+                rho_app_exp_all  = round(rho_app_exp_all, 3))])
+  .rpi <- median(abs(per$rho_pos_mass_in),  na.rm = TRUE)
+  .rpa <- median(abs(per$rho_pos_mass_all), na.rm = TRUE)
+  cat(sprintf("\n=> median |rho(position, monomer mass)|:  IN-RANGE %.2f  (%.0f%% of variance)  |  ALL %.2f  (%.0f%%)\n",
+              .rpi, 100 * .rpi^2, .rpa, 100 * .rpa^2))
+  cat(if (.rpi >= 0.7)
+    "   Strong in-range: for well-behaved proteins, elution does track monomer mass - the assumption holds there.\n"
+    else if (.rpi >= 0.4)
+    "   MODERATE in-range: elution reflects monomer mass, but loosely - most of the variance is NOT monomer mass\n   (assembly and shape), so treat apparent MW as an approximation, not a measurement of monomer size.\n"
+    else
+    "   WEAK: elution barely tracks monomer mass even in range - apparent MW is not a reliable proxy for monomer size.\n")
+  cat("   Note ALL < IN-RANGE is expected: out-of-range apparent MW is extrapolated, which degrades the relationship.\n")
+  cat("   The GAP between the two rho columns is itself a measure of how much the extrapolation costs.\n")
 
   dir.create(here("output", "surface"), recursive = TRUE, showWarnings = FALSE)
   fwrite(per, here("output", "surface", "calibration_claims_reconciled.csv"))
