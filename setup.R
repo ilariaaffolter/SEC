@@ -50,7 +50,10 @@ cran_pkgs <- c(
   "data.table", "stringr", "ggplot2", "betareg", "lmtest", "ggrepel",
   "scales", "protti", "tidyverse", "DT", "readxl", "writexl", "UpSetR",
   "here", "fs", "ggpmisc", "rlist", "progress",
-  "foreach", "doParallel", "igraph"
+  "foreach", "doParallel", "igraph",
+  # also used by the .Rmd / helper scripts (janitor::clean_names, reshape2::melt in
+  # R/ccprofiler_fixes.R, and knitr/rmarkdown to knit the report and render comparisons):
+  "janitor", "reshape2", "knitr", "rmarkdown"
 )
 install.packages(cran_pkgs)
 
