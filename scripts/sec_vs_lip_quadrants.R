@@ -47,57 +47,49 @@
 #
 # THE UNIVERSE (this is the whole game for the enrichment p-value):
 #   An overlap count on its own is meaningless without the set of proteins that
-#   COULD have been a hit on BOTH axes. Two modes, chosen automatically from the
-#   Piazza file you give:
-#     BACKGROUND MODE (you provide Piazza's full tested table with a q/p column):
-#       universe[m] = {SEC-measured proteins} INTERSECT {LiP-tested proteins for m}
-#       LiP+ = q < cut ; LiP- = tested but not significant. This is the rigorous
-#       mode and the enrichment p-value is trustworthy.
-#     HITLIST MODE (you provide only Piazza's significant hits, no background):
-#       universe[m] = {SEC-measured proteins} INTERSECT {proteins present ANYWHERE
-#       in the Piazza file}. LiP+ = in Piazza's hit list for m ; LiP- = the rest.
-#       *** FLAGGED LIMITATION: here "LiP-" mixes "tested-not-significant" with
-#       "not-tested-for-this-metabolite". The overlap COUNT is exact, but the
-#       enrichment p-value is an approximation - state it as such. ***
+#   COULD have been a hit on BOTH axes.
+#     BACKGROUND MODE (the file states which proteins were tested-but-NOT-a-hit -
+#       e.g. a q/p column, or a TRUE/FALSE validation column where FALSE = tested,
+#       not a hit): universe[m] = {SEC-measured} INTERSECT {LiP-tested for m};
+#       LiP+ = validated/significant, LiP- = tested but not. p-values trustworthy.
+#     HITLIST MODE (only Piazza's hits, no background): universe[m] = {SEC-measured}
+#       INTERSECT {proteins present anywhere in the file}. LiP- then mixes
+#       tested-not-hit with not-tested -> overlap COUNTS exact, p APPROXIMATE.
 #
-# INPUTS YOU MUST PROVIDE:
-#   piazza_file = the Piazza et al. 2018 LiP-SMap supplementary table, as .csv /
-#   .tsv / .txt (or .xlsx if the `readxl` package is installed). The script is
-#   format-tolerant: it auto-detects the accession column and either a metabolite
-#   column (LONG layout: one row per protein-metabolite) or per-metabolite columns
-#   (WIDE layout), and PRINTS everything it decided so you can correct it. Piazza
-#   2018 = Piazza A. et al., "A Map of Protein-Metabolite Interactions Reveals
-#   Principles of Chemical Communication", Cell 172:358 (2018).
+# INPUTS YOU MAY PROVIDE (two layouts, auto-detected):
+#   A) PER-METABOLITE SHEETS (this study's Piazza export): an .xlsx workbook with ONE SHEET PER
+#      METABOLITE (sheet name = metabolite), each sheet carrying a UniProtKB_ID accession column and one
+#      or more TRUE/FALSE validation columns (is_C1_validated, is_C2_validated). Every row = a
+#      LiP-TESTED protein; TRUE = a LiP hit at that concentration -> BACKGROUND mode (trustworthy p).
+#      The analysis is run once PER hit column (default BOTH C1 and C2) into its own sub-folder, and a
+#      C1-vs-C2 comparison table is written. C1 is the concentration that matches the SEC conditions
+#      (the fair comparison); C2 is ~10x higher.
+#   B) A SINGLE FLAT TABLE (.csv/.tsv/.xlsx): accession + a metabolite column (LONG) or per-metabolite
+#      columns (WIDE), optionally a q/p column (-> background) else treated as a hit list.
+#   `readxl` is required to read .xlsx.
 #
 # METABOLITE-NAME MATCHING (Piazza's naming -> your run keys):
-#   Your keys are ADP, aKG, ATP, NAD, PEP, PGP. The default synonym map is taken
-#   from this repo's own .INTERACTOR_REGEX (scripts/validation_candidates.R) so it
-#   is faithful to how the pipeline already defines each compound. PGP is the one
-#   to double-check: in this codebase PGP = 6-phosphogluconate. Every match (and
-#   every UNMATCHED key, with the full list of Piazza names) is printed; override
-#   with `metabolite_map =` if the file names anything differently.
+#   Your keys are ADP, aKG, ATP, NAD, PEP, PGP. Sheet/column names AKG, PEP, ATP, ADP, NAD, PGP map
+#   automatically (AKG -> aKG). Sheets that map to no SEC key (Pyr, L-Phe, ...) are skipped with a note.
+#   The synonym map is taken from this repo's own .INTERACTOR_REGEX (validation_candidates.R). PGP is the
+#   one to double-check: here PGP = 6-phosphogluconate. Override with `metabolite_map =`.
 #
 # USAGE (RStudio console, project open):
 #   source(here::here("scripts", "sec_vs_lip_quadrants.R"))
-#   sec_vs_lip_quadrants(piazza_file = "~/Downloads/piazza2018_LiP.csv")
-#   sec_vs_lip_quadrants(piazza_file = "...", metabolites = c("ATP","ADP","aKG"))
-#   sec_vs_lip_quadrants(piazza_file = "...", piazza_sig_col = "qvalue",
-#                        piazza_sig_cut = 0.01)                     # force bg mode
-#   sec_vs_lip_quadrants(piazza_file = "...",
-#                        metabolite_map = list(PGP = c("2,3-bisphosphoglycerate")))
+#   sec_vs_lip_quadrants(piazza_file = "~/Downloads/piazza_C1C2.xlsx")            # runs C1 AND C2
+#   sec_vs_lip_quadrants(piazza_file = "...", piazza_hit_col = "is_C1_validated") # C1 only
+#   sec_vs_lip_quadrants(piazza_file = "...", metabolites = c("ATP","aKG"))
+#   sec_vs_lip_quadrants(piazza_file = "...", metabolite_map = list(PGP = c("6-phosphogluconate")))
 #
 # OUTPUT (output/sec_vs_lip_quadrants/):
-#   tables/contingency_per_metabolite.csv   a,b,c,d + Fisher p, OR, fold-enrichment
-#   tables/contingency_pooled.csv           pair-level and protein-union pooling
-#   tables/quadrant_membership.csv          every protein-metabolite pair + class
-#   tables/quadrant_counts.csv              metabolite x quadrant counts
-#   tables/metabolite_match_report.csv      key -> matched Piazza name(s), n hits
-#   tables/GOenrichment_<quadrant>_<go>.csv per-quadrant GO over-representation
-#   quadrant_interpretation.txt             the biology of each corner, in words
-#   figures/contingency_mosaic.pdf          the 2x2, per metabolite + pooled
-#   figures/quadrant_counts_bar.pdf         class sizes per metabolite
-#   figures/sec_volcano_by_lip.pdf          SEC volcano, points coloured by LiP
-#   figures/GOenrichment_quadrants_<go>.pdf per-quadrant GO bar plots
+#   <hit_col>/tables/   contingency_per_metabolite.csv, contingency_pooled.csv, quadrant_membership.csv,
+#                       quadrant_counts.csv, metabolite_match_report.csv, GOenrichment_*.csv
+#   <hit_col>/figures/  contingency_mosaic.pdf, quadrant_counts_bar.pdf, sec_volcano_by_lip.pdf,
+#                       GOenrichment_quadrants_<go>.pdf
+#   <hit_col>/quadrant_interpretation.txt
+#   concentration_comparison_per_metabolite.csv   C1 vs C2 side by side (overlap, fold, Fisher p)
+#   concentration_comparison_pooled.csv           C1 vs C2 pooled over protein-metabolite pairs
+#   (a SINGLE flat-table input writes directly under output/sec_vs_lip_quadrants/ with no sub-folders)
 # =============================================================================
 
 suppressPackageStartupMessages({ library(here); library(data.table); library(ggplot2) })
@@ -177,6 +169,17 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   out <- rep(NA_character_, length(x)); out[nzchar(m)] <- toupper(m[nzchar(m)]); out
 }
 
+# coerce a TRUE/FALSE-ish column (logical, "TRUE"/"FALSE", "yes"/"no", 1/0, "validated") to logical.
+.svl_as_logical <- function(v) {
+  if (is.logical(v)) return(v)
+  if (is.numeric(v)) return(v != 0)
+  s <- tolower(trimws(as.character(v)))
+  out <- rep(NA, length(s))
+  out[s %in% c("true", "t", "yes", "y", "1", "validated")] <- TRUE
+  out[s %in% c("false", "f", "no", "n", "0", "", "na", "not validated")] <- FALSE
+  out
+}
+
 # default metabolite synonym map - faithful to this repo's .INTERACTOR_REGEX (validation_candidates.R).
 # PGP = 6-phosphogluconate in this codebase; VERIFY against the Piazza file naming and override if needed.
 .SVL_METAB_SYNONYMS <- list(
@@ -204,9 +207,60 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   NA_character_
 }
 
-# ---- read the Piazza table into a tidy long form: (accession, metabolite_key, is_hit, tested) -------
-# returns list(long = data.table, mode = "background"|"hitlist", present = <all accessions in file>,
-#              match_report = data.table, sig_col = <name or NA>)
+# ---- read a PER-METABOLITE-SHEET workbook (sheet name = metabolite; TRUE/FALSE validation columns) --
+# returns list(long = dt[accession, metabolite, tested, <hit_col>...], present, hit_cols, raw_labels)
+.svl_read_piazza_sheets <- function(path, syn_map, metabolites, sheets = NULL,
+                                    acc_col = NULL, hit_cols = c("is_C1_validated", "is_C2_validated"),
+                                    verbose = TRUE) {
+  if (!requireNamespace("readxl", quietly = TRUE))
+    stop("Reading the per-sheet Piazza workbook needs the `readxl` package: install.packages('readxl').", call. = FALSE)
+  all_sheets <- readxl::excel_sheets(path)
+  use_sheets <- if (is.null(sheets)) all_sheets else intersect(sheets, all_sheets)
+  if (verbose) message("  workbook sheets: ", paste(all_sheets, collapse = ", "))
+  parts <- list(); found_cols <- character(0)
+  for (sh in use_sheets) {
+    key <- .svl_label_to_key(sh, syn_map)
+    if (is.na(key) || !(key %in% metabolites)) { if (verbose) message("    sheet '", sh, "' -> no matching metabolite key, skipped."); next }
+    d <- tryCatch(as.data.table(readxl::read_excel(path, sheet = sh)), error = function(e) NULL)
+    if (is.null(d) || !nrow(d)) { if (verbose) message("    sheet '", sh, "' empty/unreadable, skipped."); next }
+    # accession column
+    ac <- acc_col
+    if (is.null(ac) || is.na(ac) || !(ac %in% names(d))) {
+      ac <- grep("^uniprotkb.?id$|uniprot.*id|^accession$|^protein.?id$|uniprotkb|uniprot.?acc", names(d),
+                 ignore.case = TRUE, value = TRUE)[1]
+      if (is.na(ac)) { sc <- vapply(names(d), function(cn) mean(!is.na(.svl_first_acc(d[[cn]]))), numeric(1))
+                       if (length(sc) && max(sc) >= 0.5) ac <- names(which.max(sc)) }
+    }
+    if (is.null(ac) || is.na(ac) || !(ac %in% names(d))) {
+      message("    sheet '", sh, "': no accession column found (looked for UniProtKB_ID). Columns: ",
+              paste(names(d), collapse = ", "), ". Pass acc_col=. Skipped."); next }
+    acc <- .svl_first_acc(d[[ac]])
+    colmap <- setNames(lapply(hit_cols, function(hc) grep(paste0("^", hc, "$"), names(d), ignore.case = TRUE, value = TRUE)[1]), hit_cols)
+    have <- hit_cols[!vapply(colmap, is.na, logical(1))]
+    miss <- setdiff(hit_cols, have)
+    if (length(miss)) message("    sheet '", sh, "' (", key, "): missing hit column(s) ", paste(miss, collapse = ", "),
+                              " -> those proteins count as tested/not-a-hit for that concentration.")
+    if (!length(have)) { message("    sheet '", sh, "': none of ", paste(hit_cols, collapse = ", "),
+                                 " present. Columns: ", paste(names(d), collapse = ", "), ". Skipped."); next }
+    found_cols <- union(found_cols, have)
+    dt <- data.table(accession = acc, metabolite = key, tested = !is.na(acc))
+    for (hc in have) dt[[hc]] <- .svl_as_logical(d[[ colmap[[hc]] ]])
+    dt <- dt[!is.na(accession)]
+    parts[[sh]] <- dt
+    if (verbose) message("    sheet '", sh, "' -> ", key, ": ", nrow(dt), " tested; ",
+                         paste(sprintf("%s=%d", have, vapply(have, function(hc) sum(dt[[hc]], na.rm = TRUE), integer(1))), collapse = ", "))
+  }
+  if (!length(parts)) stop("No usable per-metabolite sheet found in the workbook (none mapped to a SEC key, ",
+                           "or none had an accession + hit column).", call. = FALSE)
+  long <- rbindlist(parts, fill = TRUE)
+  for (hc in found_cols) { if (!hc %in% names(long)) long[[hc]] <- FALSE; long[[hc]][is.na(long[[hc]])] <- FALSE }
+  # a protein may appear more than once per sheet -> collapse: tested if tested anywhere, hit if TRUE anywhere
+  agg <- long[, c(list(tested = any(tested, na.rm = TRUE)),
+                  lapply(.SD, function(x) any(x, na.rm = TRUE))), by = .(accession, metabolite), .SDcols = found_cols]
+  list(long = agg, present = unique(agg$accession), hit_cols = found_cols, raw_labels = all_sheets)
+}
+
+# ---- read a SINGLE flat Piazza table into (accession, metabolite_key, is_hit, tested) --------------
 .svl_read_piazza <- function(piazza_file, syn_map, metabolites,
                              acc_col = NULL, metabolite_col = NULL, sig_col = NULL,
                              sig_cut = 0.05, is_hitlist = NA, verbose = TRUE) {
@@ -255,7 +309,6 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
   long <- NULL; layout <- NA_character_
 
   if (is.null(metabolite_col)) {
-    # LONG candidate: character column whose distinct values map to >=2 keys
     long_score <- vapply(ch, function(cn) {
       if (identical(cn, acc_col)) return(0L)
       vals <- unique(as.character(raw[[cn]])); vals <- vals[!is.na(vals) & nzchar(vals)]
@@ -277,13 +330,13 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
     } else { d[, .is_hit := TRUE][, .tested := TRUE] }   # hitlist: every row present is a hit
     long <- unique(d[, .(accession = .acc, metabolite = .key, is_hit = .is_hit, tested = .tested)])
   } else {
-    # WIDE: columns whose NAME matches a key's synonyms; a cell is a hit per its type
     name_key <- setNames(lapply(names(raw), .svl_label_to_key, syn_map = syn_map), names(raw))
     wide_cols <- names(raw)[!vapply(name_key, is.na, logical(1)) & names(raw) != acc_col]
     if (length(unique(unlist(name_key[wide_cols]))) < 1L)
       stop("Could not find a metabolite column (LONG) or per-metabolite columns (WIDE) in the Piazza file.\n",
            "Columns seen: ", paste(names(raw), collapse = ", "),
-           "\nPass metabolite_col = \"<label column>\", or rename/point the per-metabolite columns.", call. = FALSE)
+           "\nIf this is a one-sheet-per-metabolite workbook, that is auto-detected only for .xlsx.\n",
+           "Pass metabolite_col = \"<label column>\", or rename/point the per-metabolite columns.", call. = FALSE)
     layout <- "wide"
     if (verbose) message("  WIDE layout; per-metabolite columns: ",
                          paste(sprintf("%s->%s", wide_cols, unlist(name_key[wide_cols])), collapse = ", "))
@@ -291,38 +344,23 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
       k <- name_key[[cn]]; v <- raw[[cn]]
       num <- suppressWarnings(as.numeric(as.character(v)))
       if (!is.na(use_sig) || (is.numeric(v) && mean(num >= 0 & num <= 1, na.rm = TRUE) > 0.8)) {
-        hit <- is.finite(num) & num < sig_cut; tested <- is.finite(num)          # q/p-value cells
+        hit <- is.finite(num) & num < sig_cut; tested <- is.finite(num)
       } else if (is.logical(v)) { hit <- isTRUE(v) | (!is.na(v) & v); tested <- !is.na(v)
       } else { s <- trimws(as.character(v)); hit <- !is.na(s) & nzchar(s) & !(tolower(s) %in% c("na","0","false","-","."))
-               tested <- !is.na(v) }                                              # non-empty = a called hit
+               tested <- !is.na(v) }
       data.table(accession = raw$.acc, metabolite = k, is_hit = hit, tested = tested)
     })
     long <- unique(rbindlist(parts)[!is.na(accession)])
   }
 
-  # decide mode. BACKGROUND = the file actually tells us which proteins were tested-but-NOT-a-hit
-  # (a significance column, a 0/1 or TRUE/FALSE matrix, ...). Detected data-driven: does any row
-  # carry tested==TRUE while is_hit==FALSE? HITLIST = only hits are known.
   has_bg <- isTRUE(any(long$tested & !long$is_hit, na.rm = TRUE))
   mode <- if (!is.na(is_hitlist)) (if (isTRUE(is_hitlist)) "hitlist" else "background") else
           if (!is.na(use_sig) || has_bg) "background" else "hitlist"
-  if (mode == "hitlist") long[, tested := is_hit]   # in hitlist mode "tested" is unknown -> only hits are known
+  if (mode == "hitlist") long[, tested := is_hit]
 
-  # keep only the requested run keys
   long <- long[metabolite %in% metabolites]
-
-  # match report + all Piazza labels (so unmatched keys can be fixed)
-  present <- unique(long$accession)
   all_present <- unique(.svl_first_acc(raw[[acc_col]])); all_present <- all_present[!is.na(all_present)]
-  report <- rbindlist(lapply(metabolites, function(k) {
-    data.table(key = k,
-               matched = k %in% long$metabolite,
-               n_lip_hits = long[metabolite == k & is_hit, uniqueN(accession)],
-               n_lip_tested = if (mode == "background") long[metabolite == k & tested, uniqueN(accession)] else NA_integer_)
-  }))
-  attr(long, "all_present") <- all_present
-  list(long = long, mode = mode, present = all_present, match_report = report,
-       sig_col = use_sig, layout = layout, acc_col = acc_col,
+  list(long = long, mode = mode, present = all_present, sig_col = use_sig, layout = layout,
        raw_labels = if (identical(layout, "long")) sort(unique(as.character(raw[[metabolite_col]]))) else names(raw))
 }
 
@@ -348,84 +386,34 @@ suppressPackageStartupMessages({ library(here); library(data.table); library(ggp
 }
 
 # =====================================================================================================
-sec_vs_lip_quadrants <- function(
-    piazza_file      = NULL,
-    metabolites      = NULL,                       # default: every PCM_ctrl_vs_* run present
-    metabolite_map   = NULL,                       # override/extend the synonym map (named list)
-    acc_col          = NULL,                       # Piazza accession column (auto if NULL)
-    metabolite_col   = NULL,                       # Piazza metabolite label column (auto if NULL)
-    sig_col          = NULL,                       # Piazza q/p column -> BACKGROUND mode (auto-detected)
-    sig_cut          = 0.05,
-    is_hitlist       = NA,                          # force TRUE/FALSE; NA = decide from sig column
-    sec_pBHadj_cut   = 0.05,
-    sec_log2fc_cut   = 1,
-    enrichment_alt   = c("greater", "two.sided", "less"),
-    go_columns       = c("go_p", "go_f", "go_c"),
-    go_min_genes     = 2, go_top_n = 15,
-    out_subdir       = "sec_vs_lip_quadrants",
-    verbose          = TRUE) {
-
-  enrichment_alt <- match.arg(enrichment_alt)
-  outdir <- here("output", out_subdir)
+# CORE: one full quadrant analysis for a single LiP hit definition (one concentration), written to `outdir`.
+# LIP = data.table(accession, metabolite, is_hit logical, tested logical).
+.svl_run_one <- function(SEC, LIP, mode, present, U, gene_of, metabolites, raw_labels, outdir,
+                         sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt,
+                         go_columns, go_min_genes, go_top_n, sig_col = NA_character_, sig_cut = 0.05,
+                         tag = "", verbose = TRUE) {
   tdir <- file.path(outdir, "tables"); fdir <- file.path(outdir, "figures")
   dir.create(tdir, recursive = TRUE, showWarnings = FALSE)
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
+  lab <- if (nzchar(tag)) paste0("[", tag, "] ") else ""
 
-  syn_map <- .SVL_METAB_SYNONYMS
-  if (!is.null(metabolite_map)) for (k in names(metabolite_map)) syn_map[[k]] <- unique(c(syn_map[[k]], metabolite_map[[k]]))
+  # match report for THIS hit definition
+  match_report <- rbindlist(lapply(metabolites, function(k) data.table(
+    key = k, matched = k %in% LIP$metabolite,
+    n_lip_hits   = LIP[metabolite == k & is_hit == TRUE, uniqueN(accession)],
+    n_lip_tested = if (mode == "background") LIP[metabolite == k & tested == TRUE, uniqueN(accession)] else NA_integer_)))
+  fwrite(match_report, file.path(tdir, "metabolite_match_report.csv"))
+  unmatched <- match_report[matched == FALSE, key]
+  if (length(unmatched)) message("\n*** ", lab, "NOT MATCHED in the Piazza data: ", paste(unmatched, collapse = ", "),
+                                 " ***  (labels present: ", paste(utils::head(raw_labels, 60), collapse = " | "), ")")
+  if (verbose) { message(lab, "metabolite match report:"); print(match_report) }
 
-  # which metabolites: default = the SEC runs present on disk
-  if (is.null(metabolites)) {
-    dd <- list.dirs(here("output"), recursive = FALSE)
-    metabolites <- sub("^PCM_ctrl_vs_", "", basename(dd)[grepl("^PCM_ctrl_vs_", basename(dd))])
-    if (!length(metabolites)) metabolites <- c("PGP", "NAD", "aKG", "ATP", "ADP", "PEP")
-  }
-  metabolites <- unique(metabolites)
-  message("Metabolites: ", paste(sort(metabolites), collapse = ", "))
+  both <- intersect(names(SEC), match_report[matched == TRUE, key])
+  if (!length(both)) stop(lab, "No metabolite present in BOTH the SEC runs and the Piazza data after name-matching.\n",
+                          "See ", file.path(tdir, "metabolite_match_report.csv"), " and pass metabolite_map=.", call. = FALSE)
+  message(lab, "metabolites usable on both axes: ", paste(sort(both), collapse = ", "))
 
-  # ---- load both assays ----------------------------------------------------------------------------
-  message("Loading this study's SEC results ...")
-  SEC <- .svl_load_sec(metabolites, sec_pBHadj_cut, sec_log2fc_cut, verbose)
-  if (!length(SEC)) stop("No SEC results loaded - render at least one PCM_ctrl_vs_<metabolite> first.", call. = FALSE)
-
-  P <- .svl_read_piazza(piazza_file, syn_map, metabolites, acc_col, metabolite_col, sig_col,
-                        sig_cut, is_hitlist, verbose)
-  LIP <- P$long
-  message("Piazza mode: ", toupper(P$mode),
-          if (P$mode == "hitlist")
-            "  (LiP- mixes tested-not-significant with not-tested; overlap COUNTS exact, enrichment p approximate)"
-          else if (!is.na(P$sig_col)) paste0("  (significance column: ", P$sig_col, ", cut < ", sig_cut, ")")
-          else "  (tested/non-hit background read from the per-metabolite columns)")
-
-  # metabolite match report
-  fwrite(P$match_report, file.path(tdir, "metabolite_match_report.csv"))
-  unmatched <- P$match_report[matched == FALSE, key]
-  if (length(unmatched)) {
-    message("\n*** METABOLITES NOT MATCHED in the Piazza file: ", paste(unmatched, collapse = ", "), " ***")
-    message("    Distinct metabolite labels present in the file:")
-    message("      ", paste(utils::head(P$raw_labels, 60), collapse = " | "))
-    message("    Fix with metabolite_map = list(", unmatched[1], " = c(\"<name as written in the file>\")).\n")
-  }
-  if (verbose) { message("Metabolite match report:"); print(P$match_report) }
-
-  # keep metabolites that exist on BOTH sides
-  both <- intersect(names(SEC), P$match_report[matched == TRUE, key])
-  if (!length(both)) stop("No metabolite is present in BOTH the SEC runs and the Piazza file after name-matching.\n",
-                          "See tables/metabolite_match_report.csv and pass metabolite_map=.", call. = FALSE)
-  message("Metabolites usable on both axes: ", paste(sort(both), collapse = ", "))
-
-  U <- .svl_load_uniprot()
-  gene_of <- function(ids) {
-    g <- rep(NA_character_, length(ids))
-    if (!is.null(U) && "gene_names" %in% names(U)) g <- U$gene_names[match(ids, U$accession)]
-    # fall back to SEC-provided gene names
-    sg <- rbindlist(lapply(SEC, function(x) x$stat[, .(feature_id, gene)]), fill = TRUE)
-    sg <- unique(sg[!is.na(gene)]); g2 <- sg$gene[match(ids, sg$feature_id)]
-    ifelse(is.na(g) | !nzchar(g), g2, g)
-  }
-
-  # ---- per-metabolite quadrant assignment + 2x2 ----------------------------------------------------
-  lip_present_all <- P$present                       # LiP-observable proteome proxy (hitlist mode)
+  lip_present_all <- present
   qrows <- list(); crows <- list()
   quad_of <- function(sec, lip) fifelse(sec & lip, "SEC+/LiP+",
                                 fifelse(sec & !lip, "SEC+/LiP-",
@@ -435,59 +423,48 @@ sec_vs_lip_quadrants <- function(
     sec_meas <- SEC[[m]]$measured; sec_hit <- SEC[[m]]$hits
     lm <- LIP[metabolite == m]
     lip_hit    <- unique(lm[is_hit == TRUE, accession])
-    lip_tested <- if (P$mode == "background") unique(lm[tested == TRUE, accession]) else lip_present_all
-
-    universe <- if (P$mode == "background") intersect(sec_meas, lip_tested)
-                else intersect(sec_meas, lip_present_all)
-    if (!length(universe)) { message("  [", m, "] empty universe (no SEC-measured protein overlaps the LiP set) -> skipped."); next }
+    lip_tested <- if (mode == "background") unique(lm[tested == TRUE, accession]) else lip_present_all
+    universe   <- if (mode == "background") intersect(sec_meas, lip_tested) else intersect(sec_meas, lip_present_all)
+    if (!length(universe)) { message("  ", lab, "[", m, "] empty universe -> skipped."); next }
 
     sec <- universe %in% sec_hit
     lip <- universe %in% lip_hit
-    q   <- quad_of(sec, lip)
     st  <- SEC[[m]]$stat
     qrows[[m]] <- data.table(metabolite = m, accession = universe, gene = gene_of(universe),
-                             SEC_hit = sec, LiP_hit = lip, quadrant = q,
+                             SEC_hit = sec, LiP_hit = lip, quadrant = quad_of(sec, lip),
                              medianLog2FC = st$medianLog2FC[match(universe, st$feature_id)],
                              SEC_pBHadj  = st$pBHadj[match(universe, st$feature_id)])
 
-    a <- sum(sec & lip); b <- sum(sec & !lip); c <- sum(!sec & lip); d <- sum(!sec & !lip)
-    n <- a + b + c + d
+    a <- sum(sec & lip); b <- sum(sec & !lip); c <- sum(!sec & lip); d <- sum(!sec & !lip); n <- a + b + c + d
     exp_a <- (a + b) * (a + c) / n
-    ft <- tryCatch(stats::fisher.test(matrix(c(a, b, c, d), nrow = 2, byrow = TRUE), alternative = enrichment_alt),
-                   error = function(e) NULL)
-    hyp <- stats::phyper(a - 1, a + c, b + d, a + b, lower.tail = FALSE)   # over-rep of the overlap cell
+    ft  <- tryCatch(stats::fisher.test(matrix(c(a, b, c, d), nrow = 2, byrow = TRUE), alternative = enrichment_alt), error = function(e) NULL)
+    hyp <- stats::phyper(a - 1, a + c, b + d, a + b, lower.tail = FALSE)
     crows[[m]] <- data.table(
-      metabolite = m, mode = P$mode, n_universe = n,
-      SECpos = a + b, LiPpos = a + c,
+      metabolite = m, mode = mode, n_universe = n, SECpos = a + b, LiPpos = a + c,
       a_SECp_LiPp = a, b_SECp_LiPm = b, c_SECm_LiPp = c, d_SECm_LiPm = d,
       expected_overlap = round(exp_a, 2), fold_enrichment = if (exp_a > 0) round(a / exp_a, 2) else NA_real_,
       odds_ratio = if (!is.null(ft)) round(unname(ft$estimate), 3) else NA_real_,
-      fisher_p = if (!is.null(ft)) signif(ft$p.value, 3) else NA_real_,
-      hyper_p  = signif(hyp, 3))
-    message(sprintf("  [%s] universe=%d | SEC+ %d, LiP+ %d | overlap a=%d (exp %.1f, %.2gx) | Fisher p=%.2g",
-                    m, n, a + b, a + c, a, exp_a, if (exp_a > 0) a / exp_a else NA_real_,
+      fisher_p = if (!is.null(ft)) signif(ft$p.value, 3) else NA_real_, hyper_p = signif(hyp, 3))
+    message(sprintf("  %s[%s] universe=%d | SEC+ %d, LiP+ %d | overlap a=%d (exp %.1f, %.2gx) | Fisher p=%.2g",
+                    lab, m, n, a + b, a + c, a, exp_a, if (exp_a > 0) a / exp_a else NA_real_,
                     if (!is.null(ft)) ft$p.value else NA_real_))
   }
-  if (!length(qrows)) stop("No metabolite produced a non-empty quadrant table.", call. = FALSE)
+  if (!length(qrows)) stop(lab, "No metabolite produced a non-empty quadrant table.", call. = FALSE)
 
-  QUAD <- rbindlist(qrows, fill = TRUE)
-  CONT <- rbindlist(crows, fill = TRUE)
+  QUAD <- rbindlist(qrows, fill = TRUE); CONT <- rbindlist(crows, fill = TRUE)
   fwrite(QUAD, file.path(tdir, "quadrant_membership.csv"))
   fwrite(CONT, file.path(tdir, "contingency_per_metabolite.csv"))
 
-  # quadrant counts (metabolite x quadrant)
   qlev <- c("SEC+/LiP+", "SEC+/LiP-", "SEC-/LiP+", "SEC-/LiP-")
   QC <- dcast(QUAD[, .N, by = .(metabolite, quadrant)], metabolite ~ quadrant, value.var = "N", fill = 0)
   for (q in qlev) if (!q %in% names(QC)) QC[[q]] <- 0L
   setcolorder(QC, c("metabolite", qlev)); fwrite(QC, file.path(tdir, "quadrant_counts.csv"))
-  if (verbose) { message("\nQuadrant counts per metabolite:"); print(QC) }
+  if (verbose) { message(lab, "quadrant counts per metabolite:"); print(QC) }
 
-  # ---- pooling ------------------------------------------------------------------------------------
-  # (i) PAIR-LEVEL: each protein-metabolite pair is one observation (the correct pooled test)
+  # ---- pooling: (i) protein-metabolite PAIRS ; (ii) protein-level UNION (the Venn) ----
   poolA <- QUAD[, .(a = sum(SEC_hit & LiP_hit), b = sum(SEC_hit & !LiP_hit),
                     c = sum(!SEC_hit & LiP_hit), d = sum(!SEC_hit & !LiP_hit))]
-  a <- poolA$a; b <- poolA$b; c <- poolA$c; d <- poolA$d; n <- a + b + c + d
-  exp_a <- (a + b) * (a + c) / n
+  a <- poolA$a; b <- poolA$b; c <- poolA$c; d <- poolA$d; n <- a + b + c + d; exp_a <- (a + b) * (a + c) / n
   ftp <- tryCatch(stats::fisher.test(matrix(c(a, b, c, d), 2, byrow = TRUE), alternative = enrichment_alt), error = function(e) NULL)
   pair_row <- data.table(pooling = "pairs (protein x metabolite)", n_universe = n,
                          a_SECp_LiPp = a, b_SECp_LiPm = b, c_SECm_LiPp = c, d_SECm_LiPm = d,
@@ -495,11 +472,8 @@ sec_vs_lip_quadrants <- function(
                          odds_ratio = if (!is.null(ftp)) round(unname(ftp$estimate), 3) else NA_real_,
                          fisher_p = if (!is.null(ftp)) signif(ftp$p.value, 3) else NA_real_)
 
-  # (ii) PROTEIN-LEVEL UNION: SEC+ = hit for ANY metabolite; LiP+ = Piazza hit for ANY metabolite
-  #      (reproduces the study-vs-Piazza Venn number: this-study / Piazza / overlap)
   uni_universe <- unique(QUAD$accession)
-  sec_any <- unique(QUAD[SEC_hit == TRUE, accession])
-  lip_any <- unique(QUAD[LiP_hit == TRUE, accession])
+  sec_any <- unique(QUAD[SEC_hit == TRUE, accession]); lip_any <- unique(QUAD[LiP_hit == TRUE, accession])
   A <- length(intersect(sec_any, lip_any)); B <- length(setdiff(sec_any, lip_any))
   Cc <- length(setdiff(lip_any, sec_any)); D <- length(setdiff(uni_universe, union(sec_any, lip_any)))
   nU <- A + B + Cc + D; exp_A <- (A + B) * (A + Cc) / nU
@@ -511,14 +485,12 @@ sec_vs_lip_quadrants <- function(
                           fisher_p = if (!is.null(ftu)) signif(ftu$p.value, 3) else NA_real_)
   POOL <- rbindlist(list(pair_row, union_row), fill = TRUE)
   fwrite(POOL, file.path(tdir, "contingency_pooled.csv"))
-  message("\nProtein-level Venn (union over metabolites, within the shared universe):")
-  message(sprintf("  SEC hits (this study) = %d | LiP hits (Piazza) = %d | overlap = %d | SEC-only = %d | LiP-only = %d",
-                  length(sec_any), length(lip_any), A, B, Cc))
-  message(sprintf("  overlap fold-enrichment = %.2gx (expected %.1f) | Fisher p = %.2g",
-                  if (exp_A > 0) A / exp_A else NA_real_, exp_A, if (!is.null(ftu)) ftu$p.value else NA_real_))
-  if (verbose) { message("Pooled contingency:"); print(POOL) }
+  message(sprintf("  %sPOOLED union: SEC=%d LiP=%d overlap=%d (%.2gx, exp %.1f) Fisher p=%.2g",
+                  lab, length(sec_any), length(lip_any), A, if (exp_A > 0) A / exp_A else NA_real_, exp_A,
+                  if (!is.null(ftu)) ftu$p.value else NA_real_))
+  if (verbose) print(POOL)
 
-  # ---- GO over-representation per quadrant (pooled pairs; bg = pooled universe) ---------------------
+  # ---- GO over-representation per quadrant (pooled pairs; bg = pooled universe) ----
   go_written <- character(0)
   qtoken <- c("SEC+/LiP+" = "SECpos_LiPpos", "SEC+/LiP-" = "SECpos_LiPneg",
               "SEC-/LiP+" = "SECneg_LiPpos", "SEC-/LiP-" = "SECneg_LiPneg")
@@ -529,11 +501,10 @@ sec_vs_lip_quadrants <- function(
       plots <- list()
       for (q in qlev) {
         fg <- unique(QUAD[quadrant == q, accession])
-        tbl <- .svl_go_enrichment(fg, bg, U, id_col = "accession", go_col = go,
-                                  min_genes = go_min_genes, top_n = go_top_n)
+        tbl <- .svl_go_enrichment(fg, bg, U, id_col = "accession", go_col = go, min_genes = go_min_genes, top_n = go_top_n)
         if (!is.null(tbl) && nrow(tbl)) {
           fwrite(tbl, file.path(tdir, paste0("GOenrichment_", qtoken[[q]], "_", go, ".csv")))
-          plots[[q]] <- .svl_go_barplot(tbl, paste0(q, "  -  ", go, "  (n=", length(fg), ", bg=", length(bg), ")"))
+          plots[[q]] <- .svl_go_barplot(tbl, paste0(lab, q, "  -  ", go, "  (n=", length(fg), ", bg=", length(bg), ")"))
         }
       }
       if (length(plots)) {
@@ -542,10 +513,9 @@ sec_vs_lip_quadrants <- function(
         go_written <- c(go_written, go)
       }
     }
-  } else message("NOTE: no output/uniprot_annotation_shared.RData -> GO enrichment skipped (render a comparison first).")
+  } else message(lab, "NOTE: no output/uniprot_annotation_shared.RData -> GO enrichment skipped.")
 
-  # ---- figures -------------------------------------------------------------------------------------
-  # (a) 2x2 mosaic, per metabolite + pooled-pairs, cell = count, fill = fold-enrichment
+  # ---- figures ----
   mos <- rbindlist(lapply(both, function(m) {
     cc <- CONT[metabolite == m]; if (!nrow(cc)) return(NULL)
     data.table(panel = sprintf("%s (Fisher p=%.2g)", m, cc$fisher_p),
@@ -555,27 +525,22 @@ sec_vs_lip_quadrants <- function(
   mos_pool <- data.table(panel = sprintf("POOLED pairs (p=%.2g)", pair_row$fisher_p),
                          SEC = c("SEC+", "SEC+", "SEC-", "SEC-"), LiP = c("LiP+", "LiP-", "LiP+", "LiP-"),
                          n = c(a, b, c, d))
-  mos <- rbindlist(list(mos, mos_pool), fill = TRUE)
-  mos[, frac := n / sum(n), by = panel]
+  mos <- rbindlist(list(mos, mos_pool), fill = TRUE); mos[, frac := n / sum(n), by = panel]
   gm <- ggplot(mos, aes(LiP, factor(SEC, levels = c("SEC-", "SEC+")), fill = frac)) +
     geom_tile(colour = "white") + geom_text(aes(label = n), size = 4) +
     facet_wrap(~ panel) + scale_fill_gradient(low = "grey95", high = "firebrick") +
-    labs(title = "SEC x LiP contingency", subtitle = "cell = protein count; fill = share of that panel",
-         x = NULL, y = NULL, fill = "share") + theme_bw() + theme(legend.position = "right")
+    labs(title = paste0(lab, "SEC x LiP contingency"), subtitle = "cell = protein count; fill = share of that panel",
+         x = NULL, y = NULL, fill = "share") + theme_bw()
   ggsave(file.path(fdir, "contingency_mosaic.pdf"), gm, width = 10, height = 8)
 
-  # (b) quadrant-count bars per metabolite
   QL <- melt(QC, id.vars = "metabolite", variable.name = "quadrant", value.name = "n")
   QL[, quadrant := factor(quadrant, levels = qlev)]
-  gb <- ggplot(QL, aes(metabolite, n, fill = quadrant)) +
-    geom_col(position = "dodge") +
+  gb <- ggplot(QL, aes(metabolite, n, fill = quadrant)) + geom_col(position = "dodge") +
     scale_fill_manual(values = c("SEC+/LiP+" = "#b2182b", "SEC+/LiP-" = "#ef8a62",
                                  "SEC-/LiP+" = "#67a9cf", "SEC-/LiP-" = "grey80")) +
-    labs(title = "Quadrant sizes per metabolite", x = NULL, y = "proteins in the shared universe") +
-    theme_bw()
+    labs(title = paste0(lab, "quadrant sizes per metabolite"), x = NULL, y = "proteins in the shared universe") + theme_bw()
   ggsave(file.path(fdir, "quadrant_counts_bar.pdf"), gb, width = 9, height = 5)
 
-  # (c) SEC volcano, coloured by LiP status - shows WHERE the LiP+ proteins sit in SEC space
   V <- QUAD[is.finite(medianLog2FC) & is.finite(SEC_pBHadj)]
   V[, negLogP := -log10(pmax(SEC_pBHadj, .Machine$double.xmin))]
   gv <- ggplot(V[order(LiP_hit)], aes(medianLog2FC, negLogP, colour = LiP_hit)) +
@@ -584,52 +549,139 @@ sec_vs_lip_quadrants <- function(
     geom_vline(xintercept = c(-sec_log2fc_cut, sec_log2fc_cut), linetype = "dashed", colour = "grey60") +
     scale_colour_manual(values = c(`FALSE` = "grey75", `TRUE` = "#b2182b"), name = "LiP hit (Piazza)") +
     facet_wrap(~ metabolite, scales = "free_y") +
-    labs(title = "SEC differential (elution) volcano, coloured by LiP status",
+    labs(title = paste0(lab, "SEC differential (elution) volcano, coloured by LiP status"),
          subtitle = "red = also a Piazza LiP hit for that metabolite; dashed = SEC hit thresholds",
          x = "SEC medianLog2FC", y = "-log10(SEC pBHadj)") + theme_bw()
   ggsave(file.path(fdir, "sec_volcano_by_lip.pdf"), gv, width = 11, height = 7)
 
-  # ---- interpretation note (handover) --------------------------------------------------------------
+  # ---- interpretation note ----
+  bg_desc <- if (mode == "hitlist")
+    "  HITLIST mode: only Piazza's hits were available, so 'LiP-' mixes 'tested-not-significant' with 'not-tested'. Overlap COUNTS are exact; enrichment p-values are approximate."
+  else if (!is.na(sig_col) && nzchar(sig_col))
+    sprintf("  BACKGROUND mode via significance column '%s' (< %s): LiP- = tested-but-not-significant; p-values trustworthy.", sig_col, sig_cut)
+  else
+    sprintf("  BACKGROUND mode: every protein listed for a metabolite was LiP-TESTED; the TRUE rows of '%s' are LiP+, the FALSE rows are LiP- (tested, not a hit); p-values trustworthy.", tag)
   interp <- c(
-    "SEC x LiP quadrant analysis - what each corner means",
-    "=====================================================",
-    "",
-    sprintf("Mode: %s.", toupper(P$mode)),
-    if (P$mode == "hitlist")
-      "  HITLIST mode: only Piazza's significant hits were available, so 'LiP-' mixes 'tested-not-significant' with 'not-tested-for-this-metabolite'. The overlap COUNTS are exact; the enrichment p-values are approximate (interpret the direction and rough magnitude, not the exact value)."
-    else sprintf("  BACKGROUND mode: Piazza's full tested table was used (sig column '%s', cut < %s), so LiP- = tested-but-not-significant and the enrichment p-values are trustworthy.", P$sig_col, sig_cut),
-    "",
-    "SEC+/LiP+  binding that ALSO remodels assembly. Dual-validated: a local structural",
-    "           change (protease protection) AND a size/assembly change on the column.",
-    "           The strongest mechanistic candidates.",
-    "SEC+/LiP-  assembly change with NO local structural signature. UNIQUE TO SEC and",
-    "           invisible to LiP - the added value of the elution assay. Assembly driven",
-    "           through an interface Piazza's peptides never sampled.",
-    "SEC-/LiP+  classic ligand binding: a local conformational change with no size change.",
-    "           Expected to be the LARGEST hit-bearing class - it is what LiP is built for.",
-    "SEC-/LiP-  neither assay flagged it (the background).",
-    "",
-    "Why 'mostly non-overlapping' is the expected result, not a failure:",
-    "  SEC reads QUATERNARY state; LiP reads LOCAL structure. They are orthogonal, so they",
-    "  agree only where a binding event also changes the particle's size. The Fisher test",
-    "  asks whether the overlap they DO share (the SEC+/LiP+ corner) is larger than random",
-    "  co-occurrence would give: enrichment there means binding sometimes remodels assembly,",
-    "  even though most binding (SEC-/LiP+) and most assembly change (SEC+/LiP-) do not coincide.",
-    "",
-    "Where the pipeline already touches this descriptively (annotation-based, NOT the Piazza data):",
-    "  - scripts/hit_signature_analysis.R  : flags SEC hits that are annotated metabolite-binders",
-    "                                         (.INTERACTOR_REGEX) - an annotation proxy for 'LiP+'.",
-    "  - scripts/validation_candidates.R   : ranks SEC/EMD/CCF candidates and marks known binders",
-    "                                         as positive controls.",
-    "  This script is the first to cross the SEC hits against Piazza's EXPERIMENTAL LiP data.")
+    paste0("SEC x LiP quadrant analysis - what each corner means", if (nzchar(tag)) paste0("  [", tag, "]") else ""),
+    "=====================================================", "",
+    paste0("Mode: ", toupper(mode), "."), bg_desc, "",
+    "SEC+/LiP+  binding that ALSO remodels assembly. Dual-validated (protease protection AND a size change).",
+    "SEC+/LiP-  assembly change with NO local signature. UNIQUE TO SEC, invisible to LiP - the added value.",
+    "SEC-/LiP+  classic ligand binding: local change, no size change. Expected to be the largest hit class.",
+    "SEC-/LiP-  neither assay flagged it (background).", "",
+    "'Mostly non-overlapping' is expected: SEC reads QUATERNARY state, LiP reads LOCAL structure. They agree",
+    "only where binding also changes particle size. The Fisher test asks whether the SEC+/LiP+ corner is",
+    "larger than chance - enrichment there means binding sometimes remodels assembly, even though most",
+    "binding (SEC-/LiP+) and most assembly change (SEC+/LiP-) do not coincide.", "",
+    "Pipeline scripts that touch this descriptively (annotation-based, NOT the Piazza data):",
+    "  - scripts/hit_signature_analysis.R : SEC hits that carry ligand/nucleotide-binding annotation.",
+    "  - scripts/validation_candidates.R  : ranks candidates, marks known binders as positive controls.",
+    "  This script is the first to cross SEC hits against Piazza's EXPERIMENTAL LiP data.")
   writeLines(interp, file.path(outdir, "quadrant_interpretation.txt"))
 
-  message("\nDone. Written to: ", outdir)
-  message("  tables/   contingency_per_metabolite.csv, contingency_pooled.csv, quadrant_membership.csv,")
-  message("            quadrant_counts.csv, metabolite_match_report.csv, GOenrichment_*.csv")
-  message("  figures/  contingency_mosaic.pdf, quadrant_counts_bar.pdf, sec_volcano_by_lip.pdf,",
-          if (length(go_written)) paste0(" GOenrichment_quadrants_{", paste(go_written, collapse = ","), "}.pdf") else "")
-  message("  quadrant_interpretation.txt")
+  message(lab, "done -> ", outdir)
   invisible(list(contingency = CONT, pooled = POOL, quadrants = QUAD, counts = QC,
-                 match_report = P$match_report, mode = P$mode))
+                 match_report = match_report, mode = mode, tag = tag))
+}
+
+# ---- C1-vs-C2 (across hit columns) comparison -------------------------------------------------------
+.svl_write_concentration_comparison <- function(results, outdir, verbose = TRUE) {
+  cols <- names(results)
+  per <- Reduce(function(x, y) merge(x, y, by = "metabolite", all = TRUE), lapply(cols, function(hc) {
+    d <- results[[hc]]$contingency[, .(metabolite, n_universe, SECpos, LiPpos,
+                                       overlap = a_SECp_LiPp, expected_overlap, fold_enrichment, odds_ratio, fisher_p)]
+    setnames(d, setdiff(names(d), "metabolite"), paste0(hc, "__", setdiff(names(d), "metabolite"))); d
+  }))
+  fwrite(per, file.path(outdir, "concentration_comparison_per_metabolite.csv"))
+  pool <- rbindlist(lapply(cols, function(hc) cbind(hit_col = hc, results[[hc]]$pooled[pooling %like% "pairs"])), fill = TRUE)
+  fwrite(pool, file.path(outdir, "concentration_comparison_pooled.csv"))
+  message("\nConcentration comparison (", paste(cols, collapse = " vs "), ") written to ", outdir)
+  if (verbose) { message("Per metabolite:"); print(per); message("Pooled (pairs):"); print(pool) }
+  invisible(list(per_metabolite = per, pooled = pool))
+}
+
+# =====================================================================================================
+sec_vs_lip_quadrants <- function(
+    piazza_file      = NULL,
+    metabolites      = NULL,                                   # default: every PCM_ctrl_vs_* run present
+    metabolite_map   = NULL,                                   # override/extend the synonym map
+    piazza_hit_col   = c("is_C1_validated", "is_C2_validated"),# per-sheet workbook: TRUE/FALSE hit column(s)
+    piazza_sheets    = NULL,                                   # per-sheet: restrict to these sheet names
+    acc_col          = NULL,                                   # accession column (auto if NULL)
+    metabolite_col   = NULL,                                   # single-table LONG label column (auto)
+    sig_col          = NULL,                                   # single-table q/p column (auto)
+    sig_cut          = 0.05,
+    is_hitlist       = NA,
+    sec_pBHadj_cut   = 0.05,
+    sec_log2fc_cut   = 1,
+    enrichment_alt   = c("greater", "two.sided", "less"),
+    go_columns       = c("go_p", "go_f", "go_c"),
+    go_min_genes     = 2, go_top_n = 15,
+    out_subdir       = "sec_vs_lip_quadrants",
+    verbose          = TRUE) {
+
+  enrichment_alt <- match.arg(enrichment_alt)
+  syn_map <- .SVL_METAB_SYNONYMS
+  if (!is.null(metabolite_map)) for (k in names(metabolite_map)) syn_map[[k]] <- unique(c(syn_map[[k]], metabolite_map[[k]]))
+
+  if (is.null(metabolites)) {
+    dd <- list.dirs(here("output"), recursive = FALSE)
+    metabolites <- sub("^PCM_ctrl_vs_", "", basename(dd)[grepl("^PCM_ctrl_vs_", basename(dd))])
+    if (!length(metabolites)) metabolites <- c("PGP", "NAD", "aKG", "ATP", "ADP", "PEP")
+  }
+  metabolites <- unique(metabolites)
+  message("Metabolites (SEC keys): ", paste(sort(metabolites), collapse = ", "))
+
+  message("Loading this study's SEC results ...")
+  SEC <- .svl_load_sec(metabolites, sec_pBHadj_cut, sec_log2fc_cut, verbose)
+  if (!length(SEC)) stop("No SEC results loaded - render at least one PCM_ctrl_vs_<metabolite> first.", call. = FALSE)
+
+  U <- .svl_load_uniprot()
+  gene_of <- function(ids) {
+    g <- rep(NA_character_, length(ids))
+    if (!is.null(U) && "gene_names" %in% names(U)) g <- U$gene_names[match(ids, U$accession)]
+    sg <- rbindlist(lapply(SEC, function(x) x$stat[, .(feature_id, gene)]), fill = TRUE)
+    sg <- unique(sg[!is.na(gene)]); g2 <- sg$gene[match(ids, sg$feature_id)]
+    ifelse(is.na(g) | !nzchar(g), g2, g)
+  }
+
+  # ---- dispatch: per-metabolite-sheet workbook vs single flat table ----
+  path <- .svl_resolve_file(piazza_file)
+  ext  <- tolower(tools::file_ext(path))
+  per_sheet <- FALSE
+  if (ext %in% c("xlsx", "xls") && requireNamespace("readxl", quietly = TRUE)) {
+    shts <- tryCatch(readxl::excel_sheets(path), error = function(e) character(0))
+    if (sum(vapply(shts, function(s) !is.na(.svl_label_to_key(s, syn_map)), logical(1))) >= 1) per_sheet <- TRUE
+  }
+
+  results <- list()
+  if (per_sheet) {
+    message("Layout: PER-METABOLITE SHEETS (background mode - each sheet's rows are the LiP-tested set; ",
+            "TRUE rows of the hit column are LiP+).")
+    PS <- .svl_read_piazza_sheets(path, syn_map, metabolites, piazza_sheets, acc_col, piazza_hit_col, verbose)
+    if (!length(PS$hit_cols)) stop("None of the hit columns (", paste(piazza_hit_col, collapse = ", "),
+                                   ") were found in any sheet. Pass piazza_hit_col= with the exact name(s).", call. = FALSE)
+    message("Running for hit column(s): ", paste(PS$hit_cols, collapse = ", "),
+            "  (C1 matches the SEC concentration; C2 is ~10x higher)")
+    for (hc in PS$hit_cols) {
+      message("\n================ ", hc, " ================")
+      LIP <- PS$long[, .(accession, metabolite, is_hit = as.logical(get(hc)), tested = tested)][!is.na(accession)]
+      results[[hc]] <- .svl_run_one(SEC, LIP, mode = "background", present = PS$present, U = U, gene_of = gene_of,
+                                    metabolites = metabolites, raw_labels = PS$raw_labels,
+                                    outdir = here("output", out_subdir, hc),
+                                    sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt, go_columns, go_min_genes, go_top_n,
+                                    sig_col = NA_character_, sig_cut = sig_cut, tag = hc, verbose = verbose)
+    }
+    if (length(results) >= 2) .svl_write_concentration_comparison(results, here("output", out_subdir), verbose)
+  } else {
+    message("Layout: SINGLE flat table.")
+    P <- .svl_read_piazza(piazza_file, syn_map, metabolites, acc_col, metabolite_col, sig_col, sig_cut, is_hitlist, verbose)
+    results[["single"]] <- .svl_run_one(SEC, P$long, mode = P$mode, present = P$present, U = U, gene_of = gene_of,
+                                        metabolites = metabolites, raw_labels = P$raw_labels,
+                                        outdir = here("output", out_subdir),
+                                        sec_pBHadj_cut, sec_log2fc_cut, enrichment_alt, go_columns, go_min_genes, go_top_n,
+                                        sig_col = P$sig_col, sig_cut = sig_cut, tag = "", verbose = verbose)
+  }
+  message("\nAll done. Root: ", here("output", out_subdir))
+  invisible(if (length(results) == 1) results[[1]] else results)
 }
